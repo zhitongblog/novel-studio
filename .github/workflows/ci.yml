@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  node:
+    name: Node 引擎语法检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: node --check 全部 .mjs（引擎零依赖，无需 install）
+        shell: bash
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            node --check "$f" || { echo "❌ $f"; fail=1; }
+          done < <(find . -name '*.mjs' -not -path './node_modules/*')
+          [ "$fail" = 0 ] && echo "✅ 全部 .mjs 语法通过"
+          exit $fail
+
+  tauri-check:
+    name: Tauri 桌面外壳编译检查 (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: cargo check
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
