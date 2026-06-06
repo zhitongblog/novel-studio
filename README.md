@@ -1,5 +1,11 @@
 # 📚 Novel Studio · 网文工作室
 
+[![CI](https://github.com/zhitongblog/novel-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/zhitongblog/novel-studio/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A518-339933?logo=node.js&logoColor=white)](package.json)
+[![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white)](desktop/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](#)
+
 把 **Unterm** + **Codex / Claude Code / Gemini CLI** 编排起来，自动进行**多本长篇网文写作**，并在写作过程中**自动监控、自动应答**——AI 一发问就自动继续或采纳推荐项，无需盯着窗口。
 
 > **三种界面，同一引擎**：
@@ -140,5 +146,14 @@ novel mcp             # 作为 MCP server 运行（见 mcp.json）
 2. 轮询 `~/.unterm/instances/*.json` 定位新实例，拿到 `mcp_port` + `auth_token`。
 3. TCP 连接该端口 → `auth.login {token}` → 用点号方法名驱动：`session.list` / `session.status`(busy) / `screen.text`(读屏) / `session.input`(注入按键) / `proxy.switch`(开代理)。
 4. `Autopilot` 循环：busy 时等待；屏幕稳定且像在等待时，按规则注入应答。
+
+## 📄 License
+
+[MIT](./LICENSE) © 2026 zhitongblog
+
+> 仓库只含**程序源码**，不含书稿（书稿在独立的书库目录）、本地配置与 API Key。
+> 自带 `.github/workflows/ci.yml`：Node 引擎 `node --check` 语法检查 + Tauri 外壳 `cargo check`（Windows）。
+
+---
 
 — 生成于 Novel Studio，遵循 doaipm「高保真优先、speak it & AI builds it」。
