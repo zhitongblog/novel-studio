@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Novel Studio · 网文工作室</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 侧栏 -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">📚</div>
+        <div>
+          <div class="brand-title">Novel Studio</div>
+          <div class="brand-sub">网文工作室</div>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="shelf"><span>📖</span> 书架</button>
+        <button class="nav-item" data-view="usage"><span>📊</span> Token 用量</button>
+        <button class="nav-item" data-view="settings"><span>⚙️</span> 设置</button>
+        <button class="nav-item" data-view="env"><span>🩺</span> 环境</button>
+      </nav>
+      <div class="engine-status">
+        <span class="dot" id="engineDot"></span><span id="engineText">连接引擎…</span>
+      </div>
+    </aside>
+
+    <!-- 主区 -->
+    <main class="main">
+      <!-- 书架 -->
+      <section class="view" id="view-shelf">
+        <header class="view-head">
+          <h1>书架</h1>
+          <button class="btn" id="btnImport">📂 导入文件夹</button>
+          <button class="btn primary" id="btnNewBook">＋ 新建书</button>
+        </header>
+        <div class="shelf" id="shelf"></div>
+      </section>
+
+      <!-- 写作工作台 -->
+      <section class="view hidden" id="view-write">
+        <header class="view-head">
+          <button class="btn ghost" id="btnBack">← 书架</button>
+          <h1 id="writeTitle">写作</h1>
+          <div class="grow"></div>
+          <span class="badge" id="writeTokens">tokens 0</span>
+          <span class="badge" id="writeStatus">未开始</span>
+        </header>
+        <div class="workbench">
+          <div class="wb-left">
+            <label class="field">
+              <span>模型</span>
+              <select id="writeModel"></select>
+            </label>
+            <label class="field">
+              <span>写作指令</span>
+              <textarea id="writeTask" rows="5" placeholder="例如：续写下一批 3 章，写完自检"></textarea>
+            </label>
+            <div class="btn-row">
+              <button class="btn primary" id="btnStart">▶ 开始写作</button>
+              <button class="btn danger" id="btnStop" disabled>■ 停止</button>
+            </div>
+            <div class="btn-row">
+              <button class="btn" id="btnReview">🔍 复检</button>
+              <button class="btn" id="btnOutline">📋 大纲审稿</button>
+              <button class="btn" id="btnStyle">🎨 文风</button>
+              <button class="btn" id="btnCover">🖼️ 封面</button>
+            </div>
+            <div class="synopsis-box">
+              <div class="syn-head">
+                <span>📄 简介（约150字，可改）</span>
+                <span class="syn-actions">
+                  <button class="btn tiny" id="btnGenSyn">✍️ 生成</button>
+                  <button class="btn tiny" id="btnCopySyn">📋 复制</button>
+                </span>
+              </div>
+              <textarea id="synText" rows="4" placeholder="点&quot;生成&quot;让 AI 写一段约150字简介；可手动编辑，失焦自动保存，方便复制发布…"></textarea>
+            </div>
+            <label class="field"><span>目标章节数（0=不限；写到就自动停）</span>
+              <input id="wbTarget" type="number" min="0" placeholder="0" /></label>
+            <div class="send-box">
+              <input id="sendInput" placeholder="穿插一条指令到正在写作的窗口…" />
+              <button class="btn" id="btnSend">穿插</button>
+            </div>
+            <div class="log-feed" id="logFeed"></div>
+          </div>
+          <div class="wb-right">
+            <div class="mirror-head"><span class="dot live" id="mirrorDot"></span> 实时镜像 · Unterm 窗口</div>
+            <pre class="mirror" id="mirror">（开始写作后，这里实时显示 AI 写作过程）</pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- 用量 -->
+      <section class="view hidden" id="view-usage">
+        <header class="view-head"><h1>Token 用量</h1></header>
+        <div class="usage-list" id="usageList"></div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="view hidden" id="view-settings">
+        <header class="view-head"><h1>设置</h1></header>
+        <div class="settings" id="settings"></div>
+      </section>
+
+      <!-- 环境 -->
+      <section class="view hidden" id="view-env">
+        <header class="view-head"><h1>环境自检</h1></header>
+        <div class="env" id="env"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 新建书弹窗 -->
+  <div class="modal hidden" id="modal">
+    <div class="modal-card">
+      <button class="modal-close" id="modalClose" title="关闭 (Esc)">✕</button>
+      <!-- 步骤1：极简立项 -->
+      <div id="nbStep1">
+        <h2>新建书 · AI 立项</h2>
+        <p class="modal-hint">只说题材和目标字数，AI 来起名、定设定、规划全卷大纲、开写。</p>
+        <label class="field"><span>题材 / 想法 *</span><textarea id="nbTheme" rows="3" placeholder="如：民国上海，落魄国术家查案复仇，弱系统只记录不出手"></textarea></label>
+        <div class="grid2">
+          <label class="field"><span>目标总字数</span>
+            <div class="with-unit"><input id="nbWords" type="number" min="1" placeholder="如 150" /><span class="unit">万字</span></div>
+          </label>
+          <label class="field"><span>模型</span><select id="nbModel"></select></label>
+        </div>
+        <label class="field"><span>文风</span><select id="nbStyle"></select></label>
+        <div class="btn-row end">
+          <button class="btn ghost" id="nbCancel">取消</button>
+          <button class="btn primary" id="nbPropose">AI 立项 →</button>
+        </div>
+        <div class="modal-err" id="nbErr"></div>
+        <div class="adv-toggle" id="nbSelfNameLink">✍️ 我自己起名（跳过 AI 建议，直接立项）</div>
+        <div class="adv-toggle" id="nbImportToggle">📂 导入已有文件夹（继续写半成品）</div>
+        <div class="adv hidden" id="nbImport">
+          <label class="field"><span>文件夹</span>
+            <div class="pick-row"><input id="nbImpDir" placeholder="点右边选择，或粘贴完整路径" /><button type="button" class="btn" id="nbImpBrowse">📁 选择…</button></div>
+          </label>
+          <label class="field"><span>书名（留空=用文件夹名）</span><input id="nbImpTitle" placeholder="可留空" /></label>
+          <label class="field"><span>模型</span><select id="nbImpModel"></select></label>
+          <div class="btn-row end"><button class="btn primary" id="nbImpBtn">导入并继续写 ▶</button></div>
+          <div class="modal-hint">会读已写章节、恢复设定与剧情，补全缺失的大纲/索引，然后从最新章节接着写。不会改动已写的章节。</div>
+          <div class="modal-err" id="nbImpErr"></div>
+        </div>
+        <div class="adv-toggle" id="nbAdvToggle">▸ 高级：手动填写</div>
+        <div class="adv hidden" id="nbAdv">
+          <label class="field"><span>书名</span><input id="nbTitle" placeholder="自己取名" /></label>
+          <label class="field"><span>类型 / 卖点</span><input id="nbGenre" placeholder="民国·国术·以武正道" /></label>
+          <div class="grid2">
+            <label class="field"><span>计划卷数</span><input id="nbVolumes" placeholder="6" /></label>
+            <label class="field"><span>每卷约章数</span><input id="nbCpv" placeholder="180" /></label>
+            <label class="field"><span>每批章数</span><input id="nbBatch" placeholder="3" /></label>
+          </div>
+          <div class="btn-row end"><button class="btn" id="nbManualCreate">仅创建（不开写）</button></div>
+        </div>
+      </div>
+      <!-- 步骤2：定书名（可挑AI建议、可改、可自己写） -->
+      <div id="nbStep2" class="hidden">
+        <h2>定书名</h2>
+        <label class="field"><span>最终书名 *</span><input id="nbFinalTitle" placeholder="点下面候选填入即可改，或直接自己写" /></label>
+        <div class="modal-hint">下面是 AI 据题材的建议，点一个填进上面，可任意修改；不喜欢就自己写。</div>
+        <div id="nbLoading" class="nb-loading hidden">AI 构思中…</div>
+        <div id="nbTitles" class="nb-titles"></div>
+        <div class="btn-row end">
+          <button class="btn ghost" id="nbBack2">← 返回</button>
+          <button class="btn" id="nbRegen">换一批建议</button>
+          <button class="btn primary" id="nbLaunch" disabled>确认并开写 ▶</button>
+        </div>
+        <div class="modal-err" id="nbErr2"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 复检弹窗 -->
+  <div class="modal hidden" id="reviewModal">
+    <div class="modal-card">
+      <button class="modal-close" id="rvClose" title="关闭 (Esc)">✕</button>
+      <h2>🔍 复检</h2>
+      <p class="modal-hint">让 AI 复核并修正已写内容：逻辑/设定矛盾就地改、文风就地润色、故事合理性给方案、节奏/格局给前瞻提速方案。不改范围外章节、不新增后续章。</p>
+      <label class="field"><span>范围 <span id="rvBookInfo" class="dim-note"></span></span>
+        <select id="rvRangeType">
+          <option value="all">全书</option>
+          <option value="vol">指定卷</option>
+          <option value="chap">章号区间</option>
+          <option value="recent">最近 N 章</option>
+        </select>
+      </label>
+      <label class="field hidden" id="rvVolWrap"><span>选卷</span><select id="rvVol"></select></label>
+      <div class="field hidden" id="rvChapWrap"><span>章号区间</span>
+        <div class="range-inputs"><input id="rvFrom" type="number" min="1" placeholder="起" /><span>—</span><input id="rvTo" type="number" min="1" placeholder="止" /></div>
+      </div>
+      <label class="field hidden" id="rvRecentWrap"><span>最近</span>
+        <div class="with-unit"><input id="rvRecent" type="number" min="1" value="10" /><span class="unit">章</span></div>
+      </label>
+      <div class="field"><span>复检维度（默认全选）</span>
+        <div class="check-row">
+          <label class="chk"><input type="checkbox" id="rvLogic" checked> 逻辑</label>
+          <label class="chk"><input type="checkbox" id="rvStyle" checked> 文风</label>
+          <label class="chk"><input type="checkbox" id="rvPlaus" checked> 故事合理性</label>
+          <label class="chk"><input type="checkbox" id="rvPace" checked> 节奏/格局</label>
+        </div>
+      </div>
+      <div class="btn-row end">
+        <button class="btn ghost" id="rvCancel">取消</button>
+        <button class="btn primary" id="rvStart">开始复检 ▶</button>
+      </div>
+      <div class="modal-err" id="rvErr"></div>
+    </div>
+  </div>
+
+  <!-- 大纲审稿弹窗 -->
+  <div class="modal hidden" id="outlineModal">
+    <div class="modal-card">
+      <button class="modal-close" id="olClose" title="关闭 (Esc)">✕</button>
+      <h2>📋 大纲审稿</h2>
+      <p class="modal-hint">换<b>另一个模型</b>当主编，按节奏/格局/爽点/逻辑/伏笔/规模审你的大纲，给出【硬伤/隐患/建议】分档意见，写入 reviews/大纲审稿-xxx.md。意见只供作者参考修订，不直接改大纲。</p>
+      <label class="field"><span>审稿范围 <span id="olBookInfo" class="dim-note"></span></span>
+        <select id="olScope"><option value="立项">立项 / 全书大纲</option></select>
+      </label>
+      <label class="chk" style="margin:6px 0"><input type="checkbox" id="olInject"> 若正在写作，把修订意见顺手穿插给作者</label>
+      <div class="btn-row end">
+        <button class="btn ghost" id="olCancel">取消</button>
+        <button class="btn primary" id="olStart">开始审稿 ▶</button>
+      </div>
+      <div class="modal-err" id="olErr"></div>
+      <div class="ol-result hidden" id="olResult">
+        <div class="dim-note" id="olMeta"></div>
+        <pre id="olCritique"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文风弹窗 -->
+  <div class="modal hidden" id="styleModal">
+    <div class="modal-card">
+      <button class="modal-close" id="stClose" title="关闭 (Esc)">✕</button>
+      <h2>🎨 文风</h2>
+      <p class="modal-hint">选一个文风，或让 AI 据本书题材推荐。改完会重写本书写作规范，下次写作即生效（已写章节不变）。</p>
+      <label class="field"><span>文风</span><select id="stSelect"></select></label>
+      <div id="stRec" class="modal-hint"></div>
+      <div class="btn-row end">
+        <button class="btn" id="stAiRec">🤖 AI 推荐</button>
+        <button class="btn ghost" id="stCancel">取消</button>
+        <button class="btn primary" id="stApply">应用</button>
+      </div>
+      <div class="modal-err" id="stErr"></div>
+    </div>
+  </div>
+
+  <!-- 封面弹窗 -->
+  <div class="modal hidden" id="coverModal">
+    <div class="modal-card" style="width: 640px;">
+      <button class="modal-close" id="cvClose" title="关闭 (Esc)">✕</button>
+      <h2>🖼️ 生成封面</h2>
+      <div class="cover-wrap">
+        <div class="cover-left">
+          <label class="field"><span>书名</span><input id="cvTitle" /></label>
+          <label class="field"><span>作者名</span><input id="cvAuthor" placeholder="如：佚名" /></label>
+          <label class="field"><span>主题</span><select id="cvTheme"></select></label>
+          <div class="ai-cover-box">
+            <button class="btn" id="cvGenAI" style="width:100%">🎨 AI 生成封面插画（Imagen）</button>
+            <textarea id="cvPrompt" class="ai-prompt" rows="3" placeholder="可留空（自动按题材/文风生成英文画面提示词），或自己写一句英文画面描述…"></textarea>
+            <div class="modal-hint">用 Google Imagen 出竖版插画做底图，再叠加书名/作者。生成约需 10–20 秒。</div>
+          </div>
+          <div class="modal-hint">封面 600×800，保存为书目录下 cover.png。</div>
+          <div class="btn-row">
+            <button class="btn" id="cvDownload">⬇️ 下载</button>
+            <button class="btn primary" id="cvSave">保存到书</button>
+          </div>
+          <div class="modal-err" id="cvErr"></div>
+        </div>
+        <div class="cover-preview"><canvas id="cvCanvas" width="600" height="800"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 删除确认弹窗 -->
+  <div class="modal hidden" id="delModal">
+    <div class="modal-card">
+      <button class="modal-close" id="dlClose" title="关闭 (Esc)">✕</button>
+      <h2>删除这本书？</h2>
+      <p class="modal-hint" id="dlName"></p>
+      <label class="chk"><input type="checkbox" id="dlFiles"> 同时删除磁盘上的整个文件夹（含所有已写章节，<b style="color:var(--red)">不可恢复</b>）</label>
+      <p class="modal-hint">不勾选则只从书架移除、保留磁盘文件。</p>
+      <div class="btn-row end">
+        <button class="btn ghost" id="dlCancel">取消</button>
+        <button class="btn danger" id="dlConfirm">删除</button>
+      </div>
+      <div class="modal-err" id="dlErr"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

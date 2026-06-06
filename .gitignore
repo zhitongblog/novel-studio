@@ -1,0 +1,24 @@
+# Rust 编译产物（2.3G，绝不入库）
+desktop/src-tauri/target/
+**/target/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log
+
+# 运行时/本地状态（含用户配置与可能的 API Key，绝不入库）
+.studio/
+*.log
+.DS_Store
+Thumbs.db
+
+# 本地打包产物
+dist/
+*.tgz
+*.zip
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

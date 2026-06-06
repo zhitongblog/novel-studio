@@ -1,0 +1,27 @@
+{
+  "name": "novel-studio",
+  "version": "1.0.1",
+  "description": "网文工作室 — 自动编排 Unterm + Codex/Claude/Gemini CLI 进行多本长篇网文写作，含自动监控应答（autopilot）。",
+  "type": "module",
+  "bin": {
+    "novel": "bin/novel.mjs"
+  },
+  "scripts": {
+    "start": "node bin/novel.mjs",
+    "doctor": "node bin/novel.mjs doctor",
+    "mcp": "node bin/novel.mjs mcp"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "mcp.json",
+    "README.md",
+    "novel.cmd",
+    "启动 Novel Studio.cmd"
+  ],
+  "keywords": ["webnovel", "writing", "unterm", "codex", "claude", "gemini", "cli", "mcp", "autopilot"],
+  "license": "MIT"
+}

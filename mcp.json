@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "novel-studio": {
+      "command": "node",
+      "args": ["D:\\PM\\storybook\\novel-studio\\bin\\novel.mjs", "mcp"],
+      "description": "网文工作室：管理多本书并自动编排 Unterm + Codex/Claude/Gemini 写作"
+    }
+  }
+}

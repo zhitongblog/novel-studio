@@ -1,0 +1,35 @@
+// 路径与常量集中管理
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export const HOME = os.homedir();
+
+// 应用根目录（novel-studio/）
+export const APP_DIR = path.resolve(fileURLToPath(import.meta.url), '..', '..');
+
+// 应用配置目录 ~/.novel-studio
+export const CONFIG_DIR = path.join(HOME, '.novel-studio');
+export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+export const BOOKS_FILE = path.join(CONFIG_DIR, 'books.json');
+export const LOG_DIR = path.join(CONFIG_DIR, 'logs');
+
+// Unterm 相关
+export const UNTERM_HOME = path.join(HOME, '.unterm');
+export const UNTERM_INSTANCES_DIR = path.join(UNTERM_HOME, 'instances');
+export const UNTERM_PROXY_FILE = path.join(UNTERM_HOME, 'proxy.json');
+
+// Unterm 可执行文件候选位置（按优先级）
+export const UNTERM_EXE_CANDIDATES = [
+  process.env.UNTERM_EXE,
+  path.join('C:', 'Program Files', 'Unterm', 'unterm.exe'),
+  path.join('C:', 'Program Files', 'Unterm', 'unterm-cli.exe'),
+].filter(Boolean);
+
+export const UNTERM_CLI_CANDIDATES = [
+  process.env.UNTERM_CLI,
+  path.join('C:', 'Program Files', 'Unterm', 'unterm-cli.exe'),
+].filter(Boolean);
+
+// 默认书库工作区：D:\PM\storybook\books （APP_DIR 的上级 / books）
+export const DEFAULT_WORKSPACE = path.join(path.dirname(APP_DIR), 'books');
