@@ -18,6 +18,18 @@ function gitInit(dir) {
   } catch {}
 }
 
+// 重写/重立项前自动 git 存档，返回 short hash（供"可回退"提示）。best-effort。
+export function gitSnapshot(dir, message) {
+  try {
+    if (!fs.existsSync(path.join(dir, '.git'))) return null;
+    spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', timeout: 20000 });
+    spawnSync('git', ['-c', 'user.name=Novel Studio', '-c', 'user.email=novel@studio.local',
+      'commit', '-m', message || '重写前自动存档', '--allow-empty'], { cwd: dir, encoding: 'utf8', timeout: 20000 });
+    const h = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir, encoding: 'utf8', timeout: 10000 });
+    return (h.stdout || '').trim() || null;
+  } catch { return null; }
+}
+
 export function scaffoldBook(book) {
   const dir = book.dir;
   const std = book.standards || {};

@@ -18,7 +18,9 @@ export function pickAuxModel(bookModel, cfg) {
 
 // 把模型输出清洗成"一段约150字的纯中文简介"：先砍掉被回显的 prompt，再去引导语/引号/空白。
 function cleanSynopsis(text) {
-  let t = String(text || '').replace(/```[\s\S]*?```/g, ' ');
+  let t = String(text || '')
+    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\x1b[@-Z\\-_]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')  // 去 ANSI/控制码防乱码
+    .replace(/```[\s\S]*?```/g, ' ');
   // codex exec 等常把指令原样回显，粘在简介后面 → 在回显 prompt 的标志处截断（位置 >40 才截，避免误伤开头）。
   const cut = t.search(/你是资深网文编辑|为下面这本小说写一段|硬性要求[：:]|小说信息[：:]/);
   if (cut > 40) t = t.slice(0, cut);
@@ -141,11 +143,12 @@ const REVIEW_DIMS = {
   plausibility: '【故事合理性】人物动机是否可信、因果是否成立、反转与实力变化是否有铺垫与代价、世界/设定规则是否自洽',
   pace: '【节奏/格局/读者体验】主角处境(地点/权力层级/实力/对手量级/格局)是否随章可感升级还是原地打转；是否有连续多章以办牌/验册/对账/盘点/走流程为主线的事务流水账；隔几章有没有可感的进展或爽点(赢一场/收一人/揭真相/上台阶)还是全程压抑无回报；对照本卷阶段目标进度是否跑偏',
 };
-export function buildReviewInstruction(book, range, dims) {
+export function buildReviewInstruction(book, range, dims, note) {
   const sel = (Array.isArray(dims) && dims.length ? dims : ['logic', 'style', 'plausibility', 'pace'])
     .filter(d => REVIEW_DIMS[d]).map(d => REVIEW_DIMS[d]);
   const r = (range || '全书').trim();
-  const s = `对《${book.title}》做一次【复检】，范围：${r}。只针对以下维度检查并修正：${sel.join('；')}。` +
+  const focus = note ? `本次复检的【重点要求】：${String(note).replace(/[\r\n]+/g, ' ')}。` : '';
+  const s = `对《${book.title}》做一次【复检】，范围：${r}。${focus}只针对以下维度检查并修正：${sel.join('；')}。` +
     `请按文件名顺序逐章通读该范围内的正文（必要时参考 novel_bible.md、outlines/、continuity_ledger.md、chapter_index.md）；` +
     `把发现按【硬伤 / 隐患 / 建议】三档写入 reviews/复检-${r}.md。` +
     `处理方式：逻辑硬伤与设定矛盾就地修正（保持已写剧情框架与结局，只改必要处）；文风问题就地润色（句式打散、删AI套话、去翻译腔/现代词、补实锚，不改剧情走向）；` +
@@ -168,6 +171,54 @@ export function buildResumeInstruction(book) {
     `第二步校准：确认当前最新的全局章号与所在卷，必要时补全后续卷的分章大纲。` +
     `第三步续写：从最新章节之后接着写下一批 ${batch} 章，严格延续既有剧情走向、人物口吻与文风，不要重写或改动已写章节；写完做常规批次自检。` +
     `全程严格遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范。`;
+  return s.replace(/[\r\n]+/g, ' ');
+}
+
+// 范围重写：把指定范围的章节【推倒重写】（不是润色）。单行。
+export function buildRewriteInstruction(book, range, note) {
+  const r = (range || '全书').trim();
+  const focus = note ? `本次重写的重点要求：${String(note).replace(/[\r\n]+/g, ' ')}。` : '';
+  const s = `对《${book.title}》的【范围 ${r}】做【推倒重写】——不是润色、是从头写出更好的版本（旧版本已 git 存档、可回退）。` +
+    `第一步：通读 novel_bible.md、该范围对应的 outlines 分章大纲，以及范围【之后】已写的章节，确保新版与后文在人物、伏笔、设定、时间线上严丝合缝。` +
+    `第二步：把范围内每一章【整章重写】，覆盖原 .txt 文件；章号与卷目录结构保持不变（若大纲要求调整命名则同步改 chapter_index.md）。${focus}` +
+    `第三步：逐章自检并更新 chapter_index.md。严禁改动范围之外的章节、不要新增后续章节。` +
+    `全程严格遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范，尤其【开篇定位】【题材承诺兑现】【节奏与格局】【反 AI 味】。`;
+  return s.replace(/[\r\n]+/g, ' ');
+}
+
+// 整本重立项：保留题材方向，重写 bible + 大纲 + 全部正文。单行。
+export function buildReprojectInstruction(book, note) {
+  const focus = note ? `调整重点：${String(note).replace(/[\r\n]+/g, ' ')}。` : '';
+  const s = `对《${book.title}》做【整本推倒重立项】（旧的 bible / 大纲 / 正文已 git 存档、可回退）。保留题材大方向，但重做规划与正文：` +
+    `第一步重写 novel_bible.md：一句话卖点、目标读者、时代世界观、力量/设定体系、主角与关键人物、对抗势力、主题、禁区、开篇策略、节奏与格局承诺、全书规模（卷数/每卷章数/总字数）。${focus}` +
+    `第二步在 outlines/ 重排全卷分章大纲（每卷章级 beat 表 + 伏笔布点表，覆盖到全书结局）。` +
+    `第三步从第 1 章开始重写正文，旧正文作废（可参考、不照搬），按 longform-webnovel-writer 规范与新大纲写，每批 ${book.standards?.batchSize || 3} 章自检；务必落实【开篇定位】（尽早立住主角身份+时代+核心爽点）与【题材承诺兑现】。` +
+    `第四步重建 chapter_index.md，使其与新正文一致。全程遵守 AGENTS.md 规范。`;
+  return s.replace(/[\r\n]+/g, ' ');
+}
+
+// 收束令：进入收尾/完本冲刺阶段发给作者的指令。first=首次进入(给全套纪律)；否则给精简续推。单行。
+export function buildFinaleInstruction(book, { first = false } = {}) {
+  if (first) {
+    const s = `现在进入《${book.title}》的【收尾 / 完本冲刺】阶段，从这一批起【只收不放】：` +
+      `第一步通读 continuity_ledger.md 与各卷大纲，列出所有未回收伏笔、未了欠债与承诺、未交代的人物与线索、未兑现的开篇卖点；` +
+      `第二步起【不要再引入任何新人物、新势力、新长线、新坑】；` +
+      `第三步逐章加速向全书大高潮推进，把上面列出的未决项一个个在剧情里真正了结（确需舍弃的，在台账里标注"弃坑"并给一句合理交代，不许无视）；` +
+      `第四步给主角与每个关键配角各自的结局或归宿（胜负、生死、聚散都要落地，不许人物凭空消失）；` +
+      `第五步写出大高潮→结局，必要时加一段尾声收一收气口；保持既有文风与节奏，宁可多写两章把结局写满，也不要仓促烂尾。` +
+      `当你确认主线冲突已解决、关键伏笔已回收、主要人物已有交代、结局已写完时，【不要再继续写】，在窗口单独输出一行「【完本待审】」然后停下，等待完本审稿。全程遵守 longform-webnovel-writer 规范。`;
+    return s.replace(/[\r\n]+/g, ' ');
+  }
+  const s = `继续收尾：延续收束令，只收不放、不起新线，对照 continuity_ledger.md 把未回收伏笔与未了承诺继续逐条了结，` +
+    `推进大高潮与结局并给人物收束。写够这一批后自检；当主线已解决、关键伏笔已回收、结局已写完时，输出一行「【完本待审】」停下等待完本审稿。`;
+  return s.replace(/[\r\n]+/g, ' ');
+}
+
+// 完本审稿通过后，最后的收尾指令：写完结感言 + 标注全书完结。单行。
+export function buildAfterwordInstruction(book) {
+  const s = `恭喜，《${book.title}》已通过完本审稿、正式完结。请做最后收尾：` +
+    `①可选写一章简短的《完本感言 / 作者的话》（200–400字，真诚、不套路，谢读者、谈创作初衷与遗憾），或写一段简短尾声；` +
+    `②在 chapter_index.md 末尾标注"全书完"（含总章数、约总字数）；③更新 novel_bible.md 顶部标注【已完结】。做完即全部结束，无需再写任何正文。`;
   return s.replace(/[\r\n]+/g, ' ');
 }
 

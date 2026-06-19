@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 // Novel Studio 桌面端：Tauri 原生窗口 + 启动时拉起 Node 引擎(novel serve)作为后端。
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use tauri::Manager;
@@ -20,27 +21,60 @@ struct Sidecar(Mutex<Option<Child>>);
 
 const ENGINE_PORT: &str = "8787";
 
-// 解析引擎入口 bin/novel.mjs 的路径：
+// 解析引擎入口 bin/novel.mjs 的路径，按优先级尝试多个候选位置：
 // 1) 环境变量 NOVEL_STUDIO_ENGINE 覆盖
-// 2) 打包后：exe 同级 resources/engine/bin/novel.mjs
-// 3) 开发期：编译期 src-tauri/../../bin/novel.mjs
-fn engine_path() -> String {
+// 2) 打包后：Tauri 资源目录 <resource_dir>/engine/bin/novel.mjs（v2 标准）
+// 3) 兼容：exe 同级 resources/engine/bin/novel.mjs
+// 4) 开发期：编译期 src-tauri/../../bin/novel.mjs
+fn engine_path(resource_dir: Option<PathBuf>) -> String {
     if let Ok(p) = std::env::var("NOVEL_STUDIO_ENGINE") {
         return p;
     }
+    let rel = |base: PathBuf| base.join("engine").join("bin").join("novel.mjs");
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(rd) = resource_dir {
+        candidates.push(rel(rd.clone()));
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let bundled = dir.join("resources").join("engine").join("bin").join("novel.mjs");
-            if bundled.exists() {
-                return bundled.to_string_lossy().to_string();
-            }
+            candidates.push(rel(dir.join("resources")));
+            candidates.push(rel(dir.to_path_buf()));
+        }
+    }
+    for c in candidates {
+        if c.exists() {
+            return c.to_string_lossy().to_string();
         }
     }
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../bin/novel.mjs").to_string()
 }
 
-fn start_engine() -> Option<Child> {
-    let engine = engine_path();
+// 启动引擎前先杀掉占用 8787 的残留旧引擎（杜绝"僵尸引擎占端口→新引擎绑不上→旧代码一直服务"）。
+fn kill_stale_engine() {
+    #[cfg(target_os = "windows")]
+    {
+        let ps = format!(
+            "Get-NetTCPConnection -LocalPort {} -State Listen -ErrorAction SilentlyContinue | ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}",
+            ENGINE_PORT
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg(format!("lsof -ti tcp:{} | xargs -r kill -9", ENGINE_PORT))
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+    }
+}
+
+fn start_engine(resource_dir: Option<PathBuf>) -> Option<Child> {
+    kill_stale_engine();   // 先清残留旧引擎，确保新引擎能绑上 8787（加载最新代码）
+    let engine = engine_path(resource_dir);
     eprintln!("[novel-studio] starting engine: node {} serve --port {}", engine, ENGINE_PORT);
     match Command::new("node")
         .arg(&engine)
@@ -62,7 +96,8 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![pick_folder])
         .setup(|app| {
-            app.manage(Sidecar(Mutex::new(start_engine())));
+            let resource_dir = app.path().resource_dir().ok();
+            app.manage(Sidecar(Mutex::new(start_engine(resource_dir))));
             Ok(())
         })
         .on_window_event(|window, event| {

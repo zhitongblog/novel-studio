@@ -10,10 +10,14 @@ import {
 import { connectInstance } from './mcpclient.mjs';
 import { Autopilot } from './autopilot.mjs';
 import { refreshContext } from './scaffold.mjs';
-import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision } from './editor.mjs';
+import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision, reviewEnding, buildEndingRenudgeInstruction } from './editor.mjs';
+import { buildFinaleInstruction, buildAfterwordInstruction } from './planner.mjs';
+import { setPending, hasPending } from './pending.mjs';
 import { saveSession } from './sessions.mjs';
 import { recordUsage } from './usage.mjs';
-import { bookStats } from './books.mjs';
+import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFolders, clearFlatImport, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
+import { maybeAutoPublish } from './autopublish.mjs';
+import { runFinaleClosure } from './finale.mjs';
 
 // 生成 launch.ps1：设代理环境、（best-effort）切 unterm 代理、cd 到书目录、启动 agent 带初始指令
 export function writeLaunchScript(book, model, instruction, cfg) {
@@ -57,6 +61,15 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
 
   // 刷新本书 agent 上下文（写作 skill 标准）
   refreshContext(book);
+
+  // 平铺分章兜底：每次开写前由代码幂等地把根目录残留正文移进 chapters/卷01/（应对续传/后补文件），
+  // 移完清掉 flatImport，避免续写指令里反复出现"去归档"的无用噪音。
+  try {
+    const r = archiveFlatChapters(book.dir);
+    const rv = archiveVolumeFolders(book.dir);
+    if (r.moved + rv.moved > 0) onLog({ msg: `已自动归档 ${r.moved + rv.moved} 个章节文件 → chapters/（${rv.vols} 个卷目录）` });
+    if (book.flatImport) { try { clearFlatImport(book.slug); } catch {} }
+  } catch {}
 
   // 确保 profile
   const profileName = book.profile;
@@ -105,13 +118,22 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   let autopilot = null;
   const tokenKey = instance.id + '@' + (instance.started_at || '');
   if (attachAutopilot && cfg.autopilot?.enabled) {
-    // 大纲审稿门：作者输出「【大纲待审：xxx】」时，换一个模型无头审稿，把修订指令注回，并给相关文件拍快照。
+    // 大纲审稿门：作者输出「【大纲待审：xxx】」时，换一个模型无头审稿。
     const editorOff = cfg.editorReview?.enabled === false;
+    const slug = book.slug;
+    const gateOn = cfg.editorReview?.requireApproval !== false;   // 全局确认门
     const renudge = new Map();   // scope -> 已重催次数
     const onOutlineReady = editorOff ? undefined : async (scope) => {
       try {
         const r = await reviewOutline({ book, scope, cfg, authorModel: model, onLog: (e) => onLog({ ...e, source: 'editor' }) });
-        try { snapshotOutline(book, scope); } catch {}   // 拍快照，供后续核对作者是否真改了
+        if (gateOn) {
+          // 确认门：不自动改内容，挂起等用户决定（应用/跳过）。autopilot 据 isPending 暂停。
+          setPending(slug, { kind: 'outline', scope, file: r.file, critique: (r.critique || '').slice(0, 6000) });
+          onLog({ level: 'act', source: 'editor', kind: 'pending-review', scope, file: path.basename(r.file), msg: `⏸ 主编审稿意见已生成（${scope}），待你确认：应用修订 / 跳过` });
+          // 让作者窗口先停手，别在等确认时乱改
+          return '主编审稿意见已生成，请先暂停：不要改大纲、也不要写正文，等待用户确认是否采纳后再继续。';
+        }
+        try { snapshotOutline(book, scope); } catch {}   // 非确认门：自动改，先拍快照供核对
         return buildReviseInstruction(book, scope, r.file);
       } catch (e) { onLog({ level: 'warn', msg: '大纲审稿失败：' + e.message, source: 'editor' }); return null; }
     };
@@ -140,13 +162,90 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       onLog({ level: 'warn', msg: `主编复审未过：仍有硬伤未解决 → 第 ${n} 次退回作者`, source: 'editor' });
       return buildRecheckRenudgeInstruction(book, scope, rc.file);
     };
+    // —— 完本策略：收尾入口判定 + 收束令 + 完本审稿 + 完本状态 ——
+    const finaleOn = cfg.finale?.enabled !== false;
+    let finaleBatches = 0;
+    const renudgeF = new Map();
+    // 当前阶段：'done' 已完本 | 'finale' 收尾中 | 'writing' 连载中（每次实时重读 book + 章数）
+    const finalePhase = () => {
+      const b = getBook(slug) || book;
+      if (b.status === '已完本') return 'done';
+      if (b.status === '收尾中') return 'finale';
+      if (finaleOn && cfg.finale?.autoEnterLastVolume !== false) {
+        // 自动入口：已写到"规划总章数 − 一卷"(即进入最后一卷的体量)就进收尾。
+        // 总章数从 目标章数/bible全书章数/卷数×每卷章数 推导——比数卷目录可靠(空/错位卷目录不会误判)。
+        const total = plannedTotalChapters(b);
+        if (total > 0) {
+          const lastVol = chaptersPerVol(b) || Math.ceil(total * 0.1);
+          if (bookStats(b).chapters >= total - lastVol) return 'finale';
+        }
+      }
+      return 'writing';
+    };
+    // 收尾分支：处于收尾就返回收束令（首次给全套+标状态；之后精简续推；超批次封顶则强制立刻收束）。
+    const finaleCheck = !finaleOn ? undefined : async () => {
+      if (finalePhase() !== 'finale') return null;
+      const b = getBook(slug) || book;
+      let first = false;
+      if (b.status !== '收尾中') {
+        try { setBookStatus(slug, '收尾中'); } catch {} first = true;
+        const pv = plannedVolumes(b), cv = currentVolume(b), ch = bookStats(b).chapters;
+        onLog({ level: 'act', msg: `已进入【收尾 / 完本冲刺】阶段（卷${cv}${pv ? '/' + pv : ''}，第${ch}章）`, source: 'finale' });
+      }
+      finaleBatches++;
+      const cap = cfg.finale?.maxFinaleBatches || 30;
+      if (finaleBatches > cap) {
+        onLog({ level: 'warn', msg: `收尾已 ${finaleBatches} 批仍未完本 → 要求立即收束`, source: 'finale' });
+        return `收尾批次已偏多，请【立即】把当前所有未了线索快速但合理地收束，写出大高潮与结局，务必在本批或下一批内完成并输出「【完本待审】」，不要再拖延铺陈。`;
+      }
+      return buildFinaleInstruction(b, { first });
+    };
+    // 完本闸：作者输出「【完本待审】」→ 主编核对完本清单。过则标已完本+afterword+停；不过退回补写（上限保护）。
+    const onFinaleReady = !finaleOn ? undefined : async () => {
+      const b = getBook(slug) || book;
+      const done = (text) => {
+        try { setBookStatus(slug, '已完本'); } catch {}
+        // 完结终发布闭环(C)：标已完本后，延迟自动"收口"——把收尾新增章(含尾声/完本感言)发齐到番茄并对账。
+        // 延迟是为了等作者把"完本感言/尾声"那一章写完(autopilot 随后即停)。失败不影响完本，UI 也可手动重跑。
+        if (cfg.finale?.autoClosure !== false) {
+          const delay = cfg.finale?.closureDelayMs ?? 120000;
+          const b0 = getBook(slug) || book;
+          if (b0?.publish?.profilePath && b0?.publish?.bookId) {
+            onLog({ level: 'act', source: 'fanqie', msg: `已标记【已完本】。约 ${Math.round(delay / 1000)} 秒后自动完结收口（把尾声/完本感言发齐到番茄并对账）；也可在「📤发布番茄→完结收口」手动触发。` });
+            setTimeout(() => {
+              runFinaleClosure(getBook(slug) || b0, { cfg, onLog: (e) => onLog({ ...e }) }).catch(() => {});
+            }, Math.max(0, delay)).unref?.();
+          }
+        }
+        return { text, stop: true };
+      };
+      if (cfg.finale?.reviewEnding === false) { onLog({ level: 'act', msg: '已完本（未开完本审稿）', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
+      let rc;
+      try { rc = await reviewEnding({ book: b, cfg, authorModel: model, onLog: (e) => onLog({ ...e, source: 'finale' }) }); }
+      catch (e) { onLog({ level: 'warn', msg: '完本审稿失败 → 放行标完本：' + e.message, source: 'finale' }); return done(buildAfterwordInstruction(b)); }
+      if (rc.pass) { onLog({ level: 'act', msg: '完本审稿通过 → 标记【已完本】', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
+      const n = (renudgeF.get('完本') || 0) + 1; renudgeF.set('完本', n);
+      if (n > (cfg.finale?.maxRenudge ?? 2)) { onLog({ level: 'warn', msg: '完本审稿仍未过，已达上限 → 标完本（请人工把关结局）', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
+      onLog({ level: 'warn', msg: `完本审稿未过 → 第 ${n} 次退回补写结局`, source: 'finale' });
+      return { text: buildEndingRenudgeInstruction(b, rc.file), stop: false };
+    };
     autopilot = new Autopilot(mcp, paneId, {
       ...cfg.autopilot,
       onLog: (e) => onLog({ ...e, source: 'autopilot' }),
       onTokens: (n) => recordUsage(book.slug, tokenKey, n),
       onOutlineReady,
       onRevisionDone,
-      shouldStopContinue: () => { const t = book.targetChapters || 0; return t > 0 && bookStats(book).chapters >= t; },
+      finaleCheck,
+      onFinaleReady,
+      isPending: () => hasPending(slug),   // 全局确认门：有待确认审稿时 autopilot 挂起
+      // 启用完本：不靠章数硬停，交给收尾流程收束；已完本则停。未启用完本时沿用旧的"到目标章数即停"。
+      shouldStopContinue: () => {
+        const b = getBook(slug) || book;
+        if (b.status === '已完本') return true;
+        if (finaleOn) return false;
+        const t = b.targetChapters || 0; return t > 0 && bookStats(b).chapters >= t;
+      },
+      onReachedTarget: () => { try { maybeAutoPublish(getBook(slug) || book, { cfg, onLog: (e) => onLog({ ...e }) }); } catch {} },
     });
     autopilot.start();   // 不 await，后台跑
   }

@@ -6,6 +6,8 @@ import { getSession, removeSession, listSessions } from './sessions.mjs';
 import { Autopilot } from './autopilot.mjs';
 import { recordUsage, parseTokens } from './usage.mjs';
 import { getBook, bookStats } from './books.mjs';
+import { stripCtrl } from './imagegen.mjs';
+import { maybeAutoPublish } from './autopublish.mjs';
 
 const CR = '\r';
 
@@ -49,7 +51,7 @@ export async function streamBook(slug, cfg, onFrame, { intervalMs = 1000 } = {})
   const timer = setInterval(async () => {
     if (stopped) return;
     try {
-      const txt = await mcp.screenText(pane);
+      const txt = stripCtrl(await mcp.screenText(pane));   // 去 ANSI/控制码，避免镜像里显示乱码
       if (txt !== last) { last = txt; onFrame(txt); }
     } catch (e) {
       // 实例可能已关闭
@@ -76,6 +78,7 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}) {
     onLog: (e) => onLog({ ...e, source: 'autopilot' }),
     onTokens: (n) => recordUsage(slug, tokenKey, n),
     shouldStopContinue: () => { const b = getBook(slug); const t = b?.targetChapters || 0; return t > 0 && bookStats(b).chapters >= t; },
+    onReachedTarget: () => { try { maybeAutoPublish(getBook(slug), { cfg, onLog: (e) => onLog({ ...e }) }); } catch {} },
   });
   ap.start();
   return { autopilot: ap, mcp, stop() { ap.stop('外部停止'); mcp.close(); } };

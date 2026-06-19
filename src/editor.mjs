@@ -126,6 +126,69 @@ export function buildRenudgeInstruction(book, scope) {
   return `系统核对发现 outlines/ 与 novel_bible.md 并未实际改动——这是要你【真正打开并修改大纲文件】、不是口头确认。请打开 outlines/ 下【${scope}】对应的分章大纲（必要时 novel_bible.md），按 reviews/大纲审稿-${safeName(scope)}.md 里的【硬伤】逐条修改并保存，改完再输出一行「【大纲已修订：${scope}】」。`.replace(/[\r\n]+/g, ' ');
 }
 
+// 读最近 n 章正文（按全局章号排序取末尾，即最接近结局的部分；总量截到 cap 字符）。
+function readLastChapters(dir, n, cap) {
+  const cdir = path.join(dir, 'chapters');
+  const files = [];
+  (function walk(d) { try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.txt$/i.test(e.name)) files.push(p); } } catch {} })(cdir);
+  files.sort((a, b) => (parseInt(path.basename(a)) || 0) - (parseInt(path.basename(b)) || 0));
+  let out = '';
+  for (const f of files.slice(-n)) out += `\n### ${path.basename(f)}\n` + readSafe(f);
+  out = out.trim();
+  if (cap && out.length > cap) out = out.slice(-cap);
+  return out;
+}
+
+// 完本审稿 prompt：对照完本检查清单逐条核对，首行严格给"判定：可完本/未完本"。
+function buildEndingPrompt(book, bible, ledger, ending) {
+  return [
+    `你是资深网文主编，正在对《${book.title}》做【完本审稿】——判断它现在是否真能"完结"，还是结局仓促、还有没收的线。只看硬指标，别说客套。`,
+    ``,
+    `# 设定圣经（长线弧光 / 主题 / 卖点 / 结局设想）`, bible || '（缺失）', ``,
+    `# 连贯性台账（未回收伏笔 / 未了欠债 / 人物现状）`, ledger || '（缺失）', ``,
+    `# 结局部分正文（最近若干章）`, ending || '（空）', ``,
+    `# 完本检查清单（逐条核对）`,
+    `1. 主线核心冲突是否真正解决（不是搁置/含糊带过）？`,
+    `2. 主角弧光是否闭合、有明确结局或归宿？`,
+    `3. 关键配角是否都有交代（胜负/生死/聚散），有没有人物凭空消失？`,
+    `4. 台账里的重要伏笔、欠债、承诺是否已回收（或明确弃坑并交代）？`,
+    `5. 反派 / 对抗势力是否已处置？`,
+    `6. 开篇给读者的核心卖点 / 承诺是否兑现？`,
+    `7. 结局有没有"为完结而完结"的仓促 / 烂尾感？大高潮是否写足？`,
+    ``,
+    `# 输出格式（严格）`,
+    `第一行【只能】是：判定：可完本   或   判定：未完本`,
+    `若未完本：从第二行起逐条列出"还差什么 → 需要补写什么（给到具体伏笔/人物/事件）"。`,
+    `若可完本：第二行起一句话说明主线与关键伏笔均已收束。`,
+  ].join('\n');
+}
+
+// 完本审稿：核对这本书是否真的可以完结。返回 { pass, body, file, editorModel }。
+export async function reviewEnding({ book, cfg, authorModel, onLog = () => {} }) {
+  const dir = book.dir;
+  const bible = readSafe(path.join(dir, 'novel_bible.md'));
+  const ledger = readSafe(path.join(dir, 'continuity_ledger.md'));
+  const ending = readLastChapters(dir, cfg?.finale?.endingChapters || 10, 24000);
+  const editorModel = pickEditorModel(authorModel, cfg);
+  onLog({ level: 'act', msg: `主编（${editorModel}）完本审稿：核对主线/伏笔/人物是否真正收束…` });
+  const raw = await runModelOnceAsync(editorModel, buildEndingPrompt(book, bible, ledger, ending), cfg, cfg?.editorReview?.timeoutMs || 180000);
+  const out = (raw || '').trim();
+  const pass = /判定[：:]\s*(可完本|通过)/.test(out) && !/判定[：:]\s*(未完本|不可完本|未通过)/.test(out);
+  const file = path.join(dir, 'reviews', '完本审稿.md');
+  try {
+    fs.mkdirSync(path.join(dir, 'reviews'), { recursive: true });
+    fs.writeFileSync(file, `# 完本审稿\n\n> 审稿模型 ${editorModel}｜${new Date().toISOString()}｜判定：${pass ? '可完本' : '未完本'}\n\n` + out + '\n', 'utf8');
+  } catch {}
+  onLog({ level: pass ? 'info' : 'warn', msg: `完本审稿${pass ? '通过（可完本）' : '未通过（需补写结局）'} → ${path.relative(dir, file)}` });
+  return { pass, body: out, file, editorModel };
+}
+
+// 完本审稿未过：退回作者继续补写结局。单行。
+export function buildEndingRenudgeInstruction(book, file) {
+  const rel = file ? path.relative(book.dir, file).replace(/[\r\n]+/g, ' ') : 'reviews/完本审稿.md';
+  return `完本审稿认为结局尚未真正收束，仍有未了项写在 ${rel}。请按其中每一条继续【补写正文】：回收剩余伏笔、给未交代的人物结局、补全大高潮或结局；不要草草收尾，也不要只在台账里写"已解决"而正文没写。补完再输出一行「【完本待审】」等待复审。`.replace(/[\r\n]+/g, ' ');
+}
+
 // 复审重催指令：复审认定硬伤没改对，退回作者继续改。
 export function buildRecheckRenudgeInstruction(book, scope, file) {
   const rel = file ? path.relative(book.dir, file).replace(/[\r\n]+/g, ' ') : ('reviews/大纲复审-' + safeName(scope) + '.md');

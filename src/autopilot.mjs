@@ -54,6 +54,14 @@ export class Autopilot {
     this.log('autopilot 已停止' + (reason ? '：' + reason : ''), 'info');
   }
 
+  // 优雅停止：不再驱动新批次/收尾/体检，等当前批次写完(回到待续点)后调 cb(关闭窗口)。
+  drain(cb) {
+    if (this.draining) return;
+    this.draining = true;
+    this.drainCb = cb;
+    this.log('已请求优雅停止：写完当前批次后自动关闭', 'act');
+  }
+
   async _tick() {
     // pane 还在吗
     const sessions = await this.mcp.sessionList().catch(() => []);
@@ -78,6 +86,15 @@ export class Autopilot {
       this.lastTokens = tk; this.stats.tokens = tk;
       try { this.onTokens && this.onTokens(tk); } catch {}
     }
+
+    // 全局确认门：有"待用户确认"时挂起——不应答、不续写、不处理哨兵，只继续监控窗口存活，
+    // 直到用户在界面点"应用修订/跳过"（由服务端注入指令并清除待确认）后自动恢复。
+    if (this.opt.isPending && this.opt.isPending()) {
+      if (!this._heldLogged) { this.log('已暂停，等待你确认审稿意见（应用修订 / 跳过）', 'info'); this._heldLogged = true; }
+      this.prevScreen = screen;
+      return;
+    }
+    this._heldLogged = false;
 
     // agent 在场检测（基于屏幕内容，比前台进程名可靠）：
     // bypass 模式下 codex 会 spawn 子 shell 执行命令，进程名会变成 pwsh —— 但屏幕仍是 agent 的 TUI。
@@ -185,6 +202,22 @@ export class Autopilot {
       }
     }
 
+    // —— 完本闸：作者输出「【完本待审】」→ 完本审稿(核对完本清单)。过则标已完本并停，不过退回补写。——
+    const fm = tail.match(/【完本待审】/);
+    if (fm && typeof this.opt.onFinaleReady === 'function') {
+      const hh = hash(tail);
+      if (hh !== this.lastRespondedHash) {
+        this.sawAgentRunning = true;
+        this.log('检测到【完本待审】→ 完本审稿（核对主线/伏笔/人物收束）…', 'act');
+        let r = null;
+        try { r = await this.opt.onFinaleReady(); } catch (e) { this.log('完本审稿失败：' + e.message, 'warn'); }
+        if (r && r.text) { try { await this.mcp.submitText(this.paneId, r.text); } catch {} }
+        this.lastRespondedHash = hh; this.prevScreen = screen;
+        if (r && r.stop) this.stop('已完本');
+        return;
+      }
+    }
+
     const h = hash(tail);
     if (h === this.lastRespondedHash) return;       // 这一屏已经应答过，等待 agent 反应
 
@@ -192,19 +225,44 @@ export class Autopilot {
     if (action.kind === 'none') return;
     if (action.kind === 'stop') { this.stop('检测到完成信号'); return; }
 
-    // continue 的前置校验（不消耗 hash，便于稍后重试）
-    if (action.kind === 'continue') {
-      if (!this.sawBusy) return;                    // agent 还没真正开始写，不要催
-      if (this.continueCount >= (this.opt.maxAutoContinue || 40)) {
-        this.stop('达到自动续写上限 ' + this.opt.maxAutoContinue); return;
+    // 这里只剩"续写"动作（提问类已在上面的提问块处理并 return）
+    if (action.kind !== 'continue') return;
+    if (!this.sawBusy) return;                        // agent 还没真正开始写，不要催
+
+    // —— 优雅停止：用户请求停止后，写完【当前批次】、回到待续点 → 关闭窗口，不再驱动新批/收尾/体检 ——
+    if (this.draining) {
+      this.log('当前批次已写完 → 优雅停止，关闭窗口', 'act');
+      this.running = false;
+      if (this.drainCb) { try { await this.drainCb(); } catch {} }
+      return;
+    }
+
+    // —— 收尾优先：处于收尾/完本冲刺阶段先发"收束令"，凌驾于任何停机判定（maxAutoContinue/目标章数）——
+    if (typeof this.opt.finaleCheck === 'function') {
+      let fin = null;
+      try { fin = await this.opt.finaleCheck(this.continueCount); } catch {}
+      if (fin) {
+        try { await this.mcp.submitText(this.paneId, fin); }
+        catch (e) { this.log('收束令注入失败（将重试）：' + e.message, 'warn'); return; }
+        this.lastRespondedHash = h; this.continueCount++; this.stats.continues++;
+        this.stats.finaleBatches = (this.stats.finaleBatches || 0) + 1;
+        this.log(`收尾中 → 已发送收束令（第 ${this.continueCount} 次续写）`, 'act');
+        return;
       }
     }
 
-    // 这里只剩"续写"动作（提问类已在上面的提问块处理并 return）
-    if (action.kind !== 'continue') return;
-    // 到达"目标章节数"上限就停（按磁盘实际章节数判断，重启后仍有效）
+    // 普通续写的停机判定（收尾阶段不会走到这里）
+    if (this.continueCount >= (this.opt.maxAutoContinue || 40)) {
+      this.stop('达到自动续写上限 ' + this.opt.maxAutoContinue); return;
+    }
     if (this.opt.shouldStopContinue) {
-      try { if (this.opt.shouldStopContinue()) { this.stop('已达目标章节数上限，停止续写'); return; } } catch {}
+      try {
+        if (this.opt.shouldStopContinue()) {
+          // 写满目标章数：先触发"到达目标"回调(自动发布在此挂)，再停机。回调 fire-and-forget，不阻塞停机。
+          try { this.opt.onReachedTarget && this.opt.onReachedTarget(); } catch {}
+          this.stop('已达目标章节数上限，停止续写'); return;
+        }
+      } catch {}
     }
     const n = this.continueCount + 1;
     // 四选一（优先级递减，错峰）：全文逻辑自检 → 节奏/格局体检 → 阅读性润色扫描 → 普通续写。

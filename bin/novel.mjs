@@ -20,7 +20,7 @@ if (!cmd || cmd === 'tui') {
 } else if (cmd === 'mcp' || cmd === 'mcp-stdio') {
   runMcpServer();
 } else if (cmd === '--version' || cmd === '-v') {
-  console.log('novel-studio 1.0.1');
+  console.log('novel-studio 1.1.0');
 } else if (cmd === '--help' || cmd === '-h' || cmd === 'help') {
   printHelp();
 } else {

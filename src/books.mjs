@@ -52,6 +52,67 @@ export function setBookModel(slugOrId, model) {
   return b;
 }
 
+// 设置一本书的连载状态：'连载中'(默认/清空) | '收尾中' | '已完本'。已完本时记 completedAt。
+export function setBookStatus(slugOrId, status) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  const allowed = ['连载中', '收尾中', '已完本'];
+  if (!allowed.includes(status)) throw new Error('未知状态：' + status);
+  b.status = status;
+  if (status === '已完本') b.completedAt = new Date().toISOString();
+  if (status === '连载中') { delete b.completedAt; }
+  upsertBook(b);
+  return b;
+}
+
+// 记录番茄平台侧状态快照（供书卡显示"内部 + 番茄"双状态、对账用）。snap={status,totalWords,lastChapterNum,at}。
+export function setBookFanqieStatus(slugOrId, snap) {
+  const b = getBook(slugOrId);
+  if (!b) return null;
+  b.fanqie = { ...(b.fanqie || {}), ...(snap || {}) };
+  upsertBook(b);
+  return b;
+}
+
+// 中途改书名并全书生效：改 book.title，重写所有 meta 文件里的《旧名》→《新名》，重生成上下文(AGENTS等)。
+// 保留 slug / profile / 目录不变 —— 避免迁移 usage/sessions/token日志、避免破坏正在引用的路径。
+// 不动 chapters/ 正文(按规范正文里本就不含书名)。返回 { book, touched }。
+export function renameBook(slugOrId, newTitle) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  const nt = String(newTitle || '').trim();
+  if (!nt) throw new Error('新书名不能为空');
+  if (nt === b.title) return { book: b, touched: 0 };
+  if (loadBooks().some(x => x.id !== b.id && x.title === nt)) throw new Error('已有同名书：' + nt);
+  const old = b.title;
+  // 收集要改写的 meta 文件（不含 chapters/ 正文）
+  const files = ['novel_bible.md', 'chapter_index.md', 'continuity_ledger.md', '简介.txt'];
+  try { for (const f of fs.readdirSync(path.join(b.dir, 'outlines'))) if (f.endsWith('.md')) files.push(path.join('outlines', f)); } catch {}
+  let touched = 0;
+  for (const rel of files) {
+    const fp = path.join(b.dir, rel);
+    try {
+      const c = fs.readFileSync(fp, 'utf8');
+      if (old && c.includes(old)) { fs.writeFileSync(fp, c.split(old).join(nt), 'utf8'); touched++; }
+    } catch {}
+  }
+  b.title = nt;
+  if (b.synopsis && old && b.synopsis.includes(old)) b.synopsis = b.synopsis.split(old).join(nt);
+  upsertBook(b);
+  try { refreshContext(b); } catch {}   // 重写 AGENTS.md/CLAUDE.md/GEMINI.md 带新书名
+  try { if (b.synopsis) fs.writeFileSync(path.join(b.dir, '简介.txt'), b.synopsis, 'utf8'); } catch {}
+  return { book: b, touched };
+}
+
+// 番茄发布配置：account(Unzoo profilePath)、番茄 bookId/书名、是否按卷建卷、每日发布数、预约起始日期/时间、间隔、自动发布开关、预设触发章数。
+export function setBookPublish(slugOrId, patch) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  b.publish = { ...(b.publish || {}), ...(patch || {}) };
+  upsertBook(b);
+  return b;
+}
+
 // 存一本书的简介（约150字推广文案），同时落一份 简介.txt 方便直接复制出去。
 export function setBookSynopsis(slugOrId, text) {
   const b = getBook(slugOrId);
@@ -113,6 +174,125 @@ function detectFlatChapters(dir) {
   return flat.length >= 2;
 }
 
+// 确定性归档：把根目录下平铺的正文 .txt/.md（排除元文件）批量移进 chapters/卷01/。
+// 由代码做这件体力活（瞬间完成、绝不漏、幂等可重复跑），AI 只负责重建索引/bible/台账。
+// 自然排序按文件名里的数字；目标重名不覆盖（加 _dup 后缀）。返回 {moved, names}。
+export function archiveFlatChapters(dir, volume = '卷01') {
+  if (!dir || !fs.existsSync(dir)) return { moved: 0, names: [] };
+  let ents = [];
+  try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return { moved: 0, names: [] }; }
+  const flats = ents.filter(e => e.isFile() && /\.(txt|md)$/i.test(e.name) && !META_FILES.has(e.name.toLowerCase()));
+  if (!flats.length) return { moved: 0, names: [] };
+  const volDir = path.join(dir, 'chapters', volume);
+  try { fs.mkdirSync(volDir, { recursive: true }); } catch {}
+  flats.sort((a, b) => {
+    const na = parseInt((a.name.match(/\d+/) || [])[0] || '0', 10);
+    const nb = parseInt((b.name.match(/\d+/) || [])[0] || '0', 10);
+    return na - nb || a.name.localeCompare(b.name, 'zh');
+  });
+  const moved = [];
+  for (const e of flats) {
+    const src = path.join(dir, e.name);
+    let dst = path.join(volDir, e.name);
+    if (fs.existsSync(dst)) { const ext = path.extname(e.name); dst = path.join(volDir, e.name.slice(0, -ext.length) + '_dup' + ext); }
+    try { fs.renameSync(src, dst); moved.push(e.name); } catch {}
+  }
+  return { moved: moved.length, names: moved };
+}
+
+// 简单中文数字→整数（支持 一~九十九、十/十二/二十/二十三、约/共前缀）。纯数字直接 parse。
+function cnToInt(s) {
+  if (!s) return 0;
+  s = String(s).trim();
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  const d = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (s.includes('十')) {
+    const [a, b] = s.split('十');
+    const tens = a === '' ? 1 : (d[a] || 0);
+    const ones = b === '' ? 0 : (d[b] || 0);
+    return tens * 10 + ones;
+  }
+  return d[s] || 0;
+}
+function readBible(dir) { try { return fs.readFileSync(path.join(dir, 'novel_bible.md'), 'utf8'); } catch { return ''; } }
+
+// 规划总卷数：standards.volumes，否则 bible「卷数：N」(支持中文数字)。未知 0。
+export function plannedVolumes(book) {
+  const sv = parseInt(book?.standards?.volumes, 10);
+  if (sv > 0) return sv;
+  const m = readBible(book.dir).match(/卷数[：:]\s*[约共]?\s*([0-9一二三四五六七八九十两]+)/);
+  return m ? cnToInt(m[1]) : 0;
+}
+// 每卷约章数：standards.chaptersPerVolume，否则 bible「每卷约章数：N」。未知 0。
+function chaptersPerVol(book) {
+  const c = parseInt(book?.standards?.chaptersPerVolume, 10);
+  if (c > 0) return c;
+  const m = readBible(book.dir).match(/每卷约?章数[：:]\s*[约]?\s*([0-9一二三四五六七八九十百两]+)/);
+  return m ? cnToInt(m[1]) : 0;
+}
+// 规划总章数（判断是否临近结尾的可靠口径）：目标章数 ＞ bible「全书章数」＞ 卷数×每卷章数。未知 0。
+export function plannedTotalChapters(book) {
+  const t = parseInt(book?.targetChapters, 10);
+  if (t > 0) return t;
+  const m = readBible(book.dir).match(/全书章数[：:]\s*[约]?\s*([0-9一二三四五六七八九十百千两]+)/);
+  if (m) { const n = cnToInt(m[1]); if (n > 0) return n; }
+  const pv = plannedVolumes(book), cpv = chaptersPerVol(book);
+  return (pv > 0 && cpv > 0) ? pv * cpv : 0;
+}
+export { chaptersPerVol };
+// 当前所在卷：取【有章节的最高卷号】。对"全局连续编号"和"每卷独立编号(如赵云每卷001-040)"都正确，
+// 也避开空卷目录(0 章不计)。比"最大章号所在卷"可靠——后者在每卷独立编号时会误判成卷01。
+export function currentVolume(book) {
+  try {
+    const cdir = path.join(book.dir, 'chapters');
+    let mx = 0;
+    for (const e of fs.readdirSync(cdir, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const vm = e.name.match(/卷\s*0*(\d+)/); if (!vm) continue;
+      const vol = parseInt(vm[1], 10);
+      let has = false;
+      try { has = fs.readdirSync(path.join(cdir, e.name)).some(f => /\.txt$/i.test(f)); } catch {}
+      if (has && vol > mx) mx = vol;
+    }
+    return mx;
+  } catch { return 0; }
+}
+
+// 导入归档·卷名文件夹版：把根目录下"卷名文件夹"(如 01_常山雪 / 卷03 / 第5卷，内含 .txt)整体迁进 chapters/卷NN/。
+// 配合 archiveFlatChapters(平铺单文件)，覆盖用户常见的两种非标准导入结构。幂等。
+export function archiveVolumeFolders(dir) {
+  if (!dir || !fs.existsSync(dir)) return { moved: 0, vols: 0 };
+  let ents = [];
+  try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return { moved: 0, vols: 0 }; }
+  const SKIP = new Set(['chapters', 'outlines', 'reviews', '.git', '.studio', 'node_modules']);
+  let moved = 0, vols = 0;
+  for (const e of ents) {
+    if (!e.isDirectory() || SKIP.has(e.name)) continue;
+    const m = e.name.match(/^0*(\d+)[ _\-．.、]/) || e.name.match(/^(?:卷|第)\s*0*(\d+)/);
+    if (!m) continue;
+    const src = path.join(dir, e.name);
+    let files = [];
+    try { files = fs.readdirSync(src).filter(f => /\.txt$/i.test(f) && !META_FILES.has(f.toLowerCase())); } catch {}
+    if (!files.length) continue;
+    const dst = path.join(dir, 'chapters', '卷' + String(parseInt(m[1], 10)).padStart(2, '0'));
+    try { fs.mkdirSync(dst, { recursive: true }); } catch {}
+    for (const f of files) {
+      let target = path.join(dst, f);
+      if (fs.existsSync(target)) { const ext = path.extname(f); target = path.join(dst, f.slice(0, -ext.length) + '_dup' + ext); }
+      try { fs.renameSync(path.join(src, f), target); moved++; } catch {}
+    }
+    try { if (fs.readdirSync(src).length === 0) fs.rmdirSync(src); } catch {}
+    vols++;
+  }
+  return { moved, vols };
+}
+
+// 清除一本书的 flatImport 标记（归档已由代码处理完，停止续写指令里的归档噪音）。
+export function clearFlatImport(slugOrId) {
+  const b = getBook(slugOrId);
+  if (b && b.flatImport) { b.flatImport = false; upsertBook(b); }
+}
+
 // 导入一个已有(可能写了一半)的文件夹，注册成"正在写作的书"，可继续写。
 // scaffoldBook 是安全的：只补缺失的结构/上下文/git，不覆盖已有 novel_bible.md / chapter_index.md / 章节。
 export function importBook(opts, cfg) {
@@ -134,6 +314,10 @@ export function importBook(opts, cfg) {
     },
   };
   scaffoldBook(book);          // 补缺失结构 + 写三模型上下文 + git init（受信）
+  // 非标准导入结构 → 代码立刻归位进 chapters/（两种：平铺单文件 + 卷名文件夹），AI 只剩重建索引。
+  try { archiveFlatChapters(dir); } catch {}
+  try { archiveVolumeFolders(dir); } catch {}
+  book.flatImport = false;     // 体力活已由代码完成，不再下"AI 去搬文件"的指令
   upsertBook(book);
   try { ensureProfile(book.profile); } catch {}
   return book;

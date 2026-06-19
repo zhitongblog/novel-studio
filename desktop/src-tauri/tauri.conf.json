@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Novel Studio",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "identifier": "com.novelstudio.app",
   "build": {
     "frontendDist": "../../ui"
@@ -26,6 +26,12 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": {
+      "../../bin": "engine/bin",
+      "../../src": "engine/src",
+      "../../package.json": "engine/package.json",
+      "../../mcp.json": "engine/mcp.json"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

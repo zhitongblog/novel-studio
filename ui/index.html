@@ -35,6 +35,7 @@
         <header class="view-head">
           <h1>书架</h1>
           <button class="btn" id="btnImport">📂 导入文件夹</button>
+          <button class="btn" id="btnImportFanqie">📥 从番茄导入</button>
           <button class="btn primary" id="btnNewBook">＋ 新建书</button>
         </header>
         <div class="shelf" id="shelf"></div>
@@ -45,6 +46,9 @@
         <header class="view-head">
           <button class="btn ghost" id="btnBack">← 书架</button>
           <h1 id="writeTitle">写作</h1>
+          <button class="btn ghost icon" id="btnRename" title="改书名（全书生效）">✏️</button>
+          <button class="btn ghost icon" id="btnReadFromWrite" title="阅读已写内容">📖</button>
+          <button class="btn ghost icon" id="btnOpenDir" title="打开书目录">📂</button>
           <div class="grow"></div>
           <span class="badge" id="writeTokens">tokens 0</span>
           <span class="badge" id="writeStatus">未开始</span>
@@ -66,8 +70,11 @@
             <div class="btn-row">
               <button class="btn" id="btnReview">🔍 复检</button>
               <button class="btn" id="btnOutline">📋 大纲审稿</button>
+              <button class="btn" id="btnFinale">🏁 完本</button>
+              <button class="btn" id="btnRewrite">♻️ 重写</button>
               <button class="btn" id="btnStyle">🎨 文风</button>
               <button class="btn" id="btnCover">🖼️ 封面</button>
+              <button class="btn" id="btnPublish">📤 发布番茄</button>
             </div>
             <div class="synopsis-box">
               <div class="syn-head">
@@ -85,11 +92,45 @@
               <input id="sendInput" placeholder="穿插一条指令到正在写作的窗口…" />
               <button class="btn" id="btnSend">穿插</button>
             </div>
+            <div class="review-bar hidden" id="reviewBar">
+              <div class="rb-head">⏸ <b id="rbTitle">审稿意见待确认</b><span class="rb-file" id="rbFile"></span></div>
+              <pre class="rb-critique" id="rbCritique"></pre>
+              <div class="rb-actions">
+                <button class="btn primary" id="rbApply">✅ 应用修订</button>
+                <button class="btn ghost" id="rbSkip">⏭ 跳过（不改大纲）</button>
+              </div>
+            </div>
             <div class="log-feed" id="logFeed"></div>
           </div>
           <div class="wb-right">
             <div class="mirror-head"><span class="dot live" id="mirrorDot"></span> 实时镜像 · Unterm 窗口</div>
             <pre class="mirror" id="mirror">（开始写作后，这里实时显示 AI 写作过程）</pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- 阅读 / 工作台 -->
+      <section class="view hidden" id="view-read">
+        <header class="view-head">
+          <button class="btn ghost" id="rdBack">← 书架</button>
+          <h1 id="rdTitle">阅读</h1>
+          <button class="btn ghost icon" id="rdToWrite" title="去写作台">✍️</button>
+          <button class="btn ghost" id="rdRenumber" title="把每卷独立编号统一成全书连续编号">🔢 全局重编号</button>
+          <div class="grow"></div>
+          <span class="badge" id="rdProgress"></span>
+        </header>
+        <div class="reader">
+          <aside class="rd-nav" id="rdNav"></aside>
+          <div class="rd-main">
+            <div class="rd-toolbar">
+              <span class="rd-fname" id="rdFileName">选择左侧任意文件阅读</span>
+              <div class="grow"></div>
+              <button class="btn ghost tiny hidden" id="rdEdit">✏️ 编辑</button>
+              <button class="btn primary tiny hidden" id="rdSave">💾 保存</button>
+              <button class="btn ghost tiny hidden" id="rdCancel">取消</button>
+            </div>
+            <div class="rd-content" id="rdContent"><div class="rd-empty">📖 从左侧选 设定圣经 / 大纲 / 章节 / 审稿报告 来读</div></div>
+            <textarea class="rd-editor hidden" id="rdEditor" spellcheck="false"></textarea>
           </div>
         </div>
       </section>
@@ -213,6 +254,123 @@
     </div>
   </div>
 
+  <!-- 重写弹窗 -->
+  <div class="modal hidden" id="rewriteModal">
+    <div class="modal-card">
+      <button class="modal-close" id="rwClose" title="关闭 (Esc)">✕</button>
+      <h2>♻️ 重写</h2>
+      <p class="modal-hint">【推倒重写】不是润色。开始前会<b>自动 git 存档</b>，不满意可在书目录 <code>git reset --hard</code> 回退。写作中需先停止。</p>
+      <label class="field"><span>方式</span>
+        <select id="rwMode">
+          <option value="range">范围重写（重写指定章节/卷，其余保留）</option>
+          <option value="reproject">整本重立项（重写 bible + 大纲 + 全部正文）</option>
+        </select>
+      </label>
+      <label class="field" id="rwRangeWrap"><span>重写范围</span><input id="rwRange" type="text" placeholder="如 001-008 或 卷01"></label>
+      <label class="field"><span>重点要求（怎么改得更好，可空）</span><textarea id="rwNote" rows="3" placeholder="例如：开篇让主角身份+国术+时代尽早上场、压缩探案支线…"></textarea></label>
+      <div class="btn-row end"><button class="btn ghost" id="rwCancel">取消</button><button class="btn danger" id="rwGo">♻️ 开始重写 ▶</button></div>
+      <div class="modal-err" id="rwErr"></div>
+    </div>
+  </div>
+
+  <!-- 发布番茄弹窗 -->
+  <div class="modal hidden" id="publishModal">
+    <div class="modal-card" style="width: 600px;">
+      <button class="modal-close" id="pbClose" title="关闭 (Esc)">✕</button>
+      <h2>📤 发布到番茄</h2>
+      <p class="modal-hint">通过已登录的 Unzoo 浏览器驱动番茄作者后台。<b>只发番茄还没有的新章</b>（按全书章号去重，绝不重发）；重写过的旧章用「同步重写章」找番茄对应章覆盖。<b>定时发布</b>由番茄侧排程，建卷不可逆——默认不按卷、只追加发，零风险。</p>
+      <div class="pb-grid">
+        <label class="field"><span>Unzoo 账号</span><select id="pbProfile"><option value="">（加载中…）</option></select></label>
+        <label class="field"><span>番茄书籍（从你账号下自动读取）</span><select id="pbBook"><option value="">（选账号后自动加载…）</option></select><input id="pbBookId" type="hidden"></label>
+        <label class="field"><span>每日发布数</span><input id="pbPerDay" type="text" placeholder="max=全发 / 或填数字如 5"></label>
+        <label class="field"><span>章间隔(秒)</span><input id="pbInterval" type="number" min="1" placeholder="3"></label>
+        <label class="field"><span>预约起始日期</span><select id="pbDate"><option value="">立即发（不预约）</option></select></label>
+        <label class="field"><span>预约时间（留空=平台默认）</span><select id="pbTime"><option value="">（平台默认）</option></select></label>
+      </div>
+      <label class="check"><input type="checkbox" id="pbMatchVol"> 按图书分卷建卷（默认关：忽略卷、只追加发，最安全。开启需番茄卷结构与图书一致）</label>
+      <label class="check"><input type="checkbox" id="pbSyncRw"> 同步重写章（默认关：上次发布后被改写的旧章，去番茄找对应章覆盖编辑。仅在已发布过的书生效）</label>
+      <label class="check"><input type="checkbox" id="pbAuto"> 🤖 自动发布（写满「目标章节数」且节奏+逻辑质检通过后，自动发番茄。需先配好账号+书籍。质检不过会暂缓并提示）</label>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn" id="pbSaveCfg">💾 保存配置</button>
+        <button class="btn" id="pbPreview">🔍 预览将发</button>
+      </div>
+      <pre class="rb-critique" id="pbPreviewOut" style="display:none"></pre>
+      <div class="btn-row end" style="margin-top:8px">
+        <button class="btn ghost" id="pbCancel">关闭</button>
+        <button class="btn ghost" id="pbTest" title="只发第一章做联调验证">🧪 试发1章</button>
+        <button class="btn primary" id="pbGo" disabled>📤 发布全部新章 ▶</button>
+      </div>
+      <div class="modal-err" id="pbErr"></div>
+    </div>
+  </div>
+
+  <!-- 从番茄导入弹窗 -->
+  <div class="modal hidden" id="importFanqieModal">
+    <div class="modal-card" style="width: 600px;">
+      <button class="modal-close" id="ifClose" title="关闭 (Esc)">✕</button>
+      <h2>📥 从番茄导入图书到本地</h2>
+      <p class="modal-hint">通过已登录的 Unzoo 浏览器，把番茄上的整本书（卷结构 + 全部章节正文）拉到本地。导入后这本书就和本地书一样可用——<b>完结收口、完本感言、发布对账</b>都能在 app 里直接跑。常用于番茄独有、本地没有正文的书。</p>
+      <div class="pb-grid">
+        <label class="field"><span>Unzoo 账号</span><select id="ifProfile"><option value="">（加载中…）</option></select></label>
+        <label class="field"><span>番茄书籍（从你账号下自动读取）</span><select id="ifBook"><option value="">（选账号后自动加载…）</option></select><input id="ifBookId" type="hidden"></label>
+      </div>
+      <label class="field"><span>本地书名（留空=用番茄书名）</span><input id="ifTitle" type="text" placeholder="可留空"></label>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn" id="ifPreview">🔍 预览（看多少卷/章）</button>
+      </div>
+      <pre class="rb-critique" id="ifOut" style="display:none"></pre>
+      <div class="btn-row end" style="margin-top:8px">
+        <button class="btn ghost" id="ifCancel">关闭</button>
+        <button class="btn ghost" id="ifTest" title="只导前3章做联调验证">🧪 试导3章</button>
+        <button class="btn primary" id="ifGo" disabled>📥 导入整本 ▶</button>
+      </div>
+      <div class="modal-err" id="ifErr"></div>
+    </div>
+  </div>
+
+  <!-- 改书名弹窗 -->
+  <div class="modal hidden" id="renameModal">
+    <div class="modal-card">
+      <button class="modal-close" id="rnClose" title="关闭 (Esc)">✕</button>
+      <h2>✏️ 改书名</h2>
+      <p class="modal-hint">改名会全书生效：更新设定圣经、章节索引、连贯性台账、各卷大纲、简介与三模型上下文里的《书名》。已写正文不变（正文里本就不含书名）。封面上的书名文字需重新生成封面才更新。写作中需先停止。</p>
+      <label class="field"><span>新书名</span><input id="rnInput" type="text" maxlength="40" placeholder="输入新书名…"></label>
+      <div class="btn-row end">
+        <button class="btn ghost" id="rnCancel">取消</button>
+        <button class="btn primary" id="rnSave">保存并全书生效 ▶</button>
+      </div>
+      <div class="modal-err" id="rnErr"></div>
+    </div>
+  </div>
+
+  <!-- 完本弹窗 -->
+  <div class="modal hidden" id="finaleModal">
+    <div class="modal-card">
+      <button class="modal-close" id="flClose" title="关闭 (Esc)">✕</button>
+      <h2>🏁 完本策略</h2>
+      <p class="modal-hint">收尾冲刺：autopilot 改发"收束令"，逼向大高潮+结局、对照台账逐条回收伏笔、给人物结局。作者收完输出「【完本待审】」后，主编核对<b>完本清单</b>（主线/伏笔/人物/卖点/有无烂尾），通过才标"已完本"并干净停止；不过则退回补写。</p>
+      <div class="dim-note" id="flStatus"></div>
+      <div class="btn-row" style="flex-wrap:wrap;gap:8px;margin-top:8px">
+        <button class="btn primary" id="flEnter">🏁 进入收尾冲刺</button>
+        <button class="btn" id="flReview">📋 完本审稿（试评）</button>
+        <button class="btn ghost" id="flUndo">↩ 撤销收尾 / 连载中</button>
+        <button class="btn ghost" id="flMark">✅ 直接标记已完本</button>
+      </div>
+      <p class="modal-hint" style="margin-top:10px;border-top:1px solid rgba(255,255,255,.08);padding-top:8px"><b>完结收口</b>（内部完本 → 番茄平台完结）：把收尾新增章发齐到番茄、对账平台状态。番茄签约/征文书完结需<b>编辑审批</b>，软件不替你按下不可逆的提交。</p>
+      <div class="btn-row" style="flex-wrap:wrap;gap:8px">
+        <button class="btn" id="flReport">📊 完结就绪报告（含番茄对账）</button>
+        <button class="btn primary" id="flClosure">🏁 完结收口（发齐+对账）</button>
+        <button class="btn ghost" id="flLocate">🔎 定位番茄申请完结入口</button>
+      </div>
+      <pre class="rb-critique" id="flClosureOut" style="display:none"></pre>
+      <div class="modal-err" id="flErr"></div>
+      <div class="ol-result hidden" id="flResult">
+        <div class="dim-note" id="flMeta"></div><pre id="flCritique"></pre>
+        <div class="btn-row end"><button class="btn primary" id="flApply">✅ 让作者按此补写结局 ▶</button></div>
+      </div>
+    </div>
+  </div>
+
   <!-- 大纲审稿弹窗 -->
   <div class="modal hidden" id="outlineModal">
     <div class="modal-card">
@@ -231,6 +389,7 @@
       <div class="ol-result hidden" id="olResult">
         <div class="dim-note" id="olMeta"></div>
         <pre id="olCritique"></pre>
+        <div class="btn-row end"><button class="btn primary" id="olApply">✅ 让作者按此修订大纲 ▶</button></div>
       </div>
     </div>
   </div>
