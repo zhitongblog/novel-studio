@@ -18,7 +18,7 @@ export async function runTui() {
   rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   console.log('\n' + banner() + '\n');
   if (!findUntermExe()) {
-    console.log(c.red('⚠ 未检测到 Unterm（C:\\Program Files\\Unterm\\unterm.exe）。写作功能需要它。\n'));
+    console.log(c.red('⚠ 未检测到 Unterm（Windows: C:\\Program Files\\Unterm\\；macOS/Linux: ~/.local/bin/unterm 或 /Applications/Unterm.app）。写作功能需要它。\n'));
   }
   let alive = true;
   while (alive) {

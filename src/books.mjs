@@ -1,10 +1,9 @@
 // 高层"书"操作：创建（注册 + scaffold + profile）、列表带统计
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { loadBooks, upsertBook, getBook, slugify, newId, removeBook } from './store.mjs';
 import { scaffoldBook, refreshContext } from './scaffold.mjs';
-import { ensureProfile, cli } from './unterm.mjs';
+import { ensureProfile, cli, killProcess } from './unterm.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { getStyle } from './styles.mjs';
 
@@ -12,7 +11,7 @@ import { getStyle } from './styles.mjs';
 export function deleteBook(slugOrId, { deleteFiles = false } = {}) {
   const b = getBook(slugOrId);
   if (!b) throw new Error('找不到书：' + slugOrId);
-  try { const s = getSession(b.slug); if (s) { spawnSync('taskkill', ['/PID', String(s.pid), '/T', '/F']); removeSession(b.slug); } } catch {}
+  try { const s = getSession(b.slug); if (s) { killProcess(s.pid); removeSession(b.slug); } } catch {}
   try { if (b.profile) cli(['profile', 'delete', b.profile, '--yes']); } catch {}
   removeBook(b.slug);
   let filesDeleted = false;

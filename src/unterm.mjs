@@ -7,14 +7,37 @@ import {
   UNTERM_INSTANCES_DIR, UNTERM_PROXY_FILE,
 } from './paths.mjs';
 
+const IS_WIN = process.platform === 'win32';
+
+// 在 PATH 里解析一个命令的绝对路径（mac/linux 用 which，win 用 where）
+function whichBin(name) {
+  try {
+    const r = spawnSync(IS_WIN ? 'where' : 'which', [name], { encoding: 'utf8' });
+    if (r.status === 0) return (r.stdout || '').trim().split(/\r?\n/)[0] || null;
+  } catch {}
+  return null;
+}
+
 export function findUntermExe() {
   for (const c of UNTERM_EXE_CANDIDATES) if (c && fs.existsSync(c)) return c;
-  return null;
+  return whichBin(IS_WIN ? 'unterm.exe' : 'unterm');   // 兜底：PATH
 }
 export function findUntermCli() {
   for (const c of UNTERM_CLI_CANDIDATES) if (c && fs.existsSync(c)) return c;
-  // 退而求其次：GUI exe 也接受大部分 cli 子命令
-  return findUntermExe();
+  return whichBin(IS_WIN ? 'unterm-cli.exe' : 'unterm-cli') || findUntermExe();
+}
+
+// 跨平台结束一个进程（Windows 用 taskkill 杀进程树；POSIX 用信号，先 TERM 后 KILL）。
+export function killProcess(pid) {
+  if (pid == null) return false;
+  if (IS_WIN) {
+    try { spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { encoding: 'utf8' }); return true; }
+    catch { return false; }
+  }
+  // POSIX：spawnInstance 用 detached 起的是新进程组，优先杀进程组（负 pid），失败再杀单进程。
+  try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch {} }
+  setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} } }, 1500).unref?.();
+  return true;
 }
 
 // 同步跑一条 unterm-cli 子命令，返回 {ok, stdout, stderr}
@@ -84,15 +107,24 @@ export function instancePids() {
   return new Set(listInstances().map(i => i.pid));
 }
 
-// spawn 一个绑定 profile 的新 Unterm 实例，运行 launch.ps1。detached，不阻塞。
+// spawn 一个绑定 profile 的新 Unterm 实例，运行启动脚本。detached，不阻塞。
 // 返回 child pid。随后用 waitForNewInstance() 定位它的 mcp_port/token。
+// Windows：pwsh -NoExit -File launch.ps1；macOS/Linux：登录 shell source launch.sh 后保持交互
+//（mirror -NoExit，让 agent 退出后窗口停在 shell 提示符，autopilot 据此判定停止）。
 export function spawnInstance({ profile, cwd, launchScript }) {
   const exe = findUntermExe();
-  if (!exe) throw new Error('unterm.exe 未找到');
+  if (!exe) throw new Error('未找到 unterm 可执行文件（设 UNTERM_EXE 或装到 ~/.local/bin / Program Files）');
   const args = [];
   if (profile) args.push('--profile', profile);
-  args.push('start', '--always-new-process', '--cwd', cwd,
-    '-e', 'pwsh', '-NoLogo', '-NoExit', '-File', launchScript);
+  args.push('start', '--always-new-process', '--cwd', cwd, '-e');
+  if (IS_WIN) {
+    args.push('pwsh', '-NoLogo', '-NoExit', '-File', launchScript);
+  } else {
+    const shell = process.env.SHELL || '/bin/zsh';
+    const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+    // source 脚本(运行 agent，前台)，agent 退出后落到交互 shell 保持窗口存活
+    args.push(shell, '-l', '-c', `source ${q(launchScript)}; exec ${q(shell)} -i`);
+  }
   const child = spawn(exe, args, {
     detached: true,
     stdio: 'ignore',

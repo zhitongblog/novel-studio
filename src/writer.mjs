@@ -19,34 +19,57 @@ import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFo
 import { maybeAutoPublish } from './autopublish.mjs';
 import { runFinaleClosure } from './finale.mjs';
 
-// 生成 launch.ps1：设代理环境、（best-effort）切 unterm 代理、cd 到书目录、启动 agent 带初始指令
+const IS_WIN = process.platform === 'win32';
+
+// 生成启动脚本：设代理环境、cd 到书目录、启动 agent 带初始指令。
+// Windows → launch.ps1（pwsh）；macOS/Linux → launch.sh（POSIX sh）。
 export function writeLaunchScript(book, model, instruction, cfg) {
   const m = getModel(model);
-  const seed = m.seedArgs(instruction, cfg);
   // 安全网：把任何换行折叠成空格 —— 多行 prompt 会被 agent 当多行草稿、等人工回车，无法自动开跑。
-  const psArr = '@(' + seed.map(a => "'" + String(a).replace(/[\r\n]+/g, ' ').replace(/'/g, "''") + "'").join(',') + ')';
+  const seed = m.seedArgs(instruction, cfg).map(a => String(a).replace(/[\r\n]+/g, ' '));
   const proxy = cfg.enableProxy ? proxyUrl() : '';
-  const lines = [
-    '$ErrorActionPreference = "Continue"',
-    `Set-Location -LiteralPath '${book.dir.replace(/'/g, "''")}'`,
-    `Write-Host "== Novel Studio :: 《${book.title.replace(/"/g, '`"')}》 / ${m.name} ==" -ForegroundColor Cyan`,
-  ];
-  if (cfg.enableProxy && proxy) {
-    // 只为本会话注入代理环境变量（大小写都给，兼容 codex 的 Rust HTTP 客户端）；
-    // 绝不改动 unterm 全局 proxy.json，避免污染用户配置。
+  const dir = path.join(book.dir, '.studio');
+  fs.mkdirSync(dir, { recursive: true });
+
+  if (IS_WIN) {
+    const psArr = '@(' + seed.map(a => "'" + a.replace(/'/g, "''") + "'").join(',') + ')';
+    const lines = [
+      '$ErrorActionPreference = "Continue"',
+      `Set-Location -LiteralPath '${book.dir.replace(/'/g, "''")}'`,
+      `Write-Host "== Novel Studio :: 《${book.title.replace(/"/g, '`"')}》 / ${m.name} ==" -ForegroundColor Cyan`,
+    ];
+    if (proxy) {
+      lines.push(
+        `$env:HTTP_PROXY = '${proxy}'`, `$env:HTTPS_PROXY = '${proxy}'`, `$env:ALL_PROXY = '${proxy}'`,
+        `$env:http_proxy = '${proxy}'`, `$env:https_proxy = '${proxy}'`, `$env:all_proxy = '${proxy}'`,
+        `Write-Host "[proxy] 本会话已启用 ${proxy}" -ForegroundColor DarkGray`,
+      );
+    }
     lines.push(
-      `$env:HTTP_PROXY = '${proxy}'`, `$env:HTTPS_PROXY = '${proxy}'`, `$env:ALL_PROXY = '${proxy}'`,
-      `$env:http_proxy = '${proxy}'`, `$env:https_proxy = '${proxy}'`, `$env:all_proxy = '${proxy}'`,
-      `Write-Host "[proxy] 本会话已启用 ${proxy}" -ForegroundColor DarkGray`,
+      `Write-Host "[agent] 启动 ${m.bin} ，初始指令已注入…" -ForegroundColor DarkGray`,
+      `$seed = ${psArr}`,
+      `& ${m.bin} @seed`,
     );
+    const p = path.join(dir, 'launch.ps1');
+    fs.writeFileSync(p, '﻿' + lines.join('\r\n') + '\r\n', 'utf8'); // BOM 保证中文
+    return p;
   }
-  lines.push(
-    `Write-Host "[agent] 启动 ${m.bin} ，初始指令已注入…" -ForegroundColor DarkGray`,
-    `$seed = ${psArr}`,
-    `& ${m.bin} @seed`,
-  );
-  const p = path.join(book.dir, '.studio', 'launch.ps1');
-  fs.writeFileSync(p, '﻿' + lines.join('\r\n') + '\r\n', 'utf8'); // BOM 保证中文
+
+  // POSIX sh：单引号包裹（内部 ' → '\'' 转义）。agent 跑前台，不 exec（退出后由外层 shell 保持窗口）。
+  const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  const lines = ['#!/bin/sh', `cd ${q(book.dir)} || exit 1`,
+    `echo "== Novel Studio :: 《${book.title}》 / ${m.name} =="`];
+  if (proxy) {
+    for (const v of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) {
+      lines.push(`export ${v}=${q(proxy)}`);
+    }
+    lines.push(`echo "[proxy] 本会话已启用 ${proxy}"`);
+  }
+  lines.push(`echo "[agent] 启动 ${m.bin} ，初始指令已注入…"`,
+    `${m.bin} ${seed.map(q).join(' ')}`);
+  const p = path.join(dir, 'launch.sh');
+  fs.writeFileSync(p, lines.join('\n') + '\n', 'utf8');
+  try { fs.chmodSync(p, 0o755); } catch {}
   return p;
 }
 
@@ -122,7 +145,8 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
     const editorOff = cfg.editorReview?.enabled === false;
     const slug = book.slug;
     // 从持久化的写作模式播种运行时审核开关（重启/重挂后恢复）：review→每 reviewEvery 批审核；auto→0。
-    setReviewEvery(slug, book.writeMode === 'review' ? (book.reviewEvery || 1) : 0);
+    // 读 store 最新值，不用入参 book（它可能是 setBookWriteMode 之前抓的旧引用，writeMode 会缺）。
+    { const fb = getBook(slug) || book; setReviewEvery(slug, fb.writeMode === 'review' ? (fb.reviewEvery || 1) : 0); }
     const gateOn = cfg.editorReview?.requireApproval !== false;   // 全局确认门
     const renudge = new Map();   // scope -> 已重催次数
     const onOutlineReady = editorOff ? undefined : async (scope) => {

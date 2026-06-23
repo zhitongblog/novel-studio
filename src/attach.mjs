@@ -1,7 +1,7 @@
 // 连接一个运行中的写作会话，做：穿插指令(send) / 实时镜像(watch) / 停止(stop)。
 // 每次都按会话描述符新建一条 MCP 连接（任意进程皆可），与启动它的进程互不依赖。
-import { spawnSync } from 'node:child_process';
 import { connectInstance } from './mcpclient.mjs';
+import { killProcess } from './unterm.mjs';
 import { getSession, removeSession, listSessions } from './sessions.mjs';
 import { Autopilot } from './autopilot.mjs';
 import { recordUsage, parseTokens } from './usage.mjs';
@@ -121,7 +121,7 @@ export async function sampleTokens(slug, cfg) {
 export function stopBook(slug) {
   const sess = getSession(slug);
   if (!sess) return { ok: false, reason: '无该会话' };
-  try { spawnSync('taskkill', ['/PID', String(sess.pid), '/T', '/F'], { encoding: 'utf8' }); } catch {}
+  try { killProcess(sess.pid); } catch {}
   removeSession(slug);
   return { ok: true, killed: sess.pid };
 }
