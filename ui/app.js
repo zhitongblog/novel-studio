@@ -123,6 +123,7 @@ function openWrite(book) {
   $('#mirror').textContent = '（开始写作后，这里实时显示 AI 写作过程）';
   $('#logFeed').innerHTML = '';
   $('#wbTarget').value = book.targetChapters || 0;
+  $('#writeMode').value = book.writeMode === 'review' ? 'review' : 'auto';
   $('#synText').value = book.synopsis || '';
   const running = STATE.sessions.find(s => s.slug === book.slug && s.running !== false);
   setWriting(!!running);
@@ -148,9 +149,23 @@ $('#btnStart').addEventListener('click', async () => {
   if (!CUR) return;
   $('#btnStart').disabled = true; $('#writeStatus').textContent = '启动中…';
   try {
-    await api('/api/write', 'POST', { book: CUR.slug, model: $('#writeModel').value, task: $('#writeTask').value });
-    setWriting(true); openStream(CUR.slug); toast('已开窗，autopilot 运行中');
+    const writeMode = $('#writeMode').value === 'review' ? 'review' : 'auto';
+    await api('/api/write', 'POST', { book: CUR.slug, model: $('#writeModel').value, task: $('#writeTask').value, writeMode });
+    if (CUR) CUR.writeMode = writeMode;
+    setWriting(true); openStream(CUR.slug);
+    toast(writeMode === 'review' ? '已开窗 · 逐批审核模式（每批写完会停下等你）' : '已开窗，autopilot 全自动运行中');
   } catch (e) { toast('启动失败：' + e.message); setWriting(false); }
+});
+// 写作模式热切换（提前选或写作中随时切）：立即生效，无需重开窗口
+$('#writeMode').addEventListener('change', async () => {
+  if (!CUR) return;
+  const mode = $('#writeMode').value === 'review' ? 'review' : 'auto';
+  try {
+    await api('/api/book/review-mode', 'POST', { book: CUR.slug, mode });
+    CUR.writeMode = mode; const b = STATE.books.find(x => x.slug === CUR.slug); if (b) b.writeMode = mode;
+    if (mode === 'auto') hideReviewBar();
+    toast(mode === 'review' ? '已切到逐批审核：下一批写完会停下等你' : '已切到全自动：连续写作不再停顿');
+  } catch (e) { toast('切换失败：' + e.message); }
 });
 $('#btnStop').addEventListener('click', async () => {
   if (!CUR) return;
@@ -989,16 +1004,31 @@ function openStream(slug) {
   STREAM.onerror = () => {};
 }
 function closeStream() { if (STREAM) { STREAM.close(); STREAM = null; } }
-// ---------- 审稿确认门动作条 ----------
+// ---------- 审稿/审核确认门动作条 ----------
 function hideReviewBar() { $('#reviewBar').classList.add('hidden'); }
 async function showReviewBar() {
   if (!CUR) return;
   try {
     const p = await api('/api/book/pending?book=' + encodeURIComponent(CUR.slug));
     if (!p.pending) { hideReviewBar(); return; }
-    $('#rbTitle').textContent = `审稿意见待确认（${p.scope || ''}）`;
-    $('#rbFile').textContent = p.file ? ' · reviews/' + p.file : '';
-    $('#rbCritique').textContent = p.critique || '（详见 reviews 文件）';
+    const batch = p.kind === 'batch-review';
+    if (batch) {
+      // 逐批审核：本批写完，等用户批准/给要求/停止
+      $('#rbTitle').textContent = `本批已写完，待你审核（${p.scope || ''}）`;
+      $('#rbFile').textContent = '';
+      $('#rbCritique').textContent = '可在右侧实时镜像 / 阅读台查看本批内容。满意就「批准并继续」；想左右剧情就写下要求再「按我的要求继续」。';
+      $('#rbReq').classList.remove('hidden');
+      $('#rbActionsOutline').classList.add('hidden');
+      $('#rbActionsBatch').classList.remove('hidden');
+    } else {
+      // 大纲审稿确认门
+      $('#rbTitle').textContent = `审稿意见待确认（${p.scope || ''}）`;
+      $('#rbFile').textContent = p.file ? ' · reviews/' + p.file : '';
+      $('#rbCritique').textContent = p.critique || '（详见 reviews 文件）';
+      $('#rbReq').classList.add('hidden');
+      $('#rbActionsBatch').classList.add('hidden');
+      $('#rbActionsOutline').classList.remove('hidden');
+    }
     $('#reviewBar').classList.remove('hidden');
   } catch {}
 }
@@ -1014,8 +1044,36 @@ async function reviewDecision(apply) {
 }
 $('#rbApply').addEventListener('click', () => reviewDecision(true));
 $('#rbSkip').addEventListener('click', () => reviewDecision(false));
+// 逐批审核裁决：批准继续 / 按要求继续 / 停止
+async function batchContinue(withReq) {
+  if (!CUR) return;
+  const requirements = withReq ? $('#rbReq').value.trim() : '';
+  if (withReq && !requirements) { toast('请先写下你对下一批的要求'); $('#rbReq').focus(); return; }
+  const btns = ['#rbContinue', '#rbContinueReq', '#rbStop'].map(s => $(s));
+  btns.forEach(b => b.disabled = true);
+  try {
+    await api('/api/book/review-continue', 'POST', { book: CUR.slug, requirements });
+    $('#rbReq').value = ''; hideReviewBar();
+    toast(requirements ? '已下达本批要求 → 继续写' : '已批准 → 继续写下一批');
+  } catch (e) { toast(e.message); }
+  finally { btns.forEach(b => b.disabled = false); }
+}
+async function batchStop() {
+  if (!CUR) return;
+  const btns = ['#rbContinue', '#rbContinueReq', '#rbStop'].map(s => $(s));
+  btns.forEach(b => b.disabled = true);
+  try {
+    await api('/api/book/review-continue', 'POST', { book: CUR.slug, stop: true });
+    hideReviewBar(); setWriting(false); closeStream();
+    toast('已停止 → 不再续写，关闭窗口');
+  } catch (e) { toast(e.message); }
+  finally { btns.forEach(b => b.disabled = false); }
+}
+$('#rbContinue').addEventListener('click', () => batchContinue(false));
+$('#rbContinueReq').addEventListener('click', () => batchContinue(true));
+$('#rbStop').addEventListener('click', batchStop);
 function appendLog(e) {
-  if (e.kind === 'pending-review') showReviewBar();   // 审稿待确认 → 弹出动作条
+  if (e.kind === 'pending-review' || e.kind === 'pending-batch') showReviewBar();   // 待确认/待审核 → 弹动作条
   const feed = $('#logFeed');
   const cls = 'log-line ' + (e.source === 'autopilot' ? 'autopilot ' : '') + (e.level || 'info');
   const tag = e.level === 'act' ? '●' : e.level === 'warn' ? '▲' : e.level === 'error' ? '✖' : '○';
@@ -1273,6 +1331,7 @@ $('#nbLaunch').addEventListener('click', async () => {
     const r = await api('/api/book/launch', 'POST', {
       title, theme: $('#nbTheme').value.trim(),
       words: getWords(), model: $('#nbModel').value, style: $('#nbStyle').value,
+      writeMode: $('#nbWriteMode').value === 'review' ? 'review' : 'auto',
     });
     $('#modal').classList.add('hidden');
     await refresh();

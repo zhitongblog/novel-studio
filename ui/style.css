@@ -226,7 +226,9 @@ textarea { resize: vertical; line-height: 1.5; }
 .rb-head { color: #f0c674; font-size: 13px; margin-bottom: 6px; }
 .rb-file { color: #9aa3b5; font-size: 12px; }
 .rb-critique { max-height: 30vh; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 12px/1.55 ui-monospace, Consolas, monospace; background: #11141c; border: 1px solid #2a2e3a; border-radius: 6px; padding: 8px; margin: 0 0 8px; color: #c9d1e0; }
-.rb-actions { display: flex; gap: 8px; }
+.rb-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.rb-req { width: 100%; box-sizing: border-box; resize: vertical; margin: 0 0 8px; padding: 8px; border-radius: 6px; background: #11141c; border: 1px solid #2a2e3a; color: #e6e9f0; font: 13px/1.5 inherit; }
+.rb-req:focus { outline: none; border-color: #5a4a1e; }
 
 /* ===== 阅读 / 工作台 ===== */
 .reader { flex: 1; display: flex; gap: 14px; min-height: 0; }

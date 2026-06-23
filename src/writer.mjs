@@ -12,7 +12,7 @@ import { Autopilot } from './autopilot.mjs';
 import { refreshContext } from './scaffold.mjs';
 import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision, reviewEnding, buildEndingRenudgeInstruction } from './editor.mjs';
 import { buildFinaleInstruction, buildAfterwordInstruction } from './planner.mjs';
-import { setPending, hasPending } from './pending.mjs';
+import { setPending, hasPending, getReviewEvery, setReviewEvery, setReviewDefault, takeResume } from './pending.mjs';
 import { saveSession } from './sessions.mjs';
 import { recordUsage } from './usage.mjs';
 import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFolders, clearFlatImport, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
@@ -121,6 +121,8 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
     // 大纲审稿门：作者输出「【大纲待审：xxx】」时，换一个模型无头审稿。
     const editorOff = cfg.editorReview?.enabled === false;
     const slug = book.slug;
+    // 从持久化的写作模式播种运行时审核开关（重启/重挂后恢复）：review→每 reviewEvery 批审核；auto→0。
+    setReviewEvery(slug, book.writeMode === 'review' ? (book.reviewEvery || 1) : 0);
     const gateOn = cfg.editorReview?.requireApproval !== false;   // 全局确认门
     const renudge = new Map();   // scope -> 已重催次数
     const onOutlineReady = editorOff ? undefined : async (scope) => {
@@ -229,6 +231,17 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       onLog({ level: 'warn', msg: `完本审稿未过 → 第 ${n} 次退回补写结局`, source: 'finale' });
       return { text: buildEndingRenudgeInstruction(b, rc.file), stop: false };
     };
+    // —— 逐批审核（半自动写作模式）：审核模式下每写够 N 批就停下，等用户在界面裁决（批准/按要求改/停止）——
+    // reviewEvery 实时从 pending store 读，支持运行中热切换全自动 ↔ 审核模式。
+    const onBatchReview = async ({ n, defaultText }) => {
+      const b = getBook(slug) || book;
+      const chapters = (() => { try { return bookStats(b).chapters; } catch { return 0; } })();
+      setReviewDefault(slug, defaultText);   // 暂存"批准并继续"的默认续写文案
+      setPending(slug, { kind: 'batch-review', scope: `已写到第 ${chapters} 章 · 第 ${n} 批`, n, chapters });
+      onLog({ level: 'act', source: 'autopilot', kind: 'pending-batch', n, chapters,
+        msg: `⏸ 本批已写完（已到第 ${chapters} 章），待你审核：批准继续 / 按要求继续 / 停止` });
+      return '本批已写完。请【暂停】：先不要写下一批，也不要改大纲，等用户审核当前内容并下达下一步要求后再继续。';
+    };
     autopilot = new Autopilot(mcp, paneId, {
       ...cfg.autopilot,
       onLog: (e) => onLog({ ...e, source: 'autopilot' }),
@@ -237,7 +250,10 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       onRevisionDone,
       finaleCheck,
       onFinaleReady,
-      isPending: () => hasPending(slug),   // 全局确认门：有待确认审稿时 autopilot 挂起
+      reviewEvery: () => getReviewEvery(slug),   // 0=全自动；N=每 N 批审核（实时热切换）
+      onBatchReview,
+      takeReviewResume: () => takeResume(slug),
+      isPending: () => hasPending(slug),   // 全局确认门：有待确认审稿/审核时 autopilot 挂起
       // 启用完本：不靠章数硬停，交给收尾流程收束；已完本则停。未启用完本时沿用旧的"到目标章数即停"。
       shouldStopContinue: () => {
         const b = getBook(slug) || book;

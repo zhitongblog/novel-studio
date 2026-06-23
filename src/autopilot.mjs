@@ -96,6 +96,21 @@ export class Autopilot {
     }
     this._heldLogged = false;
 
+    // —— 逐批审核 · 恢复：用户已裁决(pending 已清) → 注入"下一批"指令、推进计数，恢复自动监控 ——
+    // 暂停时未增 continueCount，故这里增一次让批次号单调推进（否则会卡在同一审核点反复触发）。
+    if (this._awaitingReview && !(typeof this.opt.isPending === 'function' && this.opt.isPending())) {
+      const resumeText = (typeof this.opt.takeReviewResume === 'function' && this.opt.takeReviewResume())
+        || this.opt.continueText || '继续';
+      try { await this.mcp.submitText(this.paneId, resumeText); }
+      catch (e) { this.log('恢复续写注入失败（将重试）：' + e.message, 'warn'); this.prevScreen = screen; return; }
+      this._awaitingReview = false;
+      this.continueCount++; this.stats.continues++;
+      this.lastRespondedHash = hash(tail);
+      this.prevScreen = screen;
+      this.log(`已采纳你的裁决 → 继续写下一批（第 ${this.continueCount} 次续写）`, 'act');
+      return;
+    }
+
     // agent 在场检测（基于屏幕内容，比前台进程名可靠）：
     // bypass 模式下 codex 会 spawn 子 shell 执行命令，进程名会变成 pwsh —— 但屏幕仍是 agent 的 TUI。
     // 只有屏幕回到"裸 shell 提示符且无 agent TUI 标记"才算 agent 退出 → 绝不向裸 shell 注入指令。
@@ -276,6 +291,24 @@ export class Autopilot {
       : paceCheck ? this.opt.paceCheckText
       : styleCheck ? this.opt.styleCheckText
       : this.opt.continueText) || '继续';
+
+    // —— 逐批审核门（半自动）：审核模式下，到达审核点就【暂停】等用户裁决，不自动续写。
+    // reviewEvery 每拍实时读取(可热切换全自动/审核模式)；本应自动发送的 text 作为"批准并继续"的默认指令交给上层暂存。
+    const reviewEvery = (typeof this.opt.reviewEvery === 'function' ? this.opt.reviewEvery() : (this.opt.reviewEvery || 0)) || 0;
+    if (reviewEvery > 0 && typeof this.opt.onBatchReview === 'function' && (n % reviewEvery === 0)) {
+      this.sawAgentRunning = true;
+      let instr = null;
+      try { instr = await this.opt.onBatchReview({ n, defaultText: text }); }
+      catch (e) { this.log('审核门处理失败（照常续写）：' + e.message, 'warn'); }
+      if (instr) {
+        try { await this.mcp.submitText(this.paneId, instr); }
+        catch (e) { this.log('暂停指令注入失败（将重试）：' + e.message, 'warn'); return; }
+        this._awaitingReview = true;
+        this.lastRespondedHash = h;
+        this.log('本批写完 → 已暂停，等你审核（批准继续 / 按要求继续 / 停止）', 'act');
+        return;
+      }
+    }
 
     // 先把指令打进输入框、停顿、再单独回车提交（一次性带回车会被当作粘贴内容、只填不发）。
     try {

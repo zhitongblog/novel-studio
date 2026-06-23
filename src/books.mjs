@@ -41,6 +41,19 @@ export function setBookTarget(slugOrId, n) {
   return b;
 }
 
+// 写作模式：'auto'(全自动) | 'review'(逐批审核·半自动)。review 时 reviewEvery=每几批停下等审核(默认1)。
+// 持久化进 book.writeMode/book.reviewEvery：作为开写默认值、并在重启后恢复。运行时的实时开关另存内存(pending store)。
+export function setBookWriteMode(slugOrId, mode, reviewEvery) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  const m = mode === 'review' ? 'review' : 'auto';
+  b.writeMode = m;
+  if (m === 'review') b.reviewEvery = Math.max(1, Math.floor(Number(reviewEvery) || 1));
+  else delete b.reviewEvery;
+  upsertBook(b);
+  return b;
+}
+
 // 设定/更换一本书默认使用的模型（codex|claude|gemini），持久化进 book.model。
 // 这样卡片、续写(resume)、下次打开的默认值都会跟上选择；运行中的旧窗口需停掉重开才换。
 export function setBookModel(slugOrId, model) {

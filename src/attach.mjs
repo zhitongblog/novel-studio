@@ -8,6 +8,7 @@ import { recordUsage, parseTokens } from './usage.mjs';
 import { getBook, bookStats } from './books.mjs';
 import { stripCtrl } from './imagegen.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
+import { setPending, hasPending, getReviewEvery, setReviewEvery, setReviewDefault, takeResume } from './pending.mjs';
 
 const CR = '\r';
 
@@ -72,11 +73,26 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}) {
   const pane = await resolvePane(mcp, sess);
   if (pane == null) { mcp.close(); throw new Error('窗口里没有活动 pane'); }
   const tokenKey = sess.instanceId + '@' + (sess.startedAt || '');
+  // 重启后恢复持久化的写作模式（review→逐批审核；auto→全自动）
+  { const b = getBook(slug); setReviewEvery(slug, b?.writeMode === 'review' ? (b.reviewEvery || 1) : 0); }
+  const onBatchReview = async ({ n, defaultText }) => {
+    const b = getBook(slug);
+    const chapters = (() => { try { return bookStats(b).chapters; } catch { return 0; } })();
+    setReviewDefault(slug, defaultText);
+    setPending(slug, { kind: 'batch-review', scope: `已写到第 ${chapters} 章 · 第 ${n} 批`, n, chapters });
+    onLog({ level: 'act', source: 'autopilot', kind: 'pending-batch', n, chapters,
+      msg: `⏸ 本批已写完（已到第 ${chapters} 章），待你审核：批准继续 / 按要求继续 / 停止` });
+    return '本批已写完。请【暂停】：先不要写下一批，也不要改大纲，等用户审核当前内容并下达下一步要求后再继续。';
+  };
   const ap = new Autopilot(mcp, pane, {
     ...cfg.autopilot,
     assumeStarted: true,   // 重挂的会话：agent 已在运行，空闲时可直接驱动续写
     onLog: (e) => onLog({ ...e, source: 'autopilot' }),
     onTokens: (n) => recordUsage(slug, tokenKey, n),
+    reviewEvery: () => getReviewEvery(slug),
+    onBatchReview,
+    takeReviewResume: () => takeResume(slug),
+    isPending: () => hasPending(slug),
     shouldStopContinue: () => { const b = getBook(slug); const t = b?.targetChapters || 0; return t > 0 && bookStats(b).chapters >= t; },
     onReachedTarget: () => { try { maybeAutoPublish(getBook(slug), { cfg, onLog: (e) => onLog({ ...e }) }); } catch {} },
   });
