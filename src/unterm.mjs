@@ -18,13 +18,49 @@ function whichBin(name) {
   return null;
 }
 
-export function findUntermExe() {
-  for (const c of UNTERM_EXE_CANDIDATES) if (c && fs.existsSync(c)) return c;
-  return whichBin(IS_WIN ? 'unterm.exe' : 'unterm');   // 兜底：PATH
+// 读某个 unterm 二进制的版本（格式 "unterm 20260620-092052-hash"），取可比较的时间戳串。
+export function untermVersion(bin) {
+  try {
+    const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 4000 });
+    if (r.status === 0) {
+      const s = (r.stdout || '').trim();
+      const m = s.match(/(\d{8}-\d{6}-[0-9a-f]+)/);   // 日期时间串，可按字典序比较新旧
+      return m ? m[1] : s;
+    }
+  } catch {}
+  return '';
 }
+
+// 关键修复：本机可能并存多份 unterm（如 ~/.local/bin 的旧版 + /Applications 的新版）。
+// 旧版行为不同（pane 复用 / lua 报错）。故从所有存在的候选里挑【版本最新】的，避免误连旧版。
+// 可用 UNTERM_EXE 强制指定（如指向自编译的 dev build）。结果缓存，避免每次都跑 --version。
+let _exeCache;
+export function findUntermExe() {
+  if (_exeCache !== undefined) return _exeCache;
+  if (process.env.UNTERM_EXE && fs.existsSync(process.env.UNTERM_EXE)) return (_exeCache = process.env.UNTERM_EXE);
+  const cands = UNTERM_EXE_CANDIDATES.filter(c => c && fs.existsSync(c));
+  const viaPath = whichBin(IS_WIN ? 'unterm.exe' : 'unterm');
+  if (viaPath && !cands.includes(viaPath)) cands.push(viaPath);
+  let best = null, bestV = null;
+  for (const c of cands) {
+    const v = untermVersion(c);
+    if (best === null || v > bestV) { best = c; bestV = v; }
+  }
+  return (_exeCache = best);
+}
+
+// CLI 取与所选 GUI【同一份安装】里的 unterm-cli（保证版本一致，别一个新一个旧）。
+let _cliCache;
 export function findUntermCli() {
-  for (const c of UNTERM_CLI_CANDIDATES) if (c && fs.existsSync(c)) return c;
-  return whichBin(IS_WIN ? 'unterm-cli.exe' : 'unterm-cli') || findUntermExe();
+  if (_cliCache !== undefined) return _cliCache;
+  if (process.env.UNTERM_CLI && fs.existsSync(process.env.UNTERM_CLI)) return (_cliCache = process.env.UNTERM_CLI);
+  const exe = findUntermExe();
+  if (exe) {
+    const sib = path.join(path.dirname(exe), IS_WIN ? 'unterm-cli.exe' : 'unterm-cli');
+    if (fs.existsSync(sib)) return (_cliCache = sib);
+  }
+  for (const c of UNTERM_CLI_CANDIDATES) if (c && fs.existsSync(c)) return (_cliCache = c);
+  return (_cliCache = whichBin(IS_WIN ? 'unterm-cli.exe' : 'unterm-cli') || exe);
 }
 
 // 跨平台结束一个进程（Windows 用 taskkill 杀进程树；POSIX 用信号，先 TERM 后 KILL）。

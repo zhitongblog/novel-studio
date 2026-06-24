@@ -11,7 +11,7 @@ import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, dele
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll } from './models.mjs';
-import { listInstances, instanceIds, findUntermExe, findUntermCli, readProxyConfig } from './unterm.mjs';
+import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { startWriting } from './writer.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot } from './attach.mjs';
@@ -133,9 +133,11 @@ async function api(p, req, res, u) {
     }
     if (p === '/api/env') {   // 环境自检：unterm 路径 + 模型 + 代理 + 实例 + 书库（供环境页展示与操作）
       const proxy = readProxyConfig();
+      const uexe = findUntermExe() || '';
       return json(res, 200, {
         platform: process.platform,
-        untermExe: findUntermExe() || '',
+        untermExe: uexe,
+        untermVersion: uexe ? untermVersion(uexe) : '',
         untermCli: findUntermCli() || '',
         models: detectAll(),
         proxy: { enabled: !!cfg.enableProxy, node: cfg.proxyNode, url: proxy?.http_proxy || proxy?.socks_proxy || '' },

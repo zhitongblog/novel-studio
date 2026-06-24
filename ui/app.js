@@ -1458,7 +1458,7 @@ async function renderEnv() {
   const ok = (b) => b ? '✔ ' : '✖ ';
   const rows = [
     ['平台', e.platform],
-    ['Unterm 程序', e.untermExe || '✖ 未找到（写作功能需要 Unterm）'],
+    ['Unterm 程序', e.untermExe ? (e.untermExe + (e.untermVersion ? '  [' + e.untermVersion + ']' : '')) : '✖ 未找到（写作功能需要 Unterm）'],
     ['Unterm CLI', e.untermCli || '✖ 未找到'],
   ];
   for (const m of e.models) rows.push([m.name, ok(m.available) + (m.path || '未安装')]);
