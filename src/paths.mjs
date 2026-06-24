@@ -50,5 +50,11 @@ const CLI_BY_OS = IS_WIN
 export const UNTERM_EXE_CANDIDATES = [process.env.UNTERM_EXE, ...EXE_BY_OS].filter(Boolean);
 export const UNTERM_CLI_CANDIDATES = [process.env.UNTERM_CLI, ...CLI_BY_OS].filter(Boolean);
 
-// 默认书库工作区：D:\PM\storybook\books （APP_DIR 的上级 / books）
-export const DEFAULT_WORKSPACE = path.join(path.dirname(APP_DIR), 'books');
+// 默认书库工作区：
+// - 开发期（源码树跑）：APP_DIR 上级 / books（沿用旧行为，便于本地调试）
+// - 打包后（引擎在 .app 包内 / resources\engine 里）：绝不写进包内（重装会清、且可能只读），
+//   落到用户主目录 ~/NovelStudio/books。用户也可在「设置」里用文件夹选择器另选。
+const PACKAGED = /\.app[\\/]Contents[\\/]/.test(APP_DIR) || /[\\/]resources[\\/]engine([\\/]|$)/i.test(APP_DIR);
+export const DEFAULT_WORKSPACE = PACKAGED
+  ? path.join(HOME, 'NovelStudio', 'books')
+  : path.join(path.dirname(APP_DIR), 'books');
