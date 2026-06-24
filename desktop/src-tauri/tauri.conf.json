@@ -25,7 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": "all",
     "resources": {
       "../../bin": "engine/bin",
       "../../src": "engine/src",
