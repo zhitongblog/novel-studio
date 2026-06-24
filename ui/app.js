@@ -5,6 +5,16 @@ const IS_TAURI = location.hostname === 'tauri.localhost' || location.protocol ==
 const API = (!IS_TAURI && (location.protocol === 'http:' || location.protocol === 'https:'))
   ? location.origin : 'http://127.0.0.1:8787';
 
+// 调 Tauri 原生命令（桌面应用内可用）。v2: window.__TAURI__.core.invoke；v1: window.__TAURI__.invoke。
+const HAS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
+async function tauriInvoke(cmd, args) {
+  const t = window.__TAURI__;
+  if (!t) throw new Error('not-tauri');
+  const inv = (t.core && t.core.invoke) || t.invoke;
+  if (!inv) throw new Error('invoke 不可用');
+  return inv(cmd, args);
+}
+
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -1380,7 +1390,13 @@ async function renderSettings() {
   const c = STATE.config;
   const box = $('#settings');
   box.innerHTML = `
-    <label class="field"><span>书库目录</span><input id="setWs" value="${esc(c.workspace || '')}"></label>
+    <label class="field"><span>书库目录（写好的书都放这里）</span>
+      <div class="ws-row">
+        <input id="setWs" value="${esc(c.workspace || '')}" placeholder="点右侧“选择文件夹”挑一个目录">
+        <button class="btn" id="setWsPick" type="button">📁 选择文件夹</button>
+        <button class="btn ghost" id="setWsOpen" type="button">📂 打开</button>
+      </div>
+    </label>
     <label class="field"><span>默认模型</span><select id="setModel">${STATE.models.map(m => `<option value="${m.id}" ${m.id === c.defaultModel ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
     <label class="field"><span>代理</span><select id="setProxy">
       <option value="on" ${c.enableProxy ? 'selected' : ''}>开（用 unterm 当前代理）</option>
@@ -1404,18 +1420,63 @@ async function renderSettings() {
     try { STATE.config = await api('/api/config', 'POST', { patch }); fillModels(); toast('设置已保存'); }
     catch (e) { toast(e.message); }
   });
+  // 书库目录：原生文件夹选择器（桌面应用用 Tauri 对话框；浏览器回退到手填路径）
+  $('#setWsPick').addEventListener('click', async () => {
+    let dir = null;
+    if (HAS_TAURI) {
+      try { dir = await tauriInvoke('pick_folder'); }
+      catch (e) { toast('打开目录选择器失败：' + e.message); return; }
+      if (!dir) return;   // 用户取消
+    } else {
+      dir = window.prompt('输入书库目录的完整路径：', $('#setWs').value || '');
+      if (dir == null) return;
+      dir = dir.trim(); if (!dir) return;
+    }
+    $('#setWs').value = dir;
+    try { STATE.config = await api('/api/config', 'POST', { patch: { workspace: dir } }); toast('书库目录已设为 ' + dir); }
+    catch (e) { toast('保存失败：' + e.message); }
+  });
+  $('#setWsOpen').addEventListener('click', async () => {
+    try { const r = await api('/api/open-path', 'POST', { path: $('#setWs').value.trim() }); toast('已在文件管理器打开：' + r.dir); }
+    catch (e) { toast(e.message); }
+  });
 }
 
 // ---------- 环境 ----------
 async function renderEnv() {
-  const box = $('#env'); box.innerHTML = '';
-  const rows = [];
-  for (const m of STATE.models) rows.push([m.name, (m.available ? '✔ ' : '✖ ') + (m.path || '未安装')]);
-  rows.push(['运行中实例', STATE.instances.map(i => `${i.id}(v${i.version})`).join(', ') || '无']);
-  rows.push(['书库', STATE.config.workspace || '—']);
+  const box = $('#env'); box.innerHTML = '<div class="env-row"><span class="k">检测中…</span></div>';
+  let e;
+  try { e = await api('/api/env'); }
+  catch (err) { box.innerHTML = `<div class="env-row"><span class="k">引擎未连接</span><span class="v">${esc(err.message)}</span></div>`; return; }
+  box.innerHTML = '';
+  // 操作条（可执行的操作）
+  const bar = el('div', 'btn-row'); bar.style.marginBottom = '12px';
+  bar.innerHTML = `<button class="btn" id="envReload">🔄 重新检测</button>
+    <button class="btn" id="envOpenWs">📂 打开书库目录</button>
+    <button class="btn ghost" id="envToSettings">⚙️ 去设置</button>`;
+  box.appendChild(bar);
+  const ok = (b) => b ? '✔ ' : '✖ ';
+  const rows = [
+    ['平台', e.platform],
+    ['Unterm 程序', e.untermExe || '✖ 未找到（写作功能需要 Unterm）'],
+    ['Unterm CLI', e.untermCli || '✖ 未找到'],
+  ];
+  for (const m of e.models) rows.push([m.name, ok(m.available) + (m.path || '未安装')]);
+  rows.push(['运行中实例', e.instances.map(i => `${i.id}(v${i.version})`).join('、') || '无']);
+  rows.push(['代理', e.proxy.enabled ? ('开 · ' + (e.proxy.url || '(未配置)')) : '关']);
+  rows.push(['书库目录', ok(e.workspaceExists) + (e.workspace || '—')]);
   for (const [k, v] of rows) {
     const r = el('div', 'env-row'); r.innerHTML = `<span class="k">${esc(k)}</span><span class="v">${esc(v)}</span>`; box.appendChild(r);
   }
+  $('#envReload').addEventListener('click', async () => {
+    try { const b = await api('/api/bootstrap'); STATE = { ...STATE, ...b }; } catch {}
+    renderEnv(); toast('已重新检测');
+  });
+  $('#envOpenWs').addEventListener('click', async () => {
+    try { const r = await api('/api/open-path', 'POST', { path: e.workspace }); toast('已打开：' + r.dir); }
+    catch (err) { toast(err.message); }
+  });
+  $('#envToSettings').addEventListener('click', () => showView('settings'));
 }
 
 boot();

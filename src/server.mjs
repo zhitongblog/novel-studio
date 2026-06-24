@@ -11,7 +11,7 @@ import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, dele
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll } from './models.mjs';
-import { listInstances, instanceIds } from './unterm.mjs';
+import { listInstances, instanceIds, findUntermExe, findUntermCli, readProxyConfig } from './unterm.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { startWriting } from './writer.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot } from './attach.mjs';
@@ -131,6 +131,19 @@ async function api(p, req, res, u) {
         chapters: pend.chapters, n: pend.n, ...base,
       });
     }
+    if (p === '/api/env') {   // 环境自检：unterm 路径 + 模型 + 代理 + 实例 + 书库（供环境页展示与操作）
+      const proxy = readProxyConfig();
+      return json(res, 200, {
+        platform: process.platform,
+        untermExe: findUntermExe() || '',
+        untermCli: findUntermCli() || '',
+        models: detectAll(),
+        proxy: { enabled: !!cfg.enableProxy, node: cfg.proxyNode, url: proxy?.http_proxy || proxy?.socks_proxy || '' },
+        instances: listInstances().map(i => ({ id: i.id, version: i.version, mcp_port: i.mcp_port })),
+        workspace: cfg.workspace,
+        workspaceExists: (() => { try { return fs.existsSync(cfg.workspace); } catch { return false; } })(),
+      });
+    }
     if (p === '/api/books') return json(res, 200, withUsage(listBooksWithStats()));
     if (p === '/api/sessions') return json(res, 200, sessionsInfo());
     if (p === '/api/usage') {
@@ -212,6 +225,18 @@ async function api(p, req, res, u) {
         const cmd = process.platform === 'win32' ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open';
         try { spawn(cmd, [book.dir], { detached: true, stdio: 'ignore' }).unref(); } catch {}
         return json(res, 200, { ok: true, dir: book.dir });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/open-path') {
+      // 在系统文件管理器里打开任意目录（环境页/设置“打开书库目录”）；缺省打开书库目录。不存在则先建。
+      try {
+        let dir = String(body.path || cfg.workspace || '').trim();
+        if (!dir) return json(res, 400, { error: '未指定目录' });
+        try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch {}
+        if (!fs.existsSync(dir)) return json(res, 400, { error: '目录不存在且无法创建：' + dir });
+        const cmd = process.platform === 'win32' ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+        try { spawn(cmd, [dir], { detached: true, stdio: 'ignore' }).unref(); } catch {}
+        return json(res, 200, { ok: true, dir });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/rename') {
