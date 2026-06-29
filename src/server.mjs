@@ -14,6 +14,8 @@ import { detectAll } from './models.mjs';
 import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { startWriting } from './writer.mjs';
+import { runStateless } from './statelessWriter.mjs';
+import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction } from './planner.mjs';
@@ -607,6 +609,30 @@ async function api(p, req, res, u) {
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, pane: session.paneId });
       } catch (e) { pushLog(slugOf(body.book), { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
     }
+    if (p === '/api/book/stateless-start') {   // 无状态省钱模式：每批全新无头进程 + 精准上下文包，后台跑，日志推 SSE
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const slug = book.slug;
+        if (sessionLive(slug)) return json(res, 409, { error: '该书已有长驻写作窗口在跑，请先停止再用无状态模式（两种模式不要同时跑）' });
+        if (rtOf(slug).statelessRun && !rtOf(slug).statelessRun.stopped) return json(res, 409, { error: '无状态写作已在进行中' });
+        const model = body.model || book.model || cfg.defaultModel;
+        if (body.model) { try { setBookModel(slug, body.model); } catch {} }
+        const untilTarget = body.untilTarget === true || (book.targetChapters > 0 && body.batches == null);
+        const batches = Math.max(1, parseInt(body.batches, 10) || 1);
+        const control = { stopped: false };
+        rtOf(slug).statelessRun = control;
+        rtOf(slug).logs = [];
+        pushLog(slug, { level: 'act', msg: `▶ 无状态省钱模式启动（模型 ${model}，${untilTarget ? '写到目标章数' : batches + ' 批'}）` });
+        runStateless({
+          book, model, cfg, batches, untilTarget, control,
+          onLog: (e) => pushLog(slug, { ...e, source: e.source || 'stateless' }),
+          onReachedTarget: () => { try { maybeAutoPublish(getBook(slug) || book, { cfg, onLog: (e) => pushLog(slug, { ...e }) }); } catch {} },
+        })
+          .catch(e => pushLog(slug, { level: 'error', source: 'stateless', msg: '无状态写作异常：' + e.message }))
+          .finally(() => { const st = rt.get(slug); if (st) st.statelessRun = null; broadcast(slug, 'stopped', { stateless: true }); pushLog(slug, { level: 'act', msg: '■ 无状态写作已结束' }); });
+        return json(res, 200, { ok: true, started: true, mode: 'stateless', untilTarget, batches });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
     if (p === '/api/write') return await doWrite(body, cfg, res);
     if (p === '/api/send') {
       const slug = slugOf(body.book);
@@ -647,6 +673,12 @@ async function api(p, req, res, u) {
     if (p === '/api/stop') {
       const slug = slugOf(body.book);
       const st = rt.get(slug);
+      // 无状态写作：置停止标志，循环会在【当前批次写完后】于批间安全停止（不杀进程、不丢半章）。
+      if (st?.statelessRun && !st.statelessRun.stopped) {
+        st.statelessRun.stopped = true;
+        pushLog(slug, { level: 'act', msg: '已请求停止无状态写作：当前批次写完即停（不会丢失半章）' });
+        return json(res, 200, { ok: true, mode: 'draining', stateless: true });
+      }
       const ap = st?.session?.autopilot;
       // 第一次停止(且在写、未在 draining、非 force) → 优雅停止：写完当前批次再关窗。
       if (ap && ap.running && !ap.draining && body.force !== true) {
@@ -690,7 +722,18 @@ function bookTokens(book) {
   return real || bookUsage(book.slug) || 0;
 }
 function withUsage(books) { return books.map(b => ({ ...b, tokens: bookTokens(b) })); }
-function sessionsInfo() { return listSessions().map(s => ({ ...s, tokens: bookTokens(getBook(s.slug)), running: rt.has(s.slug) })); }
+function sessionsInfo() {
+  const out = listSessions().map(s => ({ ...s, tokens: bookTokens(getBook(s.slug)), running: rt.has(s.slug) }));
+  // 无状态写作没有 Unterm 会话，但也要让前端看到"写作中"（可显示状态/可停止）。
+  const seen = new Set(out.map(s => s.slug));
+  for (const [slug, st] of rt) {
+    if (st?.statelessRun && !st.statelessRun.stopped && !seen.has(slug)) {
+      const b = getBook(slug);
+      if (b) out.push({ slug, title: b.title, model: b.model, mode: 'stateless', running: true, tokens: bookTokens(b) });
+    }
+  }
+  return out;
+}
 
 // 这本书是否还有“活着的 Unterm 窗口”：会话在册 且 其实例仍在运行实例列表里。
 function sessionLive(slug) {
@@ -802,8 +845,8 @@ function sseStream(u, res) {
   r.clients.add(res);
   // 补发最近日志
   for (const e of r.logs.slice(-50)) res.write(`event: log\ndata: ${JSON.stringify(e)}\n\n`);
-  // 启动屏幕镜像（多个客户端共享一个）
-  if (!r.streamer) {
+  // 启动屏幕镜像（多个客户端共享一个）。无状态模式无 Unterm 窗口可镜像 → 跳过，避免噪音。
+  if (!r.streamer && sessionLive(slug)) {
     const cfg = loadConfig();
     streamBook(slug, cfg, (txt) => broadcast(slug, 'screen', { text: txt }), { intervalMs: 1000 })
       .then(h => { r.streamer = h; })

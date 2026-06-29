@@ -70,6 +70,13 @@
                 <option value="review">✋ 逐批审核 · 每批写完停下等我审核</option>
               </select>
             </label>
+            <label class="field stateless-toggle" title="每章用全新无头进程写作、写完即弃会话，靠精准上下文包重喂前文。对长篇可省一个数量级 token、更快、不漂移。无窗口镜像，进度看下方日志。">
+              <span>♻️ 无状态省钱模式</span>
+              <span class="sl-controls">
+                <input type="checkbox" id="statelessMode" />
+                <span class="sl-batch hidden" id="slBatchWrap">批数 <input id="statelessBatches" type="number" min="1" value="3" style="width:54px" /></span>
+              </span>
+            </label>
             <div class="btn-row">
               <button class="btn primary" id="btnStart">▶ 开始写作</button>
               <button class="btn danger" id="btnStop" disabled>■ 停止</button>

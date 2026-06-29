@@ -19,7 +19,7 @@ fn pick_folder(app: tauri::AppHandle) -> Option<String> {
 
 struct Sidecar(Mutex<Option<Child>>);
 
-const ENGINE_PORT: &str = "8787";
+const ENGINE_PORT: &str = "8799";
 
 // 解析引擎入口 bin/novel.mjs 的路径，按优先级尝试多个候选位置：
 // 1) 环境变量 NOVEL_STUDIO_ENGINE 覆盖

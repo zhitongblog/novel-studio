@@ -5,6 +5,36 @@ import path from 'node:path';
 import { publishBook, getFanqieMaxChapter, getFanqieVolumes, createFanqieVolumes, numToCn } from './fanqie.mjs';
 import { setBookPublish } from './books.mjs';
 
+// —— 排期起始日 ——
+function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
+function fmtYMD(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+// 规则：读番茄最新章日期(latestDateStr)，晚于今天→以它为起点；今天或更早→从今天起。
+// 用户手动设了更晚的日期(manualStr)则尊重其更晚者。返回 Date(当天0点)。
+function computeScheduleStart(latestDateStr, manualStr) {
+  const today = startOfDay(new Date());
+  let floor = today;
+  if (latestDateStr) {
+    const d = new Date(String(latestDateStr).replace(' ', 'T'));
+    if (!isNaN(d.getTime()) && startOfDay(d).getTime() > today.getTime()) floor = startOfDay(d);
+  }
+  let start = floor;
+  if (manualStr) {
+    const m = new Date(String(manualStr).replace(' ', 'T'));
+    if (!isNaN(m.getTime()) && startOfDay(m).getTime() > floor.getTime()) start = startOfDay(m);
+  }
+  return start;
+}
+// 是否需要走"预约排期"：每日限量 / 番茄已排到未来(需接续) / 用户手动指定了日期。返回 {scheduled, start, reason}。
+function resolveSchedule(pc, latestDateStr) {
+  const today = startOfDay(new Date());
+  const latestFuture = !!latestDateStr && (() => { const d = new Date(String(latestDateStr).replace(' ', 'T')); return !isNaN(d.getTime()) && startOfDay(d).getTime() > today.getTime(); })();
+  const isDaily = pc.chaptersPerDay && pc.chaptersPerDay !== 'max';
+  if (!isDaily && !latestFuture && !pc.scheduledStartDate) return { scheduled: false, start: '', reason: 'immediate' };
+  const start = computeScheduleStart(latestDateStr, pc.scheduledStartDate);
+  const reason = latestFuture ? `接续番茄已排期到 ${latestDateStr}` : (pc.scheduledStartDate ? '按设置' : '从今天起');
+  return { scheduled: true, start: fmtYMD(start), reason };
+}
+
 // 图书卷目录名 → 番茄新建卷用的卷名。"卷14" → "第十四卷"；"卷14_少年游" → "第十四卷：少年游"。
 function volDisplayName(vol) {
   const m = String(vol).match(/卷\s*0*(\d+)(?:[_\-．.、:：]\s*(.+))?$/);
@@ -136,6 +166,7 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
       volumes = { map: vm.map, missing: vm.missing, willCreate, fanqieVolumes: vm.fanqieVolumes };
     }
   }
+  const sched = resolveSchedule(pc, fm.latestDate);
   return {
     ok: true, fanqieMax, approx: !!fm.approx, localMax,
     newCount: newCh.length, from: newCh[0]?.num || null, to: newCh[newCh.length - 1]?.num || null,
@@ -143,6 +174,7 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
     rewrittenCount: rewritten.length, rewrittenNums: rewritten.slice(0, 8).map(c => c.num),
     syncRewrites: !!pc.syncRewrites,
     matchVolumes: !!pc.matchVolumes, volumes,
+    fanqieLatestDate: fm.latestDate || '', scheduleStart: sched.start, scheduled: sched.scheduled, scheduleReason: sched.reason,
   };
 }
 
@@ -226,9 +258,13 @@ export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}
   const chapters = [...editCh, ...newCh];
   if (editCh.length) onLog({ level: 'act', msg: `同步 ${editCh.length} 个重写章(edit)：第 ${editCh.map(c => c.num).join('、')} 章` });
   if (newCh.length) onLog({ level: 'act', msg: `追加第 ${newCh[0].num}–${newCh[newCh.length - 1].num} 章新章（共 ${newCh.length} 章）…` });
+  // 排期起始日：自动接续番茄已排期（晚于今天→用它；否则→今天；手动更晚者优先）
+  const sched = resolveSchedule(pc, fm.latestDate);
+  if (sched.scheduled) onLog({ level: 'info', msg: `📅 排期起始日：${sched.start}（${sched.reason}）` });
+  else onLog({ level: 'info', msg: '📅 立即发布（番茄无未来排期、未设每日限量）' });
   const config = {
     chaptersPerDay: pc.chaptersPerDay || 'max',
-    scheduledStartDate: pc.scheduledStartDate || '',
+    scheduledStartDate: sched.start,
     scheduledTime: pc.scheduledTime || '',
     intervalSeconds: pc.intervalSeconds || 3,
     matchVolumes: !!pc.matchVolumes,

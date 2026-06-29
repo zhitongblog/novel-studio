@@ -1,9 +1,9 @@
 // Novel Studio GUI 前端逻辑（零依赖）。served by Node 引擎 / 或 Tauri 加载。
-// Tauri v2(Win) 用 http://tauri.localhost 提供资源 → 此时引擎在另一个源(127.0.0.1:8787)；
+// Tauri v2(Win) 用 http://tauri.localhost 提供资源 → 此时引擎在另一个源(127.0.0.1:8799)；
 // 浏览器直连引擎时则用同源。
 const IS_TAURI = location.hostname === 'tauri.localhost' || location.protocol === 'tauri:' || (typeof window !== 'undefined' && !!window.__TAURI__);
 const API = (!IS_TAURI && (location.protocol === 'http:' || location.protocol === 'https:'))
-  ? location.origin : 'http://127.0.0.1:8787';
+  ? location.origin : 'http://127.0.0.1:8799';
 
 // 调 Tauri 原生命令（桌面应用内可用）。v2: window.__TAURI__.core.invoke；v1: window.__TAURI__.invoke。
 const HAS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
@@ -155,15 +155,28 @@ function setWriting(on) {
 }
 $('#btnBack').addEventListener('click', () => { closeStream(); showView('shelf'); refresh(); });
 
+// 无状态模式开关：显示/隐藏批数输入
+$('#statelessMode').addEventListener('change', () => {
+  $('#slBatchWrap').classList.toggle('hidden', !$('#statelessMode').checked);
+});
 $('#btnStart').addEventListener('click', async () => {
   if (!CUR) return;
   $('#btnStart').disabled = true; $('#writeStatus').textContent = '启动中…';
+  const stateless = $('#statelessMode').checked;
   try {
-    const writeMode = $('#writeMode').value === 'review' ? 'review' : 'auto';
-    await api('/api/write', 'POST', { book: CUR.slug, model: $('#writeModel').value, task: $('#writeTask').value, writeMode });
-    if (CUR) CUR.writeMode = writeMode;
-    setWriting(true); openStream(CUR.slug);
-    toast(writeMode === 'review' ? '已开窗 · 逐批审核模式（每批写完会停下等你）' : '已开窗，autopilot 全自动运行中');
+    if (stateless) {
+      const batches = Math.max(1, parseInt($('#statelessBatches').value, 10) || 3);
+      const r = await api('/api/book/stateless-start', 'POST', { book: CUR.slug, model: $('#writeModel').value, batches });
+      $('#mirror').textContent = '♻️ 无状态省钱模式运行中（无窗口镜像）。进度见下方日志：每批全新进程写作，写完即弃会话。';
+      setWriting(true); openStream(CUR.slug);
+      toast(r.untilTarget ? '无状态模式：写到目标章数（可随时停）' : `无状态模式：写 ${batches} 批`);
+    } else {
+      const writeMode = $('#writeMode').value === 'review' ? 'review' : 'auto';
+      await api('/api/write', 'POST', { book: CUR.slug, model: $('#writeModel').value, task: $('#writeTask').value, writeMode });
+      if (CUR) CUR.writeMode = writeMode;
+      setWriting(true); openStream(CUR.slug);
+      toast(writeMode === 'review' ? '已开窗 · 逐批审核模式（每批写完会停下等你）' : '已开窗，autopilot 全自动运行中');
+    }
   } catch (e) { toast('启动失败：' + e.message); setWriting(false); }
 });
 // 写作模式热切换（提前选或写作中随时切）：立即生效，无需重开窗口
@@ -506,13 +519,17 @@ $('#pbPreview').addEventListener('click', async () => {
         if (V.willCreate && V.willCreate.length) vol += `\n🆕 番茄缺卷，将自动新建：${V.willCreate.join('、')}（卷名可后续在番茄改；卷建后删不掉，只建恰好缺的）`;
       }
     }
+    // 排期起始日（自动接续番茄已排期）
+    let sched = '';
+    if (r.scheduled) sched = `\n📅 排期起始日：${r.scheduleStart}（${r.scheduleReason}）`;
+    else if (r.fanqieLatestDate) sched = `\n📅 立即发布（番茄最新章 ${r.fanqieLatestDate}，无未来排期）`;
     // 按卷发布仅在【读取卷失败】时禁止发布；缺卷会自动新建，不再禁用
     const volBlocked = r.matchVolumes && r.volumes && r.volumes.error;
     if (r.newCount > 0) {
-      out.textContent = `番茄已发到第 ${r.fanqieMax} 章${r.approx ? '(近似)' : ''}，本地已写到第 ${r.localMax} 章。\n将发布 ${r.newCount} 个新章：第 ${r.from}–${r.to} 章\n` + (r.titles || []).map(t => '  · ' + t).join('\n') + (r.newCount > 5 ? '\n  …' : '') + rw + vol;
+      out.textContent = `番茄已发到第 ${r.fanqieMax} 章${r.approx ? '(近似)' : ''}，本地已写到第 ${r.localMax} 章。\n将发布 ${r.newCount} 个新章：第 ${r.from}–${r.to} 章\n` + (r.titles || []).map(t => '  · ' + t).join('\n') + (r.newCount > 5 ? '\n  …' : '') + rw + vol + sched;
       $('#pbGo').disabled = !!volBlocked; $('#pbGo').textContent = volBlocked ? '⛔ 番茄卷读取失败，重试预览' : `📤 发布全部 ${r.newCount} 个新章 ▶`;
     } else {
-      out.textContent = `番茄已发到第 ${r.fanqieMax} 章${r.approx ? '(近似)' : ''}，本地第 ${r.localMax} 章 —— 无新章可发。` + rw + vol;
+      out.textContent = `番茄已发到第 ${r.fanqieMax} 章${r.approx ? '(近似)' : ''}，本地第 ${r.localMax} 章 —— 无新章可发。` + rw + vol + sched;
       // 仅有重写章且已开同步：也允许发布
       const canEditOnly = r.rewrittenCount > 0 && r.syncRewrites;
       $('#pbGo').disabled = !canEditOnly;

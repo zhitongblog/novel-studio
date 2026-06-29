@@ -2096,6 +2096,17 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
           const n = parseInt(m[1], 10);
           if (!isNaN(n) && n > max) max = n;
         }
+        // 章节行里的【发布/排期时间】最大值——限定在含"第N章"的行内取，避免误抓页面其它日期。
+        var maxRowTs = 0, maxRowDate = '';
+        var rows = document.querySelectorAll('tr, [class*="table-tr"], [class*="list-item"], [role="row"]');
+        rows.forEach(function(r){
+          var t = r.innerText || '';
+          if (!/第\\s*\\d+\\s*章/.test(t)) return;
+          var dm = t.match(/(\\d{4})-(\\d{2})-(\\d{2})(?:\\s+(\\d{2}):(\\d{2}))?/);
+          if (!dm) return;
+          var ts = Date.parse(dm[0].replace(' ', 'T'));
+          if (!isNaN(ts) && ts > maxRowTs) { maxRowTs = ts; maxRowDate = dm[0]; }
+        });
         const activeItem = document.querySelector('.arco-pagination-item-active');
         const currentPage = activeItem ? (parseInt(activeItem.textContent) || 1) : 1;
         const pageItems = document.querySelectorAll('.arco-pagination-item:not(.arco-pagination-item-prev):not(.arco-pagination-item-next)');
@@ -2115,7 +2126,7 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
         // 空书的合法空状态（番茄空表）：在后台 UI 下出现"暂无"且无章节
         const emptyState = hasArco && (text.indexOf('暂无') >= 0 || text.indexOf('还没有') >= 0 || text.indexOf('快去创作') >= 0);
         const valid = onDomain && !errorPage && !loginPage && (max > 0 || hasManageChrome || emptyState);
-        return { max, currentPage, totalPages, valid, errorPage, loginPage, onDomain, hasArco, hasManageChrome, emptyState, bodyLen: text.length, head: text.slice(0, 80) };
+        return { max, maxRowDate, currentPage, totalPages, valid, errorPage, loginPage, onDomain, hasArco, hasManageChrome, emptyState, bodyLen: text.length, head: text.slice(0, 80) };
       })()
     `;
 
@@ -2131,6 +2142,7 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
     }
 
     let maxChapter = first.max || 0;
+    let latestDate = first.maxRowDate || '';   // 番茄最新章的发布/排期日期（用于排期起点计算）
     const totalPages = first.totalPages || 1;
     let approx = false;
 
@@ -2149,11 +2161,12 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
         await client.sleep(1000);
         const r = await client.evaluate(readPage);
         if (r && r.max > maxChapter) maxChapter = r.max;
+        if (r && r.maxRowDate && (!latestDate || Date.parse(r.maxRowDate.replace(' ', 'T')) > Date.parse(latestDate.replace(' ', 'T')))) latestDate = r.maxRowDate;
       }
     }
 
-    log(`📖 番茄已存在最大章号: 第${maxChapter}章${approx ? '（近似，分页未读全）' : ''}`, 'info');
-    return { maxChapter, approx };
+    log(`📖 番茄已存在最大章号: 第${maxChapter}章${approx ? '（近似，分页未读全）' : ''}${latestDate ? '，最新排期 ' + latestDate : ''}`, 'info');
+    return { maxChapter, approx, latestDate };
   } catch (err) {
     log(`读取番茄最大章号失败: ${err.message || err}`, 'error');
     return { maxChapter: 0, approx: true, error: String(err.message || err) };

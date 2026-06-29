@@ -35,6 +35,7 @@ export async function runCli(argv) {
     case 'book': return bookCmd(rest, cfg);
     case 'books': return bookList(cfg);
     case 'write': return writeCmd(f, cfg);
+    case 'stateless': return statelessCmd(f, cfg);
     case 'sessions': return sessionsCmd(cfg);
     case 'send': return sendCmd(f, cfg);
     case 'watch': return watchCmd(f, cfg);
@@ -45,7 +46,7 @@ export async function runCli(argv) {
     case 'reference': return reference();
     default:
       console.log('未知命令：' + cmd);
-      console.log('可用：doctor | models | book new|list | write | sessions | send | watch | stop | config | reference | mcp | tui');
+      console.log('可用：doctor | models | book new|list | write | stateless | sessions | send | watch | stop | config | reference | mcp | tui');
       process.exitCode = 1;
   }
 }
@@ -146,6 +147,48 @@ async function writeCmd(f, cfg) {
     console.log(c.red('✖ ' + e.message));
     process.exitCode = 1;
   }
+}
+
+// 无状态分章写作：每批全新无头进程 + 精准重喂上下文包（省 token、防漂移）。
+// 用法：novel stateless --book 书名 [--model codex] [--n 批数] [--batch 每批章数] [--dry]
+async function statelessCmd(f, cfg) {
+  const id = f.book || f._[0];
+  if (!id) { console.log('用法：novel stateless --book 书名 [--model codex] [--n 1] [--batch 3] [--dry]'); process.exitCode = 1; return; }
+  const book = getBook(id);
+  if (!book) { console.log(c.red('找不到书：' + id)); process.exitCode = 1; return; }
+  const model = f.model || book.model || cfg.defaultModel;
+  const batches = Math.max(1, parseInt(f.n, 10) || 1);
+  const batchSize = f.batch ? Math.max(1, parseInt(f.batch, 10)) : (book.standards?.batchSize || 3);
+  const { runStateless, writeBatchStateless } = await import('./statelessWriter.mjs');
+
+  if (f.dry) {
+    const pack = await writeBatchStateless({ book, model, cfg, count: batchSize, dryRun: true });
+    const s = pack.sizes, mt = pack.meta;
+    console.log(c.bold(`\n🧪 [dry-run] 《${book.title}》无状态上下文包（不调模型、不写文件）\n`) + hr());
+    console.log(`  续写区间：第 ${c.cyan(String(mt.nextNum).padStart(3, '0'))}–${c.cyan(String(mt.lastNum).padStart(3, '0'))} 章（共 ${mt.count} 章，当前卷${mt.volNum}，已写 ${mt.totalChapters} 章）`);
+    console.log(hr());
+    console.log('  上下文包各部分体积（字符数）：');
+    console.log(`    设定圣经摘录   ${String(s.bible).padStart(6)}`);
+    console.log(`    本卷分章大纲   ${String(s.outline).padStart(6)}`);
+    console.log(`    主线伏笔表     ${String(s.foreshadow).padStart(6)}`);
+    console.log(`    连贯性台账     ${String(s.ledger).padStart(6)}`);
+    console.log(`    上一章结尾     ${String(s.lastTail).padStart(6)}`);
+    console.log(`    近期章名表     ${String(s.names).padStart(6)}`);
+    console.log(`    最近自检未决   ${String(s.review).padStart(6)}`);
+    console.log(hr());
+    console.log(`  ${c.bold('整包合计')}：${c.cyan(s.promptChars.toLocaleString())} 字符 ≈ ${c.cyan(s.estTokens.toLocaleString())} tokens ${c.gray('（每批固定，不随已写章数增长）')}`);
+    console.log(c.gray('\n  ── 完整 prompt 预览（前 1600 字）──'));
+    console.log(pack.prompt.slice(0, 1600) + c.gray('\n  …（略）\n'));
+    return;
+  }
+
+  console.log(c.bold(`\n✍️  无状态写作《${book.title}》  模型=${getModel(model).name}  ${batches} 批 × ${batchSize} 章`));
+  console.log(c.gray('  每批全新进程，写完即弃会话；上下文由精准上下文包重喂。\n') + hr());
+  try {
+    const r = await runStateless({ book, model, cfg, batches, batchSize, onLog: (e) => console.log('  ' + logLine(e)) });
+    console.log(hr());
+    console.log(c.green(`✔ 完成：${r.batches} 批，新增 ${r.totalWrote} 章。`) + c.gray('  用 `novel usage --book ' + id + '` 看 token。\n'));
+  } catch (e) { console.log(c.red('✖ ' + e.message)); process.exitCode = 1; }
 }
 
 async function sessionsCmd(cfg) {

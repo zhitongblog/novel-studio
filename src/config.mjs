@@ -39,6 +39,12 @@ const DEFAULTS = {
     autoClosure: true,               // 标"已完本"后自动跑一次"完结收口"(把尾声/完本感言发齐到番茄并对账)
     closureDelayMs: 120000,          // 自动收口延迟(ms)：留时间让作者把"完本感言/尾声"那一章写完再发
   },
+  // 无状态分章写作：每批全新无头进程 + 精准重喂上下文包（治长篇"慢+费token"的平方级根因）。
+  // 是长驻 autopilot 模式之外的可选模式；写作台勾选"无状态省钱模式"启用。
+  stateless: {
+    checkEvery: 5,                   // 每 N 批插一次"全文逻辑自检"（0=关）；对齐长驻模式 autopilot.fullCheckEvery
+    batchTimeoutMs: 900000,          // 单批无头调用超时（写多章 + 自检可能数分钟）
+  },
   autopilot: {
     enabled: true,                   // 是否自动监控应答
     pollMs: 3000,                    // 轮询间隔

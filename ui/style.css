@@ -89,6 +89,10 @@ body {
 .ws-row { display: flex; gap: 8px; align-items: center; }
 .ws-row input { flex: 1 1 auto; min-width: 0; }
 .ws-row .btn { flex: 0 0 auto; white-space: nowrap; }
+.stateless-toggle { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px dashed var(--border, #3a3a3a); border-radius: 8px; }
+.stateless-toggle .sl-controls { display: flex; align-items: center; gap: 10px; }
+.stateless-toggle input[type=checkbox] { width: 16px; height: 16px; }
+.stateless-toggle .sl-batch.hidden { display: none; }
 input, select, textarea {
   background: var(--panel); border: 1px solid var(--border); color: var(--text);
   border-radius: 9px; padding: 10px 12px; font-size: 13.5px; font-family: var(--sans); outline: none; transition: .15s;
