@@ -2360,9 +2360,13 @@ export async function createFanqieVolumes({ profilePath, bookId, volumes, onLog 
     const valid = await client.evaluate(`(function(){var t=document.body?document.body.innerText:'';var err=['ERR_','未连接到互联网','代理服务器','net::'].some(s=>t.indexOf(s)>=0);return {err,login:/\\/login|passport/.test(location.href),onDomain:location.href.indexOf('fanqienovel.com')>=0};})()`);
     if (!valid || valid.err || valid.login || !valid.onDomain) return { ok: false, created: [], error: '番茄页面无效(网络/登录)' };
 
-    // 打开"编辑分卷"
-    const opened = await client.clickByLocator(`for(const b of document.querySelectorAll('button')){if(b.offsetParent!==null&&(b.textContent||'').trim()==='编辑分卷')return b;}return null;`);
-    if (!opened) return { ok: false, created: [], error: '未找到"编辑分卷"入口' };
+    // 打开"编辑分卷"——按钮随章节数据异步渲染，单次查常太早，轮询重试至多 ~16s
+    let opened = false;
+    for (let i = 0; i < 16 && !opened; i++) {
+      opened = await client.clickByLocator(`for(const b of document.querySelectorAll('button')){if(b.offsetParent!==null&&(b.textContent||'').trim()==='编辑分卷')return b;}return null;`);
+      if (!opened) await client.sleep(1000);
+    }
+    if (!opened) return { ok: false, created: [], error: '未找到"编辑分卷"入口（番茄页面加载超时或改版）' };
     await client.sleep(1500);
 
     const created = [];
@@ -2380,40 +2384,122 @@ export async function createFanqieVolumes({ profilePath, bookId, volumes, onLog 
       const addOk = await client.clickByLocator(`return document.querySelector('.chapter-volume-footer-add-volume')||(function(){for(const b of document.querySelectorAll('button,[class*="btn"]')){if(b.offsetParent!==null&&(b.textContent||'').trim()==='新建分卷')return b;}return null;})();`);
       if (!addOk) { return { ok: false, created, error: '未找到"新建分卷"按钮' }; }
       await client.sleep(800);
-      // 填卷名：真实键盘(typeText)优先，setter 兜底
-      const focused = await client.evaluate(`(function(){const inp=document.querySelector('input.serial-input.common-input-hint-area, input[placeholder="请输入分卷名字"]');if(!inp)return false;inp.focus();return true;})()`);
-      if (!focused) { return { ok: false, created, error: '未找到卷名输入框' }; }
-      await client.typeText(v.name);
+      // 番茄新版分卷 UI（2026 改版）：点"新建分卷"生成一行待命名项——
+      //   · 序号"第N卷："由番茄【自动加】，输入框只填【副标题】(maxlength 16)；
+      //   · 确认/取消是行内图标 <i class="tomato-confirm green"> / <i class="tomato-cancel red">，
+      //     不是底部那个"确定"按钮（底部确定恒 disabled，旧代码误检它→永远报"确定未启用"）。
+      // 故：① 只把副标题填进输入框；② 点行内绿勾提交；③ 读已提交的 normal 项验证。
+      const INP_SEL = 'input.serial-input.common-input-hint-area, input[placeholder="请输入分卷名字"]';
+      const sub = String(v.name).replace(/^第[一-龥\d]+卷[:：]?/, '').trim(); // "第二卷"→"" ; "第十四卷：少年游"→"少年游"
+      const cancelRow = `return document.querySelector('i.tomato-cancel');`; // 行内红叉撤销（未提交，安全）
+      // 聚焦副标题输入框
+      const focused = await client.evaluate(`(function(){const inp=document.querySelector(${JSON.stringify(INP_SEL)});if(!inp)return false;inp.focus();return true;})()`);
+      if (!focused) { return { ok: false, created, error: '未找到卷名输入框（番茄改版？）' }; }
+      // 填副标题：真实键盘(typeText)优先，setter 兜底
+      if (sub) await client.typeText(sub);
       await client.sleep(400);
-      let typed = await client.evaluate(`((document.querySelector('input.serial-input.common-input-hint-area, input[placeholder="请输入分卷名字"]')||{}).value||'')`);
-      if ((typed || '').trim() !== v.name.trim()) {
-        await client.evaluate(`(function(){const inp=document.querySelector('input.serial-input.common-input-hint-area, input[placeholder="请输入分卷名字"]');if(inp){const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,${JSON.stringify(v.name)});inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));}})()`);
+      let typed = await client.evaluate(`((document.querySelector(${JSON.stringify(INP_SEL)})||{}).value||'')`);
+      if ((typed || '').trim() !== sub) {
+        await client.evaluate(`(function(){const inp=document.querySelector(${JSON.stringify(INP_SEL)});if(inp){const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,${JSON.stringify(sub)});inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));}})()`);
         await client.sleep(300);
-        typed = await client.evaluate(`((document.querySelector('input.serial-input.common-input-hint-area, input[placeholder="请输入分卷名字"]')||{}).value||'')`);
+        typed = await client.evaluate(`((document.querySelector(${JSON.stringify(INP_SEL)})||{}).value||'')`);
       }
-      // 安全闸：卷名没填对 → 取消、绝不提交(避免建出空名/错名卷——番茄卷删不掉)
-      if ((typed || '').trim() !== v.name.trim()) {
-        try { await client.clickByLocator(`for(const b of document.querySelectorAll('button,[class*="btn"]')){if(b.offsetParent!==null&&(b.textContent||'').trim()==='取消')return b;}return null;`); } catch {}
-        return { ok: false, created, error: `卷名未能填入(实际"${typed}")，已取消未提交` };
+      // 安全闸：副标题没填对 → 撤销行内编辑、绝不提交（番茄卷删不掉）
+      if ((typed || '').trim() !== sub) {
+        try { await client.clickByLocator(cancelRow); } catch {}
+        return { ok: false, created, error: `卷副标题未能填入(实际"${typed}"，期望"${sub}")，已取消未提交` };
       }
-      // 安全闸：番茄"确定"未启用(卷名未被识别) → 取消、绝不提交
-      const okEnabled = await client.evaluate(`(function(){const b=[...document.querySelectorAll('button,[class*="btn"]')].find(x=>x.offsetParent!==null&&(x.textContent||'').trim()==='确定');return b?!(b.disabled||/disabled/.test(b.className)):false;})()`);
-      if (!okEnabled) {
-        try { await client.clickByLocator(`for(const b of document.querySelectorAll('button,[class*="btn"]')){if(b.offsetParent!==null&&(b.textContent||'').trim()==='取消')return b;}return null;`); } catch {}
-        return { ok: false, created, error: '番茄"确定"按钮未启用(卷名输入未被番茄识别)，已取消未提交。请在番茄后台手动新建该卷。' };
+      // 提交：点行内【绿勾】i.tomato-confirm（此步不可逆）
+      const confirmed = await client.clickByLocator(`return document.querySelector('i.tomato-confirm');`);
+      if (!confirmed) {
+        try { await client.clickByLocator(cancelRow); } catch {}
+        return { ok: false, created, error: '未找到行内"确认(绿勾)"图标，已取消未提交（番茄改版？请人工核对）' };
       }
-      // 确定（提交——此步不可逆）
-      const okBtn = await client.clickByLocator(`for(const b of document.querySelectorAll('button,[class*="btn"]')){if(b.offsetParent!==null&&(b.textContent||'').trim()==='确定')return b;}return null;`);
-      if (!okBtn) { return { ok: false, created, error: '未找到"确定"按钮（卷未提交）' }; }
       await client.sleep(2000);
-      // 验证新卷已出现
+      // 验证新卷已提交为正常项（番茄按位置自动编号"第N卷"前缀）
       const nowExists = await client.evaluate(`(function(){const items=document.querySelectorAll('.chapter-volume-list-item-normal');const want=${JSON.stringify('第' + numToCn(v.num) + '卷')};for(const it of items){const sp=it.querySelector('span');const t=((sp&&sp.textContent)||'').trim();if(t.indexOf(want)===0)return true;}return false;})()`);
-      if (nowExists) { log(`✅ 已新建卷：${v.name}`, 'success'); created.push(v.name); }
-      else { log(`⚠️ 新建卷后未在列表中确认到：${v.name}`, 'error'); return { ok: false, created, error: `新建卷"${v.name}"未确认成功，已停手` }; }
+      if (nowExists) { log(`✅ 已新建卷：第${numToCn(v.num)}卷${sub ? '：' + sub : ''}`, 'success'); created.push(v.name); }
+      else {
+        try { await client.clickByLocator(cancelRow); } catch {}
+        return { ok: false, created, error: `新建卷"${v.name}"未在列表确认到，已停手（若番茄要求非空副标题，请给该卷设个名字再试）` };
+      }
     }
     return { ok: true, created };
   } catch (err) {
     return { ok: false, created: [], error: String(err.message || err) };
+  }
+}
+
+// ===== 改番茄卷名（番茄改版后：卷号"第N卷："自动前缀，只能改【副标题】）=====
+// 定位现有卷：num（按"第N卷"前缀）或 oldName（按全名/前缀）二选一；newName 是目标完整卷名或副标题。
+// 流程：编辑分卷 → 找到目标 normal 行点其 i.tomato-edit → 清空输入填新副标题 → 点行内绿勾 → 验证。
+// 安全：副标题为空 / 没填对 / 找不到入口 → 撤销行内编辑（未提交），绝不留下错改。
+export async function renameFanqieVolume({ profilePath, bookId, num, oldName, newName, onLog } = {}) {
+  const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
+  if (!bookId) return { ok: false, error: '缺少 bookId' };
+  const newSub = String(newName || '').replace(/^第[一-龥\d]+卷[:：]?/, '').trim();
+  if (!newSub) return { ok: false, error: '新卷名（副标题）不能为空（番茄"第N卷："前缀自动加，无需填）' };
+  if (newSub.length > 16) return { ok: false, error: `副标题超过番茄上限 16 字（当前 ${newSub.length}）` };
+  if (!num && !oldName) return { ok: false, error: '未指定目标卷（num 或 oldName 至少一个）' };
+  const client = new UnzooClient(profilePath || null, onLog || null);
+  const INP_SEL = 'input.serial-input.common-input-hint-area, input[placeholder="请输入分卷名字"]';
+  const cancelRow = `return document.querySelector('i.tomato-cancel');`;
+  try {
+    await client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}?type=1`);
+    await client.sleep(2500);
+    const valid = await client.evaluate(`(function(){var t=document.body?document.body.innerText:'';var err=['ERR_','未连接到互联网','代理服务器','net::'].some(s=>t.indexOf(s)>=0);return {err,login:/\\/login|passport/.test(location.href),onDomain:location.href.indexOf('fanqienovel.com')>=0};})()`);
+    if (!valid || valid.err || valid.login || !valid.onDomain) return { ok: false, error: '番茄页面无效(网络/登录)' };
+
+    let opened = false;
+    for (let i = 0; i < 16 && !opened; i++) {
+      opened = await client.clickByLocator(`for(const b of document.querySelectorAll('button')){if(b.offsetParent!==null&&(b.textContent||'').trim()==='编辑分卷')return b;}return null;`);
+      if (!opened) await client.sleep(1000);
+    }
+    if (!opened) return { ok: false, error: '未找到"编辑分卷"入口（番茄页面加载超时或改版）' };
+    await client.sleep(1500);
+
+    // 定位目标卷的 normal 行，点其铅笔 i.tomato-edit 进入编辑态
+    const want = num ? ('第' + numToCn(num) + '卷') : String(oldName || '');
+    const editClicked = await client.clickByLocator(`
+      const items=document.querySelectorAll('.chapter-volume-list-item-normal');
+      const want=${JSON.stringify(want)}; const oldName=${JSON.stringify(String(oldName || ''))};
+      for(const it of items){const sp=it.querySelector('span');const t=((sp&&sp.textContent)||'').trim();
+        if(t===want||t.indexOf(want)===0||(oldName&&t===oldName)){const e=it.querySelector('i.tomato-edit');if(e)return e;}}
+      return null;`);
+    if (!editClicked) return { ok: false, error: `未找到目标卷的编辑入口：${want}（该卷在番茄不存在？）` };
+    await client.sleep(800);
+
+    // 聚焦 → 清空旧副标题 → 填新副标题
+    const focused = await client.evaluate(`(function(){const inp=document.querySelector(${JSON.stringify(INP_SEL)});if(!inp)return false;inp.focus();return true;})()`);
+    if (!focused) { try { await client.clickByLocator(cancelRow); } catch {} return { ok: false, error: '未找到卷名输入框（番茄改版？）' }; }
+    await client.clearFocused();
+    await client.sleep(200);
+    await client.typeText(newSub);
+    await client.sleep(400);
+    let typed = await client.evaluate(`((document.querySelector(${JSON.stringify(INP_SEL)})||{}).value||'')`);
+    if ((typed || '').trim() !== newSub) {
+      await client.evaluate(`(function(){const inp=document.querySelector(${JSON.stringify(INP_SEL)});if(inp){const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,${JSON.stringify(newSub)});inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));}})()`);
+      await client.sleep(300);
+      typed = await client.evaluate(`((document.querySelector(${JSON.stringify(INP_SEL)})||{}).value||'')`);
+    }
+    if ((typed || '').trim() !== newSub) {
+      try { await client.clickByLocator(cancelRow); } catch {}
+      return { ok: false, error: `新副标题未能填入(实际"${typed}")，已取消未改` };
+    }
+    // 点行内绿勾提交改名
+    const confirmed = await client.clickByLocator(`return document.querySelector('i.tomato-confirm');`);
+    if (!confirmed) {
+      try { await client.clickByLocator(cancelRow); } catch {}
+      return { ok: false, error: '未找到行内"确认(绿勾)"图标，已取消未改（番茄改版？）' };
+    }
+    await client.sleep(2000);
+    // 验证：normal 项里出现"第…卷：新副标题"
+    const ok = await client.evaluate(`(function(){const items=document.querySelectorAll('.chapter-volume-list-item-normal span');for(const sp of items){const t=(sp.textContent||'').trim();if(t.indexOf('：'+${JSON.stringify(newSub)})>=0||t.endsWith(${JSON.stringify(newSub)}))return true;}return false;})()`);
+    if (!ok) return { ok: false, error: `改名后未在列表确认到"…：${newSub}"，请人工核对番茄分卷` };
+    log(`✅ 已改卷名：${want} → …：${newSub}`, 'success');
+    return { ok: true, name: newSub };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
   }
 }
 

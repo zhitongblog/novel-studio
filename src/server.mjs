@@ -24,7 +24,7 @@ import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, b
 import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
-import { listProfiles as listUnzooProfiles, getFanqieBooks } from './fanqie.mjs';
+import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume } from './fanqie.mjs';
 import { getCompletionReport, runFinaleClosure, locateCompletion, buildCompletionNote } from './finale.mjs';
 import { previewFanqieImport, importFromFanqie } from './import_fanqie.mjs';
 import { generateCoverBg, buildArtPrompt } from './imagegen.mjs';
@@ -496,6 +496,30 @@ async function api(p, req, res, u) {
           .catch(e => pushLog(logKey, { level: 'error', source: 'import', msg: '从番茄导入异常：' + e.message }));
         return json(res, 200, { ok: true, started: true, logKey });
       } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/fanqie/volumes') {   // 只读：列出某书在番茄的现有卷（供卷管理 UI 展示）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { ok: false, error: '找不到书' });
+        const pc = book.publish || {};
+        if (!pc.profilePath || !pc.bookId) return json(res, 400, { ok: false, error: '该书未配番茄账号/bookId（先在发布里配好）' });
+        const r = await getFanqieVolumes({ profilePath: pc.profilePath, bookId: pc.bookId, onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie' }) });
+        return json(res, 200, r);
+      } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
+    }
+    if (p === '/api/fanqie/rename-volume') {   // 改番茄卷名（只改副标题，"第N卷："前缀番茄自动加）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { ok: false, error: '找不到书' });
+        const pc = book.publish || {};
+        if (!pc.profilePath || !pc.bookId) return json(res, 400, { ok: false, error: '该书未配番茄账号/bookId' });
+        if (!body.newName) return json(res, 400, { ok: false, error: '缺少新卷名' });
+        if (!body.num && !body.oldName) return json(res, 400, { ok: false, error: '缺少目标卷（num 或 oldName）' });
+        const r = await renameFanqieVolume({
+          profilePath: pc.profilePath, bookId: pc.bookId,
+          num: body.num, oldName: body.oldName, newName: body.newName,
+          onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie' }),
+        });
+        return json(res, r.ok ? 200 : 200, r);
+      } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
     }
     if (p === '/api/book/publish-config') {   // 保存番茄发布配置
       try {

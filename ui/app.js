@@ -491,6 +491,50 @@ $('#pbSaveCfg').addEventListener('click', async () => {
   $('#pbErr').textContent = '';
   try { if (await pbSave()) toast('番茄发布配置已保存'); } catch (e) { $('#pbErr').textContent = e.message; }
 });
+// —— 番茄卷管理：读取现有卷 + 逐卷改名（番茄序号"第N卷："自动加，只改副标题）——
+function pbRenderVols(r) {
+  const box = $('#pbVolList');
+  if (!r || !r.ok) { box.innerHTML = `<div class="modal-err">读取番茄卷失败：${esc((r && r.error) || '未知')}</div>`; return; }
+  const vols = r.volumes || [];
+  if (!vols.length) { box.innerHTML = '<p class="modal-hint">该书番茄上暂无分卷（或为单卷书）。</p>'; return; }
+  box.innerHTML = vols.map(name => {
+    const sub = name.includes('：') ? name.split('：').slice(1).join('：') : '';
+    return `<div class="pb-vol-row" data-old="${esc(name)}">
+      <span class="pb-vol-cur" title="${esc(name)}">${esc(name)}</span>
+      <input class="pb-vol-input" maxlength="16" value="${esc(sub)}" placeholder="新副标题(≤16)">
+      <button class="btn pb-vol-rename">改名</button>
+    </div>`;
+  }).join('');
+}
+$('#pbVolLoad').addEventListener('click', async () => {
+  const btn = $('#pbVolLoad'); const old = btn.textContent; btn.disabled = true; btn.textContent = '读取中…';
+  $('#pbErr').textContent = ''; $('#pbVolList').innerHTML = '';
+  try {
+    if (!await pbSave()) return;
+    const r = await api('/api/fanqie/volumes', 'POST', { book: CUR.slug });
+    pbRenderVols(r);
+  } catch (e) { $('#pbErr').textContent = '读取番茄卷失败：' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
+$('#pbVolList').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('.pb-vol-rename'); if (!btn) return;
+  const row = btn.closest('.pb-vol-row'); const oldName = row.getAttribute('data-old');
+  const sub = row.querySelector('.pb-vol-input').value.trim();
+  if (!sub) { $('#pbErr').textContent = '新副标题不能为空'; return; }
+  const prefix = oldName.includes('：') ? oldName.split('：')[0] : oldName;
+  if (!confirm(`把「${oldName}」改名为「${prefix}：${sub}」？\n改动番茄真实账号（可再次改名，但卷不可删）。`)) return;
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '改名中…'; $('#pbErr').textContent = '';
+  try {
+    const r = await api('/api/fanqie/rename-volume', 'POST', { book: CUR.slug, oldName, newName: sub });
+    if (r.ok) {
+      toast('已改卷名 → ' + prefix + '：' + sub);
+      const nn = prefix + '：' + sub;
+      row.querySelector('.pb-vol-cur').textContent = nn; row.querySelector('.pb-vol-cur').title = nn;
+      row.setAttribute('data-old', nn);
+    } else { $('#pbErr').textContent = '改名失败：' + (r.error || '未知'); }
+  } catch (e) { $('#pbErr').textContent = '改名失败：' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
 $('#pbPreview').addEventListener('click', async () => {
   $('#pbErr').textContent = ''; $('#pbGo').disabled = true;
   const btn = $('#pbPreview'); const old = btn.textContent; btn.disabled = true; btn.textContent = '读取番茄中…';

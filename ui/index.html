@@ -320,6 +320,12 @@
         <button class="btn" id="pbSaveCfg">💾 保存配置</button>
         <button class="btn" id="pbPreview">🔍 预览将发</button>
       </div>
+      <details class="pb-volmgr" style="margin-top:10px">
+        <summary style="cursor:pointer;font-weight:500">📚 番茄卷管理（改卷名）</summary>
+        <p class="modal-hint" style="margin-top:6px">番茄「第N卷：」序号自动生成、卷不可删——这里只改<b>副标题</b>（≤16字）。改名走已登录浏览器，约 10 秒/次。</p>
+        <div class="btn-row"><button class="btn" id="pbVolLoad">🔄 读取番茄卷</button></div>
+        <div id="pbVolList" class="pb-vol-list" style="margin-top:8px"></div>
+      </details>
       <pre class="rb-critique" id="pbPreviewOut" style="display:none"></pre>
       <div class="btn-row end" style="margin-top:8px">
         <button class="btn ghost" id="pbCancel">关闭</button>

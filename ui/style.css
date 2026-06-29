@@ -183,6 +183,11 @@ textarea { resize: vertical; line-height: 1.5; }
 .pb-grid .field { margin: 0; min-width: 0; }
 .pb-grid .field input, .pb-grid .field select { width: 100%; box-sizing: border-box; }
 #publishModal .modal-card { overflow-x: hidden; }
+.pb-vol-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.pb-vol-row { display: flex; align-items: center; gap: 8px; }
+.pb-vol-cur { flex: 0 0 38%; font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-vol-row .pb-vol-input { flex: 1 1 auto; min-width: 0; }
+.pb-vol-row .btn { flex: 0 0 auto; white-space: nowrap; }
 .modal-close { position: absolute; top: 12px; right: 12px; width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); font-size: 14px; cursor: pointer; line-height: 1; display: flex; align-items: center; justify-content: center; padding: 0; transition: .15s; }
 .modal-close:hover { color: var(--text); border-color: #3a3f4e; background: var(--panel); }
 .modal-card h2 { font-family: var(--serif); margin: 0 0 4px; font-size: 20px; }
