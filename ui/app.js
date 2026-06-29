@@ -5,6 +5,16 @@ const IS_TAURI = location.hostname === 'tauri.localhost' || location.protocol ==
 const API = (!IS_TAURI && (location.protocol === 'http:' || location.protocol === 'https:'))
   ? location.origin : 'http://127.0.0.1:8787';
 
+// 调 Tauri 原生命令（桌面应用内可用）。v2: window.__TAURI__.core.invoke；v1: window.__TAURI__.invoke。
+const HAS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
+async function tauriInvoke(cmd, args) {
+  const t = window.__TAURI__;
+  if (!t) throw new Error('not-tauri');
+  const inv = (t.core && t.core.invoke) || t.invoke;
+  if (!inv) throw new Error('invoke 不可用');
+  return inv(cmd, args);
+}
+
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -123,6 +133,7 @@ function openWrite(book) {
   $('#mirror').textContent = '（开始写作后，这里实时显示 AI 写作过程）';
   $('#logFeed').innerHTML = '';
   $('#wbTarget').value = book.targetChapters || 0;
+  $('#writeMode').value = book.writeMode === 'review' ? 'review' : 'auto';
   $('#synText').value = book.synopsis || '';
   const running = STATE.sessions.find(s => s.slug === book.slug && s.running !== false);
   setWriting(!!running);
@@ -148,9 +159,23 @@ $('#btnStart').addEventListener('click', async () => {
   if (!CUR) return;
   $('#btnStart').disabled = true; $('#writeStatus').textContent = '启动中…';
   try {
-    await api('/api/write', 'POST', { book: CUR.slug, model: $('#writeModel').value, task: $('#writeTask').value });
-    setWriting(true); openStream(CUR.slug); toast('已开窗，autopilot 运行中');
+    const writeMode = $('#writeMode').value === 'review' ? 'review' : 'auto';
+    await api('/api/write', 'POST', { book: CUR.slug, model: $('#writeModel').value, task: $('#writeTask').value, writeMode });
+    if (CUR) CUR.writeMode = writeMode;
+    setWriting(true); openStream(CUR.slug);
+    toast(writeMode === 'review' ? '已开窗 · 逐批审核模式（每批写完会停下等你）' : '已开窗，autopilot 全自动运行中');
   } catch (e) { toast('启动失败：' + e.message); setWriting(false); }
+});
+// 写作模式热切换（提前选或写作中随时切）：立即生效，无需重开窗口
+$('#writeMode').addEventListener('change', async () => {
+  if (!CUR) return;
+  const mode = $('#writeMode').value === 'review' ? 'review' : 'auto';
+  try {
+    await api('/api/book/review-mode', 'POST', { book: CUR.slug, mode });
+    CUR.writeMode = mode; const b = STATE.books.find(x => x.slug === CUR.slug); if (b) b.writeMode = mode;
+    if (mode === 'auto') hideReviewBar();
+    toast(mode === 'review' ? '已切到逐批审核：下一批写完会停下等你' : '已切到全自动：连续写作不再停顿');
+  } catch (e) { toast('切换失败：' + e.message); }
 });
 $('#btnStop').addEventListener('click', async () => {
   if (!CUR) return;
@@ -989,16 +1014,31 @@ function openStream(slug) {
   STREAM.onerror = () => {};
 }
 function closeStream() { if (STREAM) { STREAM.close(); STREAM = null; } }
-// ---------- 审稿确认门动作条 ----------
+// ---------- 审稿/审核确认门动作条 ----------
 function hideReviewBar() { $('#reviewBar').classList.add('hidden'); }
 async function showReviewBar() {
   if (!CUR) return;
   try {
     const p = await api('/api/book/pending?book=' + encodeURIComponent(CUR.slug));
     if (!p.pending) { hideReviewBar(); return; }
-    $('#rbTitle').textContent = `审稿意见待确认（${p.scope || ''}）`;
-    $('#rbFile').textContent = p.file ? ' · reviews/' + p.file : '';
-    $('#rbCritique').textContent = p.critique || '（详见 reviews 文件）';
+    const batch = p.kind === 'batch-review';
+    if (batch) {
+      // 逐批审核：本批写完，等用户批准/给要求/停止
+      $('#rbTitle').textContent = `本批已写完，待你审核（${p.scope || ''}）`;
+      $('#rbFile').textContent = '';
+      $('#rbCritique').textContent = '可在右侧实时镜像 / 阅读台查看本批内容。满意就「批准并继续」；想左右剧情就写下要求再「按我的要求继续」。';
+      $('#rbReq').classList.remove('hidden');
+      $('#rbActionsOutline').classList.add('hidden');
+      $('#rbActionsBatch').classList.remove('hidden');
+    } else {
+      // 大纲审稿确认门
+      $('#rbTitle').textContent = `审稿意见待确认（${p.scope || ''}）`;
+      $('#rbFile').textContent = p.file ? ' · reviews/' + p.file : '';
+      $('#rbCritique').textContent = p.critique || '（详见 reviews 文件）';
+      $('#rbReq').classList.add('hidden');
+      $('#rbActionsBatch').classList.add('hidden');
+      $('#rbActionsOutline').classList.remove('hidden');
+    }
     $('#reviewBar').classList.remove('hidden');
   } catch {}
 }
@@ -1014,8 +1054,36 @@ async function reviewDecision(apply) {
 }
 $('#rbApply').addEventListener('click', () => reviewDecision(true));
 $('#rbSkip').addEventListener('click', () => reviewDecision(false));
+// 逐批审核裁决：批准继续 / 按要求继续 / 停止
+async function batchContinue(withReq) {
+  if (!CUR) return;
+  const requirements = withReq ? $('#rbReq').value.trim() : '';
+  if (withReq && !requirements) { toast('请先写下你对下一批的要求'); $('#rbReq').focus(); return; }
+  const btns = ['#rbContinue', '#rbContinueReq', '#rbStop'].map(s => $(s));
+  btns.forEach(b => b.disabled = true);
+  try {
+    await api('/api/book/review-continue', 'POST', { book: CUR.slug, requirements });
+    $('#rbReq').value = ''; hideReviewBar();
+    toast(requirements ? '已下达本批要求 → 继续写' : '已批准 → 继续写下一批');
+  } catch (e) { toast(e.message); }
+  finally { btns.forEach(b => b.disabled = false); }
+}
+async function batchStop() {
+  if (!CUR) return;
+  const btns = ['#rbContinue', '#rbContinueReq', '#rbStop'].map(s => $(s));
+  btns.forEach(b => b.disabled = true);
+  try {
+    await api('/api/book/review-continue', 'POST', { book: CUR.slug, stop: true });
+    hideReviewBar(); setWriting(false); closeStream();
+    toast('已停止 → 不再续写，关闭窗口');
+  } catch (e) { toast(e.message); }
+  finally { btns.forEach(b => b.disabled = false); }
+}
+$('#rbContinue').addEventListener('click', () => batchContinue(false));
+$('#rbContinueReq').addEventListener('click', () => batchContinue(true));
+$('#rbStop').addEventListener('click', batchStop);
 function appendLog(e) {
-  if (e.kind === 'pending-review') showReviewBar();   // 审稿待确认 → 弹出动作条
+  if (e.kind === 'pending-review' || e.kind === 'pending-batch') showReviewBar();   // 待确认/待审核 → 弹动作条
   const feed = $('#logFeed');
   const cls = 'log-line ' + (e.source === 'autopilot' ? 'autopilot ' : '') + (e.level || 'info');
   const tag = e.level === 'act' ? '●' : e.level === 'warn' ? '▲' : e.level === 'error' ? '✖' : '○';
@@ -1273,6 +1341,7 @@ $('#nbLaunch').addEventListener('click', async () => {
     const r = await api('/api/book/launch', 'POST', {
       title, theme: $('#nbTheme').value.trim(),
       words: getWords(), model: $('#nbModel').value, style: $('#nbStyle').value,
+      writeMode: $('#nbWriteMode').value === 'review' ? 'review' : 'auto',
     });
     $('#modal').classList.add('hidden');
     await refresh();
@@ -1321,7 +1390,13 @@ async function renderSettings() {
   const c = STATE.config;
   const box = $('#settings');
   box.innerHTML = `
-    <label class="field"><span>书库目录</span><input id="setWs" value="${esc(c.workspace || '')}"></label>
+    <label class="field"><span>书库目录（写好的书都放这里）</span>
+      <div class="ws-row">
+        <input id="setWs" value="${esc(c.workspace || '')}" placeholder="点右侧“选择文件夹”挑一个目录">
+        <button class="btn" id="setWsPick" type="button">📁 选择文件夹</button>
+        <button class="btn ghost" id="setWsOpen" type="button">📂 打开</button>
+      </div>
+    </label>
     <label class="field"><span>默认模型</span><select id="setModel">${STATE.models.map(m => `<option value="${m.id}" ${m.id === c.defaultModel ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
     <label class="field"><span>代理</span><select id="setProxy">
       <option value="on" ${c.enableProxy ? 'selected' : ''}>开（用 unterm 当前代理）</option>
@@ -1331,6 +1406,8 @@ async function renderSettings() {
       <option value="off" ${!c.autopilot?.enabled ? 'selected' : ''}>关</option></select></label>
     <label class="field"><span>自动续写上限（每会话）</span><input id="setMax" type="number" value="${c.autopilot?.maxAutoContinue ?? 40}"></label>
     <label class="field"><span>每几批做一次全文逻辑自检（0=关闭）</span><input id="setFullCheck" type="number" value="${c.autopilot?.fullCheckEvery ?? 5}"></label>
+    <label class="field"><span>上下文达多少 token 就重开新会话省钱（0=关闭；claude 精确，建议 12万~20万）</span><input id="setFreshCtx" type="number" value="${c.autopilot?.freshContextLimit ?? 180000}"></label>
+    <div class="modal-hint" style="margin:-2px 0 4px">连续写时同一会话上下文越堆越大、每批都被重发（缓存还会过期→全价）。到阈值就停旧会话、靠 continuity_ledger 重开新窗口续写，省 token。太小会频繁重开反而更费。</div>
     <div class="btn-row"><button class="btn primary" id="setSave" style="flex:0;padding:10px 22px">保存</button></div>`;
   $('#setSave').addEventListener('click', async () => {
     const patch = {
@@ -1340,23 +1417,69 @@ async function renderSettings() {
         enabled: $('#setAuto').value === 'on',
         maxAutoContinue: Number($('#setMax').value) || 40,
         fullCheckEvery: Math.max(0, Number($('#setFullCheck').value) || 0),
+        freshContextLimit: Math.max(0, Number($('#setFreshCtx').value) || 0),
       },
     };
     try { STATE.config = await api('/api/config', 'POST', { patch }); fillModels(); toast('设置已保存'); }
+    catch (e) { toast(e.message); }
+  });
+  // 书库目录：原生文件夹选择器（桌面应用用 Tauri 对话框；浏览器回退到手填路径）
+  $('#setWsPick').addEventListener('click', async () => {
+    let dir = null;
+    if (HAS_TAURI) {
+      try { dir = await tauriInvoke('pick_folder'); }
+      catch (e) { toast('打开目录选择器失败：' + e.message); return; }
+      if (!dir) return;   // 用户取消
+    } else {
+      dir = window.prompt('输入书库目录的完整路径：', $('#setWs').value || '');
+      if (dir == null) return;
+      dir = dir.trim(); if (!dir) return;
+    }
+    $('#setWs').value = dir;
+    try { STATE.config = await api('/api/config', 'POST', { patch: { workspace: dir } }); toast('书库目录已设为 ' + dir); }
+    catch (e) { toast('保存失败：' + e.message); }
+  });
+  $('#setWsOpen').addEventListener('click', async () => {
+    try { const r = await api('/api/open-path', 'POST', { path: $('#setWs').value.trim() }); toast('已在文件管理器打开：' + r.dir); }
     catch (e) { toast(e.message); }
   });
 }
 
 // ---------- 环境 ----------
 async function renderEnv() {
-  const box = $('#env'); box.innerHTML = '';
-  const rows = [];
-  for (const m of STATE.models) rows.push([m.name, (m.available ? '✔ ' : '✖ ') + (m.path || '未安装')]);
-  rows.push(['运行中实例', STATE.instances.map(i => `${i.id}(v${i.version})`).join(', ') || '无']);
-  rows.push(['书库', STATE.config.workspace || '—']);
+  const box = $('#env'); box.innerHTML = '<div class="env-row"><span class="k">检测中…</span></div>';
+  let e;
+  try { e = await api('/api/env'); }
+  catch (err) { box.innerHTML = `<div class="env-row"><span class="k">引擎未连接</span><span class="v">${esc(err.message)}</span></div>`; return; }
+  box.innerHTML = '';
+  // 操作条（可执行的操作）
+  const bar = el('div', 'btn-row'); bar.style.marginBottom = '12px';
+  bar.innerHTML = `<button class="btn" id="envReload">🔄 重新检测</button>
+    <button class="btn" id="envOpenWs">📂 打开书库目录</button>
+    <button class="btn ghost" id="envToSettings">⚙️ 去设置</button>`;
+  box.appendChild(bar);
+  const ok = (b) => b ? '✔ ' : '✖ ';
+  const rows = [
+    ['平台', e.platform],
+    ['Unterm 程序', e.untermExe ? (e.untermExe + (e.untermVersion ? '  [' + e.untermVersion + ']' : '')) : '✖ 未找到（写作功能需要 Unterm）'],
+    ['Unterm CLI', e.untermCli || '✖ 未找到'],
+  ];
+  for (const m of e.models) rows.push([m.name, ok(m.available) + (m.path || '未安装')]);
+  rows.push(['运行中实例', e.instances.map(i => `${i.id}(v${i.version})`).join('、') || '无']);
+  rows.push(['代理', e.proxy.enabled ? ('开 · ' + (e.proxy.url || '(未配置)')) : '关']);
+  rows.push(['书库目录', ok(e.workspaceExists) + (e.workspace || '—')]);
   for (const [k, v] of rows) {
     const r = el('div', 'env-row'); r.innerHTML = `<span class="k">${esc(k)}</span><span class="v">${esc(v)}</span>`; box.appendChild(r);
   }
+  $('#envReload').addEventListener('click', async () => {
+    try { const b = await api('/api/bootstrap'); STATE = { ...STATE, ...b }; } catch {}
+    renderEnv(); toast('已重新检测');
+  });
+  $('#envOpenWs').addEventListener('click', async () => {
+    try { const r = await api('/api/open-path', 'POST', { path: e.workspace }); toast('已打开：' + r.dir); }
+    catch (err) { toast(err.message); }
+  });
+  $('#envToSettings').addEventListener('click', () => showView('settings'));
 }
 
 boot();

@@ -1,10 +1,9 @@
 // 高层"书"操作：创建（注册 + scaffold + profile）、列表带统计
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { loadBooks, upsertBook, getBook, slugify, newId, removeBook } from './store.mjs';
 import { scaffoldBook, refreshContext } from './scaffold.mjs';
-import { ensureProfile, cli } from './unterm.mjs';
+import { ensureProfile, cli, killProcess } from './unterm.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { getStyle } from './styles.mjs';
 
@@ -12,7 +11,7 @@ import { getStyle } from './styles.mjs';
 export function deleteBook(slugOrId, { deleteFiles = false } = {}) {
   const b = getBook(slugOrId);
   if (!b) throw new Error('找不到书：' + slugOrId);
-  try { const s = getSession(b.slug); if (s) { spawnSync('taskkill', ['/PID', String(s.pid), '/T', '/F']); removeSession(b.slug); } } catch {}
+  try { const s = getSession(b.slug); if (s) { killProcess(s.pid); removeSession(b.slug); } } catch {}
   try { if (b.profile) cli(['profile', 'delete', b.profile, '--yes']); } catch {}
   removeBook(b.slug);
   let filesDeleted = false;
@@ -37,6 +36,19 @@ export function setBookTarget(slugOrId, n) {
   const b = getBook(slugOrId);
   if (!b) throw new Error('找不到书：' + slugOrId);
   b.targetChapters = Math.max(0, Math.floor(Number(n) || 0));
+  upsertBook(b);
+  return b;
+}
+
+// 写作模式：'auto'(全自动) | 'review'(逐批审核·半自动)。review 时 reviewEvery=每几批停下等审核(默认1)。
+// 持久化进 book.writeMode/book.reviewEvery：作为开写默认值、并在重启后恢复。运行时的实时开关另存内存(pending store)。
+export function setBookWriteMode(slugOrId, mode, reviewEvery) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  const m = mode === 'review' ? 'review' : 'auto';
+  b.writeMode = m;
+  if (m === 'review') b.reviewEvery = Math.max(1, Math.floor(Number(reviewEvery) || 1));
+  else delete b.reviewEvery;
   upsertBook(b);
   return b;
 }

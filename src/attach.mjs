@@ -1,13 +1,14 @@
 // 连接一个运行中的写作会话，做：穿插指令(send) / 实时镜像(watch) / 停止(stop)。
 // 每次都按会话描述符新建一条 MCP 连接（任意进程皆可），与启动它的进程互不依赖。
-import { spawnSync } from 'node:child_process';
 import { connectInstance } from './mcpclient.mjs';
+import { killProcess } from './unterm.mjs';
 import { getSession, removeSession, listSessions } from './sessions.mjs';
 import { Autopilot } from './autopilot.mjs';
-import { recordUsage, parseTokens } from './usage.mjs';
+import { recordUsage, parseTokens, currentContextSize } from './usage.mjs';
 import { getBook, bookStats } from './books.mjs';
 import { stripCtrl } from './imagegen.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
+import { setPending, hasPending, getReviewEvery, setReviewEvery, setReviewDefault, takeResume } from './pending.mjs';
 
 const CR = '\r';
 
@@ -65,18 +66,37 @@ export async function streamBook(slug, cfg, onFrame, { intervalMs = 1000 } = {})
 
 // 把 autopilot 挂到一个已在运行的会话上（启动它的进程退出后仍可恢复监控）。
 // 返回 { autopilot, mcp, stop() }。
-export async function attachAutopilot(slug, cfg, onLog = () => {}) {
+export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestart = null) {
   const sess = getSession(slug);
   if (!sess) throw new Error('没有该书的运行中会话：' + slug);
   const mcp = await connect(sess, cfg);
   const pane = await resolvePane(mcp, sess);
   if (pane == null) { mcp.close(); throw new Error('窗口里没有活动 pane'); }
   const tokenKey = sess.instanceId + '@' + (sess.startedAt || '');
+  // 重启后恢复持久化的写作模式（review→逐批审核；auto→全自动）
+  { const b = getBook(slug); setReviewEvery(slug, b?.writeMode === 'review' ? (b.reviewEvery || 1) : 0); }
+  const onBatchReview = async ({ n, defaultText }) => {
+    const b = getBook(slug);
+    const chapters = (() => { try { return bookStats(b).chapters; } catch { return 0; } })();
+    setReviewDefault(slug, defaultText);
+    setPending(slug, { kind: 'batch-review', scope: `已写到第 ${chapters} 章 · 第 ${n} 批`, n, chapters });
+    onLog({ level: 'act', source: 'autopilot', kind: 'pending-batch', n, chapters,
+      msg: `⏸ 本批已写完（已到第 ${chapters} 章），待你审核：批准继续 / 按要求继续 / 停止` });
+    return '本批已写完。请【暂停】：先不要写下一批，也不要改大纲，等用户审核当前内容并下达下一步要求后再继续。';
+  };
   const ap = new Autopilot(mcp, pane, {
     ...cfg.autopilot,
     assumeStarted: true,   // 重挂的会话：agent 已在运行，空闲时可直接驱动续写
     onLog: (e) => onLog({ ...e, source: 'autopilot' }),
     onTokens: (n) => recordUsage(slug, tokenKey, n),
+    reviewEvery: () => getReviewEvery(slug),
+    onBatchReview,
+    takeReviewResume: () => takeResume(slug),
+    contextSize: () => { const b = getBook(slug); return b ? currentContextSize(b.dir, sess.model) : 0; },
+    freshContextLimit: cfg.autopilot?.freshContextLimit || 0,
+    freshFallbackBatches: cfg.autopilot?.freshFallbackBatches || 0,
+    onFreshRestart: typeof onFreshRestart === 'function' ? onFreshRestart : undefined,
+    isPending: () => hasPending(slug),
     shouldStopContinue: () => { const b = getBook(slug); const t = b?.targetChapters || 0; return t > 0 && bookStats(b).chapters >= t; },
     onReachedTarget: () => { try { maybeAutoPublish(getBook(slug), { cfg, onLog: (e) => onLog({ ...e }) }); } catch {} },
   });
@@ -105,7 +125,7 @@ export async function sampleTokens(slug, cfg) {
 export function stopBook(slug) {
   const sess = getSession(slug);
   if (!sess) return { ok: false, reason: '无该会话' };
-  try { spawnSync('taskkill', ['/PID', String(sess.pid), '/T', '/F'], { encoding: 'utf8' }); } catch {}
+  try { killProcess(sess.pid); } catch {}
   removeSession(slug);
   return { ok: true, killed: sess.pid };
 }

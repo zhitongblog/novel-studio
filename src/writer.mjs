@@ -12,46 +12,69 @@ import { Autopilot } from './autopilot.mjs';
 import { refreshContext } from './scaffold.mjs';
 import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision, reviewEnding, buildEndingRenudgeInstruction } from './editor.mjs';
 import { buildFinaleInstruction, buildAfterwordInstruction } from './planner.mjs';
-import { setPending, hasPending } from './pending.mjs';
+import { setPending, hasPending, getReviewEvery, setReviewEvery, setReviewDefault, takeResume } from './pending.mjs';
 import { saveSession } from './sessions.mjs';
-import { recordUsage } from './usage.mjs';
+import { recordUsage, currentContextSize } from './usage.mjs';
 import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFolders, clearFlatImport, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { runFinaleClosure } from './finale.mjs';
 
-// 生成 launch.ps1：设代理环境、（best-effort）切 unterm 代理、cd 到书目录、启动 agent 带初始指令
+const IS_WIN = process.platform === 'win32';
+
+// 生成启动脚本：设代理环境、cd 到书目录、启动 agent 带初始指令。
+// Windows → launch.ps1（pwsh）；macOS/Linux → launch.sh（POSIX sh）。
 export function writeLaunchScript(book, model, instruction, cfg) {
   const m = getModel(model);
-  const seed = m.seedArgs(instruction, cfg);
   // 安全网：把任何换行折叠成空格 —— 多行 prompt 会被 agent 当多行草稿、等人工回车，无法自动开跑。
-  const psArr = '@(' + seed.map(a => "'" + String(a).replace(/[\r\n]+/g, ' ').replace(/'/g, "''") + "'").join(',') + ')';
+  const seed = m.seedArgs(instruction, cfg).map(a => String(a).replace(/[\r\n]+/g, ' '));
   const proxy = cfg.enableProxy ? proxyUrl() : '';
-  const lines = [
-    '$ErrorActionPreference = "Continue"',
-    `Set-Location -LiteralPath '${book.dir.replace(/'/g, "''")}'`,
-    `Write-Host "== Novel Studio :: 《${book.title.replace(/"/g, '`"')}》 / ${m.name} ==" -ForegroundColor Cyan`,
-  ];
-  if (cfg.enableProxy && proxy) {
-    // 只为本会话注入代理环境变量（大小写都给，兼容 codex 的 Rust HTTP 客户端）；
-    // 绝不改动 unterm 全局 proxy.json，避免污染用户配置。
+  const dir = path.join(book.dir, '.studio');
+  fs.mkdirSync(dir, { recursive: true });
+
+  if (IS_WIN) {
+    const psArr = '@(' + seed.map(a => "'" + a.replace(/'/g, "''") + "'").join(',') + ')';
+    const lines = [
+      '$ErrorActionPreference = "Continue"',
+      `Set-Location -LiteralPath '${book.dir.replace(/'/g, "''")}'`,
+      `Write-Host "== Novel Studio :: 《${book.title.replace(/"/g, '`"')}》 / ${m.name} ==" -ForegroundColor Cyan`,
+    ];
+    if (proxy) {
+      lines.push(
+        `$env:HTTP_PROXY = '${proxy}'`, `$env:HTTPS_PROXY = '${proxy}'`, `$env:ALL_PROXY = '${proxy}'`,
+        `$env:http_proxy = '${proxy}'`, `$env:https_proxy = '${proxy}'`, `$env:all_proxy = '${proxy}'`,
+        `Write-Host "[proxy] 本会话已启用 ${proxy}" -ForegroundColor DarkGray`,
+      );
+    }
     lines.push(
-      `$env:HTTP_PROXY = '${proxy}'`, `$env:HTTPS_PROXY = '${proxy}'`, `$env:ALL_PROXY = '${proxy}'`,
-      `$env:http_proxy = '${proxy}'`, `$env:https_proxy = '${proxy}'`, `$env:all_proxy = '${proxy}'`,
-      `Write-Host "[proxy] 本会话已启用 ${proxy}" -ForegroundColor DarkGray`,
+      `Write-Host "[agent] 启动 ${m.bin} ，初始指令已注入…" -ForegroundColor DarkGray`,
+      `$seed = ${psArr}`,
+      `& ${m.bin} @seed`,
     );
+    const p = path.join(dir, 'launch.ps1');
+    fs.writeFileSync(p, '﻿' + lines.join('\r\n') + '\r\n', 'utf8'); // BOM 保证中文
+    return p;
   }
-  lines.push(
-    `Write-Host "[agent] 启动 ${m.bin} ，初始指令已注入…" -ForegroundColor DarkGray`,
-    `$seed = ${psArr}`,
-    `& ${m.bin} @seed`,
-  );
-  const p = path.join(book.dir, '.studio', 'launch.ps1');
-  fs.writeFileSync(p, '﻿' + lines.join('\r\n') + '\r\n', 'utf8'); // BOM 保证中文
+
+  // POSIX sh：单引号包裹（内部 ' → '\'' 转义）。agent 跑前台，不 exec（退出后由外层 shell 保持窗口）。
+  const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  const lines = ['#!/bin/sh', `cd ${q(book.dir)} || exit 1`,
+    `echo "== Novel Studio :: 《${book.title}》 / ${m.name} =="`];
+  if (proxy) {
+    for (const v of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) {
+      lines.push(`export ${v}=${q(proxy)}`);
+    }
+    lines.push(`echo "[proxy] 本会话已启用 ${proxy}"`);
+  }
+  lines.push(`echo "[agent] 启动 ${m.bin} ，初始指令已注入…"`,
+    `${m.bin} ${seed.map(q).join(' ')}`);
+  const p = path.join(dir, 'launch.sh');
+  fs.writeFileSync(p, lines.join('\n') + '\n', 'utf8');
+  try { fs.chmodSync(p, 0o755); } catch {}
   return p;
 }
 
 // 主流程。返回 { instance, mcp, autopilot, paneId }。
-export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true }) {
+export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true, onFreshRestart = null }) {
   const m = getModel(model);
   if (!m) throw new Error('未知模型：' + model);
   const det = detectModel(model);
@@ -121,6 +144,9 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
     // 大纲审稿门：作者输出「【大纲待审：xxx】」时，换一个模型无头审稿。
     const editorOff = cfg.editorReview?.enabled === false;
     const slug = book.slug;
+    // 从持久化的写作模式播种运行时审核开关（重启/重挂后恢复）：review→每 reviewEvery 批审核；auto→0。
+    // 读 store 最新值，不用入参 book（它可能是 setBookWriteMode 之前抓的旧引用，writeMode 会缺）。
+    { const fb = getBook(slug) || book; setReviewEvery(slug, fb.writeMode === 'review' ? (fb.reviewEvery || 1) : 0); }
     const gateOn = cfg.editorReview?.requireApproval !== false;   // 全局确认门
     const renudge = new Map();   // scope -> 已重催次数
     const onOutlineReady = editorOff ? undefined : async (scope) => {
@@ -229,6 +255,17 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       onLog({ level: 'warn', msg: `完本审稿未过 → 第 ${n} 次退回补写结局`, source: 'finale' });
       return { text: buildEndingRenudgeInstruction(b, rc.file), stop: false };
     };
+    // —— 逐批审核（半自动写作模式）：审核模式下每写够 N 批就停下，等用户在界面裁决（批准/按要求改/停止）——
+    // reviewEvery 实时从 pending store 读，支持运行中热切换全自动 ↔ 审核模式。
+    const onBatchReview = async ({ n, defaultText }) => {
+      const b = getBook(slug) || book;
+      const chapters = (() => { try { return bookStats(b).chapters; } catch { return 0; } })();
+      setReviewDefault(slug, defaultText);   // 暂存"批准并继续"的默认续写文案
+      setPending(slug, { kind: 'batch-review', scope: `已写到第 ${chapters} 章 · 第 ${n} 批`, n, chapters });
+      onLog({ level: 'act', source: 'autopilot', kind: 'pending-batch', n, chapters,
+        msg: `⏸ 本批已写完（已到第 ${chapters} 章），待你审核：批准继续 / 按要求继续 / 停止` });
+      return '本批已写完。请【暂停】：先不要写下一批，也不要改大纲，等用户审核当前内容并下达下一步要求后再继续。';
+    };
     autopilot = new Autopilot(mcp, paneId, {
       ...cfg.autopilot,
       onLog: (e) => onLog({ ...e, source: 'autopilot' }),
@@ -237,7 +274,15 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       onRevisionDone,
       finaleCheck,
       onFinaleReady,
-      isPending: () => hasPending(slug),   // 全局确认门：有待确认审稿时 autopilot 挂起
+      reviewEvery: () => getReviewEvery(slug),   // 0=全自动；N=每 N 批审核（实时热切换）
+      onBatchReview,
+      takeReviewResume: () => takeResume(slug),
+      // 省 token：上下文快满就重开新会话（靠 continuity_ledger 重建）
+      contextSize: () => currentContextSize((getBook(slug) || book).dir, model),
+      freshContextLimit: cfg.autopilot?.freshContextLimit || 0,
+      freshFallbackBatches: cfg.autopilot?.freshFallbackBatches || 0,
+      onFreshRestart: typeof onFreshRestart === 'function' ? onFreshRestart : undefined,
+      isPending: () => hasPending(slug),   // 全局确认门：有待确认审稿/审核时 autopilot 挂起
       // 启用完本：不靠章数硬停，交给收尾流程收束；已完本则停。未启用完本时沿用旧的"到目标章数即停"。
       shouldStopContinue: () => {
         const b = getBook(slug) || book;

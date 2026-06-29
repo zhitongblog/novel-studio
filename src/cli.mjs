@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig, updateConfig } from './config.mjs';
 import { createBook, listBooksWithStats, getBook } from './books.mjs';
 import { detectAll, getModel } from './models.mjs';
-import { findUntermExe, findUntermCli, listInstances, readProxyConfig, resolveProxyNode } from './unterm.mjs';
+import { findUntermExe, findUntermCli, untermVersion, listInstances, readProxyConfig, resolveProxyNode } from './unterm.mjs';
 import { startWriting } from './writer.mjs';
 import { listSessions, sendToBook, streamBook, stopBook, attachAutopilot, sampleTokens } from './attach.mjs';
 import { loadUsage, bookUsage, fmtTokens } from './usage.mjs';
@@ -53,7 +53,8 @@ export async function runCli(argv) {
 function doctor() {
   console.log(c.bold('\n🩺 环境自检\n') + hr());
   const exe = findUntermExe(), cli = findUntermCli();
-  line('Unterm GUI', exe || '未找到', !!exe);
+  const exeV = exe ? untermVersion(exe) : '';
+  line('Unterm GUI', exe ? `${exe}  [${exeV || '?'}]` : '未找到', !!exe);
   line('Unterm CLI', cli || '未找到', !!cli);
   const inst = listInstances();
   line('运行中实例', inst.length ? inst.map(i => `${i.id}(v${i.version})`).join(', ') : '无', true);

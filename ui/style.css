@@ -86,6 +86,9 @@ body {
 .wb-right { display: flex; flex-direction: column; min-height: 0; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--muted); }
 .field span { font-weight: 500; }
+.ws-row { display: flex; gap: 8px; align-items: center; }
+.ws-row input { flex: 1 1 auto; min-width: 0; }
+.ws-row .btn { flex: 0 0 auto; white-space: nowrap; }
 input, select, textarea {
   background: var(--panel); border: 1px solid var(--border); color: var(--text);
   border-radius: 9px; padding: 10px 12px; font-size: 13.5px; font-family: var(--sans); outline: none; transition: .15s;
@@ -226,7 +229,9 @@ textarea { resize: vertical; line-height: 1.5; }
 .rb-head { color: #f0c674; font-size: 13px; margin-bottom: 6px; }
 .rb-file { color: #9aa3b5; font-size: 12px; }
 .rb-critique { max-height: 30vh; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 12px/1.55 ui-monospace, Consolas, monospace; background: #11141c; border: 1px solid #2a2e3a; border-radius: 6px; padding: 8px; margin: 0 0 8px; color: #c9d1e0; }
-.rb-actions { display: flex; gap: 8px; }
+.rb-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.rb-req { width: 100%; box-sizing: border-box; resize: vertical; margin: 0 0 8px; padding: 8px; border-radius: 6px; background: #11141c; border: 1px solid #2a2e3a; color: #e6e9f0; font: 13px/1.5 inherit; }
+.rb-req:focus { outline: none; border-color: #5a4a1e; }
 
 /* ===== 阅读 / 工作台 ===== */
 .reader { flex: 1; display: flex; gap: 14px; min-height: 0; }

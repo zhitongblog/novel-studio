@@ -96,6 +96,21 @@ export class Autopilot {
     }
     this._heldLogged = false;
 
+    // —— 逐批审核 · 恢复：用户已裁决(pending 已清) → 注入"下一批"指令、推进计数，恢复自动监控 ——
+    // 暂停时未增 continueCount，故这里增一次让批次号单调推进（否则会卡在同一审核点反复触发）。
+    if (this._awaitingReview && !(typeof this.opt.isPending === 'function' && this.opt.isPending())) {
+      const resumeText = (typeof this.opt.takeReviewResume === 'function' && this.opt.takeReviewResume())
+        || this.opt.continueText || '继续';
+      try { await this.mcp.submitText(this.paneId, resumeText); }
+      catch (e) { this.log('恢复续写注入失败（将重试）：' + e.message, 'warn'); this.prevScreen = screen; return; }
+      this._awaitingReview = false;
+      this.continueCount++; this.stats.continues++;
+      this.lastRespondedHash = hash(tail);
+      this.prevScreen = screen;
+      this.log(`已采纳你的裁决 → 继续写下一批（第 ${this.continueCount} 次续写）`, 'act');
+      return;
+    }
+
     // agent 在场检测（基于屏幕内容，比前台进程名可靠）：
     // bypass 模式下 codex 会 spawn 子 shell 执行命令，进程名会变成 pwsh —— 但屏幕仍是 agent 的 TUI。
     // 只有屏幕回到"裸 shell 提示符且无 agent TUI 标记"才算 agent 退出 → 绝不向裸 shell 注入指令。
@@ -264,6 +279,24 @@ export class Autopilot {
         }
       } catch {}
     }
+    // —— 省 token：上下文太大就重开新会话（停旧窗口→靠 continuity_ledger 重建最小上下文续写）——
+    // 在“写完一批、回到待续点”的干净时机判定（此时上一批正文+台账都已落盘，重开无损）。
+    if (typeof this.opt.onFreshRestart === 'function') {
+      const limit = this.opt.freshContextLimit || 0;
+      const ctx = typeof this.opt.contextSize === 'function' ? (this.opt.contextSize() || 0) : 0;
+      const fallbackN = this.opt.freshFallbackBatches || 0;
+      let reason = null;
+      if (limit > 0 && ctx >= limit) reason = `上下文已达 ${Math.round(ctx / 1000)}K（≥${Math.round(limit / 1000)}K）`;
+      else if (fallbackN > 0 && ctx === 0 && this.continueCount > 0 && this.continueCount % fallbackN === 0) reason = `已写 ${this.continueCount} 批`;
+      if (reason) {
+        this.log(`${reason} → 重开新会话省 token（靠 continuity_ledger 重建上下文）`, 'act');
+        this.running = false;
+        const cb = this.opt.onFreshRestart;
+        setTimeout(() => { Promise.resolve(cb(reason)).catch(() => {}); }, 0);
+        return;
+      }
+    }
+
     const n = this.continueCount + 1;
     // 四选一（优先级递减，错峰）：全文逻辑自检 → 节奏/格局体检 → 阅读性润色扫描 → 普通续写。
     const everyFull = this.opt.fullCheckEvery || 0;
@@ -276,6 +309,24 @@ export class Autopilot {
       : paceCheck ? this.opt.paceCheckText
       : styleCheck ? this.opt.styleCheckText
       : this.opt.continueText) || '继续';
+
+    // —— 逐批审核门（半自动）：审核模式下，到达审核点就【暂停】等用户裁决，不自动续写。
+    // reviewEvery 每拍实时读取(可热切换全自动/审核模式)；本应自动发送的 text 作为"批准并继续"的默认指令交给上层暂存。
+    const reviewEvery = (typeof this.opt.reviewEvery === 'function' ? this.opt.reviewEvery() : (this.opt.reviewEvery || 0)) || 0;
+    if (reviewEvery > 0 && typeof this.opt.onBatchReview === 'function' && (n % reviewEvery === 0)) {
+      this.sawAgentRunning = true;
+      let instr = null;
+      try { instr = await this.opt.onBatchReview({ n, defaultText: text }); }
+      catch (e) { this.log('审核门处理失败（照常续写）：' + e.message, 'warn'); }
+      if (instr) {
+        try { await this.mcp.submitText(this.paneId, instr); }
+        catch (e) { this.log('暂停指令注入失败（将重试）：' + e.message, 'warn'); return; }
+        this._awaitingReview = true;
+        this.lastRespondedHash = h;
+        this.log('本批写完 → 已暂停，等你审核（批准继续 / 按要求继续 / 停止）', 'act');
+        return;
+      }
+    }
 
     // 先把指令打进输入框、停顿、再单独回车提交（一次性带回车会被当作粘贴内容、只填不发）。
     try {

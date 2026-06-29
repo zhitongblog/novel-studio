@@ -8,10 +8,12 @@ export class UntermMcp {
     this.sock = null; this.buf = ''; this.id = 0;
     this.pending = new Map();
     this.authed = false;
-    // 未受信连接的写操作（session.input 等）会被阻塞 → 必须标记为受信 agent。
-    // trusted_agents.json 默认含 'claude-code'，故默认以此身份标识。
+    // 未受信 agent 的写操作（session.input 等）会被【挂起等用户确认】→ 调用超时 → autopilot 点不动。
+    // 新版 Unterm(v0.51)：agent.identify 只做审计分组，【不授信】；必须再调 agent.trust 把本名加入受信列表，
+    // 写操作才会跳过确认。默认名 'claude-code'。
     this.identifyAs = opts.identifyAs || 'claude-code';
     this.identified = false;
+    this.trusted = false;
   }
 
   connect(timeoutMs = 8000) {
@@ -26,9 +28,13 @@ export class UntermMcp {
         try {
           const r = await this.call('auth.login', { token: this.token });
           this.authed = (r?.status === 'ok' || r === null || r === undefined);
-          // 标识为受信 agent，解锁写操作（容错：失败不阻断连接）
+          // ① 自报身份（审计分组）
           try { const ir = await this.call('agent.identify', { name: this.identifyAs }, 8000); this.identified = ir?.status === 'ok'; }
           catch { this.identified = false; }
+          // ② 把本名加入受信列表 → 解锁写操作（session.input 跳过确认）。这是 v0.51 必须做的一步。
+          // 旧版没有 agent.trust 方法会报 -32601，吞掉即可（旧版本就靠 identify/默认信任）。
+          try { const tr = await this.call('agent.trust', { name: this.identifyAs }, 8000); this.trusted = !!(tr?.ok || tr?.added); }
+          catch { this.trusted = false; }
           resolve(this);
         } catch (e) { reject(e); }
       });
