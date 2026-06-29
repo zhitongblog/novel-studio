@@ -279,6 +279,24 @@ export class Autopilot {
         }
       } catch {}
     }
+    // —— 省 token：上下文太大就重开新会话（停旧窗口→靠 continuity_ledger 重建最小上下文续写）——
+    // 在“写完一批、回到待续点”的干净时机判定（此时上一批正文+台账都已落盘，重开无损）。
+    if (typeof this.opt.onFreshRestart === 'function') {
+      const limit = this.opt.freshContextLimit || 0;
+      const ctx = typeof this.opt.contextSize === 'function' ? (this.opt.contextSize() || 0) : 0;
+      const fallbackN = this.opt.freshFallbackBatches || 0;
+      let reason = null;
+      if (limit > 0 && ctx >= limit) reason = `上下文已达 ${Math.round(ctx / 1000)}K（≥${Math.round(limit / 1000)}K）`;
+      else if (fallbackN > 0 && ctx === 0 && this.continueCount > 0 && this.continueCount % fallbackN === 0) reason = `已写 ${this.continueCount} 批`;
+      if (reason) {
+        this.log(`${reason} → 重开新会话省 token（靠 continuity_ledger 重建上下文）`, 'act');
+        this.running = false;
+        const cb = this.opt.onFreshRestart;
+        setTimeout(() => { Promise.resolve(cb(reason)).catch(() => {}); }, 0);
+        return;
+      }
+    }
+
     const n = this.continueCount + 1;
     // 四选一（优先级递减，错峰）：全文逻辑自检 → 节奏/格局体检 → 阅读性润色扫描 → 普通续写。
     const everyFull = this.opt.fullCheckEvery || 0;

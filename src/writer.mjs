@@ -14,7 +14,7 @@ import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRe
 import { buildFinaleInstruction, buildAfterwordInstruction } from './planner.mjs';
 import { setPending, hasPending, getReviewEvery, setReviewEvery, setReviewDefault, takeResume } from './pending.mjs';
 import { saveSession } from './sessions.mjs';
-import { recordUsage } from './usage.mjs';
+import { recordUsage, currentContextSize } from './usage.mjs';
 import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFolders, clearFlatImport, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { runFinaleClosure } from './finale.mjs';
@@ -74,7 +74,7 @@ export function writeLaunchScript(book, model, instruction, cfg) {
 }
 
 // 主流程。返回 { instance, mcp, autopilot, paneId }。
-export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true }) {
+export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true, onFreshRestart = null }) {
   const m = getModel(model);
   if (!m) throw new Error('未知模型：' + model);
   const det = detectModel(model);
@@ -277,6 +277,11 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       reviewEvery: () => getReviewEvery(slug),   // 0=全自动；N=每 N 批审核（实时热切换）
       onBatchReview,
       takeReviewResume: () => takeResume(slug),
+      // 省 token：上下文快满就重开新会话（靠 continuity_ledger 重建）
+      contextSize: () => currentContextSize((getBook(slug) || book).dir, model),
+      freshContextLimit: cfg.autopilot?.freshContextLimit || 0,
+      freshFallbackBatches: cfg.autopilot?.freshFallbackBatches || 0,
+      onFreshRestart: typeof onFreshRestart === 'function' ? onFreshRestart : undefined,
       isPending: () => hasPending(slug),   // 全局确认门：有待确认审稿/审核时 autopilot 挂起
       // 启用完本：不靠章数硬停，交给收尾流程收束；已完本则停。未启用完本时沿用旧的"到目标章数即停"。
       shouldStopContinue: () => {

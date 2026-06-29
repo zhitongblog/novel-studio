@@ -1406,6 +1406,8 @@ async function renderSettings() {
       <option value="off" ${!c.autopilot?.enabled ? 'selected' : ''}>关</option></select></label>
     <label class="field"><span>自动续写上限（每会话）</span><input id="setMax" type="number" value="${c.autopilot?.maxAutoContinue ?? 40}"></label>
     <label class="field"><span>每几批做一次全文逻辑自检（0=关闭）</span><input id="setFullCheck" type="number" value="${c.autopilot?.fullCheckEvery ?? 5}"></label>
+    <label class="field"><span>上下文达多少 token 就重开新会话省钱（0=关闭；claude 精确，建议 12万~20万）</span><input id="setFreshCtx" type="number" value="${c.autopilot?.freshContextLimit ?? 180000}"></label>
+    <div class="modal-hint" style="margin:-2px 0 4px">连续写时同一会话上下文越堆越大、每批都被重发（缓存还会过期→全价）。到阈值就停旧会话、靠 continuity_ledger 重开新窗口续写，省 token。太小会频繁重开反而更费。</div>
     <div class="btn-row"><button class="btn primary" id="setSave" style="flex:0;padding:10px 22px">保存</button></div>`;
   $('#setSave').addEventListener('click', async () => {
     const patch = {
@@ -1415,6 +1417,7 @@ async function renderSettings() {
         enabled: $('#setAuto').value === 'on',
         maxAutoContinue: Number($('#setMax').value) || 40,
         fullCheckEvery: Math.max(0, Number($('#setFullCheck').value) || 0),
+        freshContextLimit: Math.max(0, Number($('#setFreshCtx').value) || 0),
       },
     };
     try { STATE.config = await api('/api/config', 'POST', { patch }); fillModels(); toast('设置已保存'); }

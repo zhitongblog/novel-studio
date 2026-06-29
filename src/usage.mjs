@@ -104,6 +104,83 @@ function scanClaudeTokens(dir) {
   return total;
 }
 
+// —— 当前“上下文占用”估算（用于“上下文快满就重开新会话省 token”）——
+// 与累计用量不同：这里要的是【最近一轮请求实际带的上下文大小】≈ 该轮 prompt 的 input+cache。
+// claude：~/.claude/projects/<enc>/<session>.jsonl 里 assistant 行 message.usage 的
+//   input_tokens + cache_read_input_tokens + cache_creation_input_tokens（不含 output）。
+//   取“最新会话文件里最后一条 usage”。
+const _ctxCache = new Map(); // dir|model -> { at, val }
+function safeMtime(p) { try { return fs.statSync(p).mtimeMs; } catch { return 0; } }
+
+export function claudeContextSize(dir) {
+  try {
+    const base = path.join(os.homedir(), '.claude', 'projects');
+    const pd = path.join(base, path.resolve(dir).replace(/[^A-Za-z0-9]/g, '-'));
+    if (!fs.existsSync(pd)) return 0;
+    const targetLower = path.resolve(dir).toLowerCase();
+    const files = fs.readdirSync(pd).filter(f => f.endsWith('.jsonl'))
+      .map(f => ({ p: path.join(pd, f), m: safeMtime(path.join(pd, f)) }))
+      .sort((a, b) => b.m - a.m);
+    for (const { p } of files) {
+      let content = ''; try { content = fs.readFileSync(p, 'utf8'); } catch { continue; }
+      const lines = content.split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line.includes('"usage"')) continue;
+        try {
+          const o = JSON.parse(line);
+          if (o.cwd && path.resolve(o.cwd).toLowerCase() !== targetLower) continue;
+          const u = o.message && o.message.usage;
+          if (u) return (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        } catch {}
+      }
+    }
+  } catch {}
+  return 0;
+}
+
+// codex：rollout 里 token_count.info.last_token_usage.total_tokens ≈ 最近一轮上下文（尽力而为，拿不到返回 0）。
+export function codexContextSize(dir) {
+  try {
+    const base = path.join(os.homedir(), '.codex', 'sessions');
+    if (!fs.existsSync(base)) return 0;
+    const targetLower = path.resolve(dir).toLowerCase();
+    let newest = null, newestM = 0;
+    (function walk(d) {
+      let ents = []; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+      for (const e of ents) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.jsonl')) { const m = safeMtime(p); if (m > newestM) { newestM = m; newest = p; } }
+      }
+    })(base);
+    if (!newest) return 0;
+    const content = fs.readFileSync(newest, 'utf8');
+    // 确认这个最新会话属于目标目录
+    const head = content.slice(0, 8192);
+    const mm = head.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (mm) { const cwd = mm[1].replace(/\\\\/g, '\\').replace(/\\"/g, '"').replace(/\\u002f/gi, '/'); if (path.resolve(cwd).toLowerCase() !== targetLower) return 0; }
+    const lines = content.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('token_count')) continue;
+      try { const o = JSON.parse(lines[i]); if (o?.payload?.type === 'token_count') { const info = o.payload.info; return info?.last_token_usage?.total_tokens || 0; } } catch {}
+    }
+  } catch {}
+  return 0;
+}
+
+// 统一入口：返回当前上下文占用 token 数（claude 精确；codex 尽力；其它/读不到返回 0）。短缓存避免频繁读盘。
+export function currentContextSize(dir, model) {
+  if (!dir) return 0;
+  const key = (model || '') + '|' + path.resolve(dir).toLowerCase();
+  const c = _ctxCache.get(key);
+  if (c && Date.now() - c.at < 8000) return c.val;
+  let val = 0;
+  try { val = model === 'claude' ? claudeContextSize(dir) : model === 'codex' ? codexContextSize(dir) : 0; } catch {}
+  _ctxCache.set(key, { at: Date.now(), val });
+  return val;
+}
+
 const USAGE_FILE = path.join(CONFIG_DIR, 'usage.json');
 
 // 从屏幕文本解析当前累计 token 数（取屏幕上与 "tokens" 相关的最大数字）

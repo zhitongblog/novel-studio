@@ -4,7 +4,7 @@ import { connectInstance } from './mcpclient.mjs';
 import { killProcess } from './unterm.mjs';
 import { getSession, removeSession, listSessions } from './sessions.mjs';
 import { Autopilot } from './autopilot.mjs';
-import { recordUsage, parseTokens } from './usage.mjs';
+import { recordUsage, parseTokens, currentContextSize } from './usage.mjs';
 import { getBook, bookStats } from './books.mjs';
 import { stripCtrl } from './imagegen.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
@@ -66,7 +66,7 @@ export async function streamBook(slug, cfg, onFrame, { intervalMs = 1000 } = {})
 
 // 把 autopilot 挂到一个已在运行的会话上（启动它的进程退出后仍可恢复监控）。
 // 返回 { autopilot, mcp, stop() }。
-export async function attachAutopilot(slug, cfg, onLog = () => {}) {
+export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestart = null) {
   const sess = getSession(slug);
   if (!sess) throw new Error('没有该书的运行中会话：' + slug);
   const mcp = await connect(sess, cfg);
@@ -92,6 +92,10 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}) {
     reviewEvery: () => getReviewEvery(slug),
     onBatchReview,
     takeReviewResume: () => takeResume(slug),
+    contextSize: () => { const b = getBook(slug); return b ? currentContextSize(b.dir, sess.model) : 0; },
+    freshContextLimit: cfg.autopilot?.freshContextLimit || 0,
+    freshFallbackBatches: cfg.autopilot?.freshFallbackBatches || 0,
+    onFreshRestart: typeof onFreshRestart === 'function' ? onFreshRestart : undefined,
     isPending: () => hasPending(slug),
     shouldStopContinue: () => { const b = getBook(slug); const t = b?.targetChapters || 0; return t > 0 && bookStats(b).chapters >= t; },
     onReachedTarget: () => { try { maybeAutoPublish(getBook(slug), { cfg, onLog: (e) => onLog({ ...e }) }); } catch {} },

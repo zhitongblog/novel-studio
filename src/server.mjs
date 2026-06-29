@@ -82,7 +82,7 @@ async function reattachLiveSessions() {
   for (const s of listSessions()) {
     if (rt.get(s.slug)?.session) continue;
     try {
-      const h = await attachAutopilot(s.slug, cfg, (e) => pushLog(s.slug, e));
+      const h = await attachAutopilot(s.slug, cfg, (e) => pushLog(s.slug, e), mkFresh(s.slug, cfg));
       rtOf(s.slug).session = { autopilot: h.autopilot, mcp: h.mcp, reattached: true };
       pushLog(s.slug, { msg: '引擎启动 → 已重新挂载 autopilot 继续监控' });
     } catch (e) { /* 会话可能已死，listSessions 会自动清理 */ }
@@ -329,7 +329,7 @@ async function api(p, req, res, u) {
       const instruction = buildKickoffInstruction(book, body.theme || body.genre, body.words);
       rtOf(book.slug).logs = [];
       try {
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e) });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, book: { ...book, stats: { chapters: 0, kb: 0 }, tokens: 0 }, instance: session.instance.id, pane: session.paneId });
       } catch (e) { pushLog(book.slug, { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -348,7 +348,7 @@ async function api(p, req, res, u) {
         }
         // 未在写 → 开一个会话专门做复检
         rtOf(book.slug).logs = [];
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e) });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, pane: session.paneId });
       } catch (e) { pushLog(book.slug, { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -574,7 +574,7 @@ async function api(p, req, res, u) {
           return json(res, 200, { ...r, mode: 'inserted', snapshot: hash });
         }
         rtOf(book.slug).logs = [];
-        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e) });
+        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
         rtOf(book.slug).session = session;
         pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 已开窗' + (hash ? '（已存档 ' + hash + '，可回退）' : '') });
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, snapshot: hash });
@@ -602,7 +602,7 @@ async function api(p, req, res, u) {
           return json(res, 200, { ...r, mode: 'inserted' });
         }
         rtOf(book.slug).logs = [];
-        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e) });
+        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, pane: session.paneId });
       } catch (e) { pushLog(slugOf(body.book), { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -702,12 +702,28 @@ async function ensureAutopilot(slug, cfg) {
   const st = rt.get(slug);
   if (st?.session?.autopilot) return false;
   try {
-    const h = await attachAutopilot(slug, cfg, (e) => pushLog(slug, e));
+    const h = await attachAutopilot(slug, cfg, (e) => pushLog(slug, e), mkFresh(slug, cfg));
     rtOf(slug).session = { ...(st?.session || {}), autopilot: h.autopilot, mcp: h.mcp };
     pushLog(slug, { level: 'act', msg: '已重新接管监控（autopilot）' });
     return true;
   } catch (e) { pushLog(slug, { level: 'warn', msg: '重新挂监控失败：' + e.message }); return false; }
 }
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// 省 token：autopilot 判定“上下文快满”时回调这里——停旧会话/窗口，再用 ledger 重开新窗口续写。
+async function freshRestart(slug, cfg, reason = '') {
+  try {
+    const st = rt.get(slug);
+    try { st?.session?.autopilot?.stop?.('fresh-restart'); } catch {}
+    try { st?.streamer?.stop?.(); } catch {}
+    try { stopBook(slug); } catch {}            // 杀旧窗口 + 注销会话
+    await sleep(1500);
+    pushLog(slug, { level: 'act', msg: `♻️ ${reason || '上下文较大'} → 重开新会话续写（省 token，靠 continuity_ledger 重建上下文）` });
+    await resumeWriting(slug, cfg, '', getBook(slug)?.model || null);
+    pushLog(slug, { level: 'act', msg: '✅ 新会话已开，继续写作' });
+  } catch (e) { pushLog(slug, { level: 'error', msg: '重开新会话失败：' + e.message }); }
+}
+const mkFresh = (slug, cfg) => (reason) => freshRestart(slug, cfg, reason);
+
 // 重新打开 Unterm 并从已写内容继续；instruction 默认走 resume 续写，可叠加用户本次的额外要求。
 async function resumeWriting(slug, cfg, extraTask = '', model = null) {
   const book = getBook(slug);
@@ -718,7 +734,7 @@ async function resumeWriting(slug, cfg, extraTask = '', model = null) {
   if (extraTask) instruction += '；另外，本次还需：' + String(extraTask).replace(/[\r\n]+/g, ' ');
   const useModel = model || book.model || cfg.defaultModel;
   pushLog(slug, { level: 'act', msg: `会话已停止 → 用 ${useModel} 重新打开 Unterm 并继续写作…` });
-  const session = await startWriting({ book, model: useModel, instruction, cfg, onLog: (e) => pushLog(slug, e) });
+  const session = await startWriting({ book, model: useModel, instruction, cfg, onLog: (e) => pushLog(slug, e), onFreshRestart: mkFresh(slug, cfg) });
   rtOf(slug).session = session;
   return session;
 }
@@ -763,6 +779,7 @@ async function doWrite(body, cfg, res) {
     const session = await startWriting({
       book, model, instruction, cfg,
       onLog: (e) => pushLog(slug, e),
+      onFreshRestart: mkFresh(slug, cfg),
     });
     rtOf(slug).session = session;
     return json(res, 200, { ok: true, instance: session.instance.id, pane: session.paneId });
