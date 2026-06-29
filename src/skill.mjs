@@ -1,5 +1,5 @@
 // 将 codex 的 longform-webnovel-writer 写作 skill 落成"每本书"的 agent 上下文文件。
-// 三个模型分别读取不同文件：codex/gemini 读 AGENTS.md，claude 读 CLAUDE.md，gemini 也兼容 GEMINI.md。
+// 各模型分别读取不同文件：codex/gemini 读 AGENTS.md，claude 读 CLAUDE.md，gemini 读 GEMINI.md，qwen 读 QWEN.md。
 // 内容是同一套标准，确保换模型不换文风与流程。
 
 import { styleVoice } from './styles.mjs';
@@ -205,5 +205,6 @@ export function contextFiles(book) {
     'AGENTS.md': body,   // codex / gemini
     'CLAUDE.md': body,   // claude code
     'GEMINI.md': body,   // gemini（双保险）
+    'QWEN.md': body,     // 通义 Qwen Code（gemini-cli 分支，默认读 QWEN.md）
   };
 }

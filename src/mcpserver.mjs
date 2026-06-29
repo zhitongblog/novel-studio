@@ -2,7 +2,10 @@
 // 供 Claude Code / 其它 MCP 客户端直接调用。零依赖，行分隔 JSON-RPC over stdio。
 import { loadConfig } from './config.mjs';
 import { listBooksWithStats, createBook, getBook } from './books.mjs';
-import { detectAll } from './models.mjs';
+import { detectAll, MODELS } from './models.mjs';
+
+// 模型 id 白名单从 MODELS 动态派生，新增模型（如 trae）自动纳入，不再漏改 schema。
+const MODEL_IDS = Object.keys(MODELS);
 import { listInstances } from './unterm.mjs';
 import { startWriting } from './writer.mjs';
 import { listSessions, sendToBook, stopBook, streamBook } from './attach.mjs';
@@ -15,7 +18,7 @@ const TOOLS = [
     properties: {
       title: { type: 'string', description: '书名' },
       genre: { type: 'string', description: '类型/卖点' },
-      model: { type: 'string', enum: ['codex', 'claude', 'gemini'] },
+      model: { type: 'string', enum: MODEL_IDS },
       totalWords: { type: 'string' }, volumes: { type: 'string' },
       chaptersPerVolume: { type: 'string' }, batchSize: { type: 'number' },
     } } },
@@ -23,10 +26,10 @@ const TOOLS = [
     type: 'object', required: ['book'],
     properties: {
       book: { type: 'string', description: '书名或 slug' },
-      model: { type: 'string', enum: ['codex', 'claude', 'gemini'] },
+      model: { type: 'string', enum: MODEL_IDS },
       task: { type: 'string', description: '写作指令，如"续写5章并自检"' },
     } } },
-  { name: 'novel_models', description: '检测 codex/claude/gemini 三个 CLI 的可用性', inputSchema: { type: 'object', properties: {} } },
+  { name: 'novel_models', description: '检测各写作 CLI（codex/claude/gemini/trae…）的可用性', inputSchema: { type: 'object', properties: {} } },
   { name: 'novel_instances', description: '列出运行中的 Unterm 实例', inputSchema: { type: 'object', properties: {} } },
   { name: 'novel_list_sessions', description: '列出运行中的写作会话', inputSchema: { type: 'object', properties: {} } },
   { name: 'novel_send_instruction', description: '中途穿插一条指令到正在写作的窗口（注入按键）', inputSchema: {

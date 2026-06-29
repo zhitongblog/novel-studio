@@ -35,6 +35,30 @@ export const MODELS = {
     seedArgs: (instruction, _cfg) => ['-i', instruction],
     note: '读取本书目录 GEMINI.md / AGENTS.md 作为写作规范。',
   },
+  qwen: {
+    id: 'qwen',
+    name: '通义 Qwen Code',
+    bin: 'qwen',
+    untermAgentId: 'qwen-code',
+    // qwen-code 是 gemini-cli 分支，同样用 -i 进交互并带初始 prompt
+    seedArgs: (instruction, _cfg) => ['-i', instruction],
+    note: '阿里通义 Qwen Code（gemini-cli 分支）。首次跑 `qwen` 选 Qwen OAuth 登录即得每日免费额度（约 2000 次/日）。'
+      + '读本书目录 QWEN.md / GEMINI.md / AGENTS.md 作为写作规范。',
+  },
+  trae: {
+    id: 'trae',
+    name: 'Trae（字节跳动）',
+    bin: 'trae-cli',
+    untermAgentId: 'trae-cli',
+    // 字节开源 Trae Agent：单任务用 `trae-cli run "<task>"`（非交互、执行完即退出）。
+    // 默认走 run，把整批写作指令一次性交给它执行；想用对话式可设 config.traeInteractive=true
+    // 改走 `trae-cli interactive`（进 REPL 后由 autopilot 注入续写指令驱动下一批）。
+    seedArgs: (instruction, cfg) =>
+      cfg && cfg.traeInteractive ? ['interactive'] : ['run', instruction],
+    note: '字节开源 Agent CLI（Claude Code/Gemini CLI 的国产平替）。读本书目录 AGENTS.md 作为写作规范。'
+      + '需先装 trae-cli（pip install trae-agent / 见官方仓库）并配好 trae_config.json 或模型 API Key。'
+      + '默认 run 模式写完一批即退出；要 autopilot 连续续写可设 traeInteractive=true。',
+  },
 };
 
 export function getModel(id) {
