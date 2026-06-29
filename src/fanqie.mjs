@@ -2066,26 +2066,6 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
     await client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}?type=1`);
     await client.sleep(2500);
 
-    // ⚠️关键：章节列表是【按卷】显示的，只读当前卷的最大章号。若卷下拉停在旧卷会读成旧卷最大号→
-    // 误判番茄"才发到第N章"→重发一大堆重复章。故先把卷下拉切到【最新卷】(番茄倒序,第一项=最新卷)。
-    try {
-      const opened = await client.clickByLocator(`return document.querySelector('.serial-select, .byte-select, [class*="volume-select"]');`);
-      if (opened) {
-        await client.sleep(700);
-        // 选第N卷号最大的那一项(不靠"第一项",更稳)；读不到卷号就退化选第一项
-        await client.clickByLocator(`
-          const opts=[...document.querySelectorAll('.byte-select-option, .arco-select-option, [class*="select-option"]')].filter(o=>(o.textContent||'').trim());
-          if(!opts.length) return null;
-          const cn={零:0,一:1,二:2,两:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9};
-          function num(t){const m=String(t).match(/第\\s*([0-9一二三四五六七八九十两]+)\\s*卷/);if(!m)return -1;let s=m[1];if(/^[0-9]+$/.test(s))return parseInt(s,10);if(s.indexOf('十')>=0){const[a,b]=s.split('十');const te=a===''?1:cn[a];const u=b===''?0:cn[b];return (te==null||u==null)?-1:te*10+u;}return s.length===1&&cn[s]!=null?cn[s]:-1;}
-          let best=opts[0],bn=num(opts[0].textContent);
-          for(const o of opts){const n=num(o.textContent);if(n>bn){bn=n;best=o;}}
-          return best;
-        `);
-        await client.sleep(1600);
-      }
-    } catch {}
-
     // 读取当前页/总页信息 + 当前页最大章号 + 页面有效性信号（防"假0→重复发"）
     const readPage = `
       (function(){
@@ -2130,42 +2110,109 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
       })()
     `;
 
-    let first = await client.evaluate(readPage);
-    if (!first) return { maxChapter: 0, approx: true, error: '页面读取为空，无法确认番茄章节状态' };
-    if (!first.valid) {
-      let why = first.errorPage ? '番茄页面加载失败(网络/代理错误页)'
-        : first.loginPage ? '番茄需要登录(登录/扫码页)'
-        : !first.onDomain ? '当前不在番茄域名'
+    // 先校验页面有效性（防"假0→重复发"）
+    const firstRead = await client.evaluate(readPage);
+    if (!firstRead) return { maxChapter: 0, approx: true, error: '页面读取为空，无法确认番茄章节状态' };
+    if (!firstRead.valid) {
+      let why = firstRead.errorPage ? '番茄页面加载失败(网络/代理错误页)'
+        : firstRead.loginPage ? '番茄需要登录(登录/扫码页)'
+        : !firstRead.onDomain ? '当前不在番茄域名'
         : '无法确认是番茄章节管理页(可能未加载完/改版)';
-      log(`⛔ ${why}：拒绝读取最大章号以防误判空书重复发布。页面首段「${(first.head || '').replace(/\\n/g, ' ')}」`, 'error');
+      log(`⛔ ${why}：拒绝读取最大章号以防误判空书重复发布。页面首段「${(firstRead.head || '').replace(/\\n/g, ' ')}」`, 'error');
       return { maxChapter: 0, error: why, pageInvalid: true };
     }
 
-    let maxChapter = first.max || 0;
-    let latestDate = first.maxRowDate || '';   // 番茄最新章的发布/排期日期（用于排期起点计算）
-    const totalPages = first.totalPages || 1;
-    let approx = false;
-
-    // 章节表按章号排序，最大章号必在【第1页或最后1页】（升序在末页、降序在首页）。
-    // 故只读这两页即可，跳过当前已在的页 —— 不再逐页翻动（避免在你眼前不停切章节列表）。
-    if (totalPages > 1) {
-      const targets = [1, totalPages].filter((v, i, a) => a.indexOf(v) === i && v !== (first.currentPage || 1));
-      for (const target of targets) {
-        const jumped = await client.clickByLocator(`
-          const want = ${target};
-          const items = document.querySelectorAll('.arco-pagination-item');
-          for (const item of items) { if (parseInt(item.textContent) === want) return item; }
-          return null;
-        `);
-        if (!jumped) { approx = true; continue; }
-        await client.sleep(1000);
-        const r = await client.evaluate(readPage);
-        if (r && r.max > maxChapter) maxChapter = r.max;
-        if (r && r.maxRowDate && (!latestDate || Date.parse(r.maxRowDate.replace(' ', 'T')) > Date.parse(latestDate.replace(' ', 'T')))) latestDate = r.maxRowDate;
+    // 读"当前所选卷"的最大章号（含分页：章节表按章号排序，最大号必在第1页或末页）。返回 {max, latestDate, approx}
+    const readCurVolMax = async () => {
+      const r0 = await client.evaluate(readPage);
+      if (!r0) return { max: 0, latestDate: '', approx: true };
+      let max = r0.max || 0, latestDate = r0.maxRowDate || '', approx = false;
+      const totalPages = r0.totalPages || 1;
+      if (totalPages > 1) {
+        const targets = [1, totalPages].filter((v, i, a) => a.indexOf(v) === i && v !== (r0.currentPage || 1));
+        for (const target of targets) {
+          const jumped = await client.clickByLocator(`
+            const want = ${target};
+            const items = document.querySelectorAll('.arco-pagination-item');
+            for (const item of items) { if (parseInt(item.textContent) === want) return item; }
+            return null;
+          `);
+          if (!jumped) { approx = true; continue; }
+          await client.sleep(1000);
+          const r = await client.evaluate(readPage);
+          if (r && r.max > max) max = r.max;
+          if (r && r.maxRowDate && (!latestDate || Date.parse(r.maxRowDate.replace(' ', 'T')) > Date.parse(latestDate.replace(' ', 'T')))) latestDate = r.maxRowDate;
+        }
       }
+      return { max, latestDate, approx };
+    };
+
+    // 卷下拉定位：页面有【卷】和【审核状态】两个 .serial-select，挑【当前显示值含"卷"】的那个。
+    const VOL_DROPDOWN = `
+      const sels=[...document.querySelectorAll('.chapter-select .serial-select, .serial-select, [class*="volume-select"]')];
+      for(const s of sels){ const vv=s.querySelector('.byte-select-view-value')||s; if(((vv.textContent||'').indexOf('卷'))>=0) return s; }
+      return sels[0]||null;
+    `;
+    // 列出全部卷 [{name, num}]（卷下拉随章节数据异步渲染，轮询至多 ~12 次；读不到→[]=按单卷处理）
+    const listVolumes = async () => {
+      for (let attempt = 0; attempt < 12; attempt++) {
+        const opened = await client.clickByLocator(VOL_DROPDOWN);
+        if (opened) {
+          await client.sleep(700);
+          const opts = await client.evaluate(`(function(){
+            const cn={零:0,一:1,二:2,两:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9};
+            function num(t){const m=String(t).match(/第\\s*([0-9一二三四五六七八九十两]+)\\s*卷/);if(!m)return -1;let s=m[1];if(/^[0-9]+$/.test(s))return parseInt(s,10);if(s.indexOf('十')>=0){const[a,b]=s.split('十');const te=a===''?1:cn[a];const u=b===''?0:cn[b];return (te==null||u==null)?-1:te*10+u;}return s.length===1&&cn[s]!=null?cn[s]:-1;}
+            const seen=new Set(), out=[];
+            for(const o of document.querySelectorAll('.byte-select-option, .arco-select-option, [class*="select-option"]')){
+              const t=(o.textContent||'').trim(); if(!t||seen.has(t))continue; seen.add(t); out.push({name:t, num:num(t)});
+            }
+            return out;
+          })()`);
+          try { await client.pressKey('Escape'); } catch {}
+          await client.sleep(200);
+          if (Array.isArray(opts) && opts.length) return opts;
+        }
+        await client.sleep(1000);
+      }
+      return [];
+    };
+    // 选某卷（精确匹配卷名）。返回是否点中。
+    const selectVolume = async (name) => {
+      await client.clickByLocator(VOL_DROPDOWN);
+      await client.sleep(600);
+      const ok = await client.clickByLocator(`
+        const want = ${JSON.stringify(name)};
+        const opts = document.querySelectorAll('.byte-select-option, .arco-select-option, [class*="select-option"]');
+        for (const o of opts) { if (((o.textContent || '').trim()) === want) return o; }
+        return null;
+      `);
+      await client.sleep(1600);
+      return ok;
+    };
+
+    // 番茄章节表【按卷显示、无"全部"选项】，但章号是【全局连续】的。
+    let maxChapter = 0, latestDate = '', approx = false;
+    const vols = await listVolumes();
+    if (vols.length <= 1) {
+      // 单卷 / 读不到卷选择器 → 直接读当前卷
+      const r = await readCurVolMax();
+      maxChapter = r.max; latestDate = r.latestDate; approx = r.approx;
+    } else {
+      // ⚠️关键修复：卷号最高的卷【可能是空的】（如刚建的新卷），全局最大章号在【最新的非空卷】里。
+      // 章号全局连续、按序追加 → 从卷号高到低逐卷读，命中第一个非空卷即全局最大章号（不会把已发的当新章重发）。
+      const sorted = vols.slice().sort((a, b) => (b.num || 0) - (a.num || 0));
+      const scanned = [];
+      for (const v of sorted) {
+        const sel = await selectVolume(v.name);
+        if (!sel) { approx = true; continue; }
+        const r = await readCurVolMax();
+        scanned.push(`${v.name}=${r.max}`);
+        if (r.max > 0) { maxChapter = r.max; latestDate = r.latestDate; approx = r.approx; break; }
+      }
+      log(`🔎 多卷扫描（从最新卷起、命中非空即止）：${scanned.join('、') || '(全空)'}`, 'info');
     }
 
-    log(`📖 番茄已存在最大章号: 第${maxChapter}章${approx ? '（近似，分页未读全）' : ''}${latestDate ? '，最新排期 ' + latestDate : ''}`, 'info');
+    log(`📖 番茄已存在最大章号: 第${maxChapter}章${approx ? '（近似，分页/卷未读全）' : ''}${latestDate ? '，最新排期 ' + latestDate : ''}`, 'info');
     return { maxChapter, approx, latestDate };
   } catch (err) {
     log(`读取番茄最大章号失败: ${err.message || err}`, 'error');
