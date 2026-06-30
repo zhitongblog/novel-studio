@@ -2110,8 +2110,14 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
       })()
     `;
 
-    // 先校验页面有效性（防"假0→重复发"）
-    const firstRead = await client.evaluate(readPage);
+    // 先校验页面有效性（防"假0→重复发"）。番茄页异步渲染——轮询至多 ~15s，避免读早了拿空页误判"页面无效"。
+    let firstRead = null;
+    for (let i = 0; i < 12; i++) {
+      firstRead = await client.evaluate(readPage);
+      if (firstRead && firstRead.valid) break;
+      if (firstRead && (firstRead.loginPage || firstRead.errorPage)) break;   // 硬失败立即停，不空等
+      await client.sleep(1200);
+    }
     if (!firstRead) return { maxChapter: 0, approx: true, error: '页面读取为空，无法确认番茄章节状态' };
     if (!firstRead.valid) {
       let why = firstRead.errorPage ? '番茄页面加载失败(网络/代理错误页)'

@@ -226,29 +226,40 @@ export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}
     if (vm.single) {
       onLog({ level: 'info', msg: '番茄是单卷书，忽略分卷，直接追加发布' });
     } else {
-      // 只对【本批新章实际涉及的】缺卷建卷（不为后面还没发的卷预建）
+      // 尝试自动新建【本批涉及且番茄缺】的卷（只建恰好缺的、绝不多建）。
       const neededVols = [...new Set([...editCh, ...newCh].map(c => c.vol))];
       const toCreate = vm.missing.filter(v => neededVols.includes(v))
         .map(v => ({ num: bookVolNum(v), name: volDisplayName(v) }))
         .filter(x => x.num != null)
         .sort((a, b) => a.num - b.num);
       if (toCreate.length) {
-        onLog({ level: 'act', msg: `番茄缺卷，自动新建：${toCreate.map(x => x.name).join('、')}（卷名可后续在番茄改）` });
+        onLog({ level: 'act', msg: `番茄缺卷，尝试自动新建：${toCreate.map(x => x.name).join('、')}` });
         const cr = await createFanqieVolumes({ profilePath: pc.profilePath, bookId: pc.bookId, volumes: toCreate, onLog });
-        if (!cr.ok) {
-          onLog({ level: 'error', msg: `⛔ 已中止：建卷失败 ${cr.error}（已建 ${cr.created.length} 个）。请人工核对番茄分卷后重试。` });
-          return { ok: false, blocked: true, reason: '建卷失败：' + cr.error, published: 0 };
-        }
-        // 重新读卷映射
+        if (cr.created && cr.created.length) onLog({ level: 'info', msg: `已新建卷：${cr.created.join('、')}` });
+        // ⚠️建卷失败【不再整体中止】：能建的建了，建不出的（如卷目录无名→空副标题被番茄拒）下面按
+        // "截断到已存在卷"处理——先把番茄已有卷的章发出去，缺卷的章暂缓，不让一个缺卷拖垮整批。
+        if (!cr.ok) onLog({ level: 'warn', msg: `部分卷未能自动新建（${cr.error}）。番茄要求分卷有名字、卷不可删——本次先发"番茄已有卷"的章，缺卷的章暂缓。` });
         vm = await buildVolumeMap(book, all, pc, onLog);
         if (!vm.ok) { onLog({ level: 'error', msg: '⛔ 建卷后重读卷列表失败：' + vm.error }); return { ok: false, blocked: true, reason: vm.error, published: 0 }; }
       }
-      // 仍缺（本批涉及的）卷 → 中止，绝不发错卷
-      const stillMissing = vm.missing.filter(v => neededVols.includes(v));
-      if (stillMissing.length) {
-        const msg = `番茄仍缺卷：${stillMissing.join('、')}，已中止以免发到错卷。`;
-        onLog({ level: 'error', msg: '⛔ ' + msg });
-        return { ok: false, blocked: true, reason: msg, missingVolumes: stillMissing, published: 0 };
+      // ⚠️按章号顺序截断：发到【第一个番茄仍缺卷】的章之前为止。番茄章号全局连续、卷按序排，
+      // 缺卷之后的章必须等该卷建好才能发（否则乱序/发错卷）；已有卷的章照常发，缺卷的章暂缓（不阻断）。
+      let deferReason = '';
+      const trimToExisting = (list) => {
+        const out = [];
+        for (const c of list) {
+          if (vm.map[c.vol]) out.push(c);
+          else { deferReason = `番茄缺卷「${volDisplayName(c.vol)}」（本地卷目录无副标题、番茄要求分卷命名）→ 从第${c.num}章起暂缓。请在「📚番茄卷管理」手动建好该卷、或给本地卷目录加个名字（如“卷03_xxx”）后再续发。`; break; }
+        }
+        return out;
+      };
+      const newTrimmed = trimToExisting(newCh);   // editCh 是已发布旧章、卷必存在；主要截断 newCh
+      const deferredCount = newCh.length - newTrimmed.length;
+      newCh = newTrimmed;
+      if (deferReason) onLog({ level: 'warn', msg: `⚠️ ${deferReason}（本次暂缓 ${deferredCount} 章）` });
+      if (!newCh.length && !editCh.length) {
+        onLog({ level: 'error', msg: '⛔ 最近要发的章都落在番茄缺的卷里，无可发章。请先建好该卷再发。' });
+        return { ok: false, blocked: true, reason: deferReason || '番茄缺卷', published: 0 };
       }
       for (const c of [...editCh, ...newCh]) c.volumeText = vm.map[c.vol] || '';
       onLog({ level: 'info', msg: '卷映射：' + [...new Set([...editCh, ...newCh].map(c => c.vol))].map(v => `${v}→${vm.map[v]}`).join('，') });
