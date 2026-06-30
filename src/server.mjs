@@ -18,7 +18,7 @@ import { runStateless } from './statelessWriter.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
-import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction } from './planner.mjs';
+import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction } from './planner.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildEndingRenudgeInstruction } from './editor.mjs';
 import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
@@ -380,6 +380,21 @@ async function api(p, req, res, u) {
           try { await sendToBook(book.slug, buildFinaleInstruction(book, { first: true }), cfg); pushLog(book.slug, { level: 'act', msg: '已进入收尾 → 穿插收束令' }); } catch {}
         }
         return json(res, 200, { ok: true, status: b.status, live: sessionLive(book.slug) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/afterword') {
+      // 手动让作者补写一章《完本感言 / 作者的话》（或简短尾声）——并非每本书完本时都自动写了，
+      // 故给个手动入口：有写作会话就穿插这条指令，没会话就开窗注入。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const instruction = buildAfterwordInstruction(book);
+        if (sessionLive(book.slug)) {
+          await sendToBook(book.slug, instruction, cfg);
+          pushLog(book.slug, { level: 'act', msg: '已穿插指令：写《完本感言 / 尾声》' });
+          return json(res, 200, { ok: true, mode: 'inserted' });
+        }
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
+        return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/review-ending') {

@@ -755,6 +755,17 @@ $('#flApply').addEventListener('click', async () => {
   } catch (e) { $('#flErr').textContent = e.message; }
   finally { btn.disabled = false; }
 });
+$('#flAfterword').addEventListener('click', async () => {
+  if (!CUR) return;
+  const btn = $('#flAfterword'); const old = btn.textContent; btn.disabled = true; btn.textContent = '发指令中…';
+  $('#flErr').textContent = '';
+  try {
+    const r = await api('/api/book/afterword', 'POST', { book: CUR.slug });
+    if (r.mode === 'opened') { setWriting(true); openStream(CUR.slug); }
+    toast(r.mode === 'inserted' ? '已穿插指令：作者补写《完本感言/尾声》' : '已开窗：作者补写《完本感言/尾声》');
+  } catch (e) { $('#flErr').textContent = e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
 $('#flReview').addEventListener('click', async () => {
   if (!CUR) return;
   const btn = $('#flReview'); const old = btn.textContent; btn.disabled = true; btn.textContent = '完本审稿中…（约1-2分钟）';
