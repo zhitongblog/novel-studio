@@ -2216,6 +2216,12 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
         if (r.max > 0) { maxChapter = r.max; latestDate = r.latestDate; approx = r.approx; break; }
       }
       log(`🔎 多卷扫描（从最新卷起、命中非空即止）：${scanned.join('、') || '(全空)'}`, 'info');
+      // 🛡️安全网：多卷却一章都没扫到 → 必是卷切换/读取异常（多卷书不可能全空还在发布）。
+      // 绝不返回 maxChapter=0（会被当"空书"从第1章重发，灾难）→ 阻断，让上层提示重试。
+      if (maxChapter === 0) {
+        log('⚠️ 多卷书未扫到任何已发章号——疑似卷列表读取异常，已中止以防从头重复发布（请重试）', 'error');
+        return { maxChapter: 0, approx: true, error: '多卷书未能读到已发章号（疑似卷读取异常），为防重复发布已中止，请重试', pageInvalid: true };
+      }
     }
 
     log(`📖 番茄已存在最大章号: 第${maxChapter}章${approx ? '（近似，分页/卷未读全）' : ''}${latestDate ? '，最新排期 ' + latestDate : ''}`, 'info');
