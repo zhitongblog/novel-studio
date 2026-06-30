@@ -174,6 +174,17 @@ export function buildResumeInstruction(book) {
   return s.replace(/[\r\n]+/g, ' ');
 }
 
+// 只重建【设定圣经 + 大纲】，不写新正文：导入/半成品书据已写正文逆向重建规划文件。单行。
+export function buildRebuildOutlineInstruction(book) {
+  const s = `这是一本已有正文的小说《${book.title}》，但【设定圣经与大纲】缺失或不完整。请【只重建规划、绝不写任何新正文】：` +
+    `第一步：通读 chapters/ 下所有已写章节（按文件名顺序）。` +
+    `第二步：据正文逆向重建 novel_bible.md——世界观与力量/设定体系、主角与关键人物及其当前处境、对抗势力、主题与禁区、命名与文风基线、已埋未回收的伏笔与未决线索；关键事实同步进 continuity_ledger.md。` +
+    `第三步：在 outlines/ 下为【每一卷】建或补「卷xx分章大纲.md」——逐章一行写清"该章核心事件/冲突、推进了什么、章末钩子"，并列【本卷伏笔布点表】(埋设→回收章号)；已写到的卷据正文回填，未写到的卷据 bible 主线给章级骨架，覆盖到全书结局。` +
+    `第四步：校对 chapter_index.md，使每章一行(章号/章名/卷/路径/状态)与 chapters/ 实际一致。` +
+    `【硬性约束】本次绝不新增/改写/删除任何正文章节(.txt)，只产出或更新 novel_bible.md、outlines/、continuity_ledger.md、chapter_index.md。完成后输出一行「【设定与大纲已重建】」并停下。全程遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范。`;
+  return s.replace(/[\r\n]+/g, ' ');
+}
+
 // 范围重写：把指定范围的章节【推倒重写】（不是润色）。单行。
 export function buildRewriteInstruction(book, range, note) {
   const r = (range || '全书').trim();

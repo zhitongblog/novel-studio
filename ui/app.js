@@ -868,6 +868,17 @@ function openOutline() {
   $('#outlineModal').classList.remove('hidden');
 }
 $('#btnOutline').addEventListener('click', openOutline);
+$('#btnRebuildOutline').addEventListener('click', async () => {
+  if (!CUR) return;
+  if (!confirm('据已写正文逆向重建【设定圣经 + 各卷分章大纲】（不写新正文、不动已写章节）。\n导入的番茄书/半成品书建议先用它补齐规划。确定？')) return;
+  const btn = $('#btnRebuildOutline'); const old = btn.textContent; btn.disabled = true; btn.textContent = '发指令中…';
+  try {
+    const r = await api('/api/book/rebuild-outline', 'POST', { book: CUR.slug });
+    if (r.mode === 'opened') { setWriting(true); openStream(CUR.slug); }
+    toast(r.mode === 'inserted' ? '已穿插指令：重建设定+大纲（不写新正文）' : '已开窗：重建设定+大纲（不写新正文）');
+  } catch (e) { toast('重建失败：' + e.message); }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
 $('#olApply').addEventListener('click', async () => {
   if (!CUR) return;
   const scope = $('#olScope').value;
