@@ -14,6 +14,34 @@
 // 纯 Node、零第三方依赖、ESM。只用 node 内置 + global fetch（Node 18+）。
 
 const UNZOO_BASE = process.env.UNZOO_BASE || 'http://127.0.0.1:9399';
+// 单次浏览器调用超时（ms）：番茄页偶发弹阻塞 alert 或卡死时，eval/点击会永久挂起 →
+// 加超时让每次调用最多等这么久，超时即抛错（上层可重试/恢复按钮），绝不无限挂起。
+const UNZOO_TIMEOUT_MS = Number(process.env.UNZOO_TIMEOUT_MS) || 45000;
+
+// 运行中的发布器（bookId → FanqiePublisher），供「停止发布」按外部请求中断。
+const RUNNING_PUBLISHERS = new Map();
+// 请求停止某书的发布（下一章前会检查 shouldStop 并优雅收尾）。返回是否有在跑的发布器。
+export function stopPublish(bookId) {
+  const p = RUNNING_PUBLISHERS.get(String(bookId));
+  if (!p) return false;
+  try { p.stop(); } catch {}
+  return true;
+}
+
+// 尽力清掉某标签页上阻塞的 JS 弹窗（alert/confirm）——它会让 browser_evaluate 永久挂起。
+// best-effort：无弹窗/失败都静默。POST /api/v1/dialog/handle {tab_id, action:'accept'}。
+async function dismissDialog(tabId) {
+  if (tabId == null) return false;
+  try {
+    const r = await fetch(`${UNZOO_BASE}/api/v1/dialog/handle`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tab_id: Number(tabId), action: 'accept' }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const d = await r.json().catch(() => null);
+    return !!(d && d.success);
+  } catch { return false; }
+}
 
 // 判断两个番茄 URL 是否同一目标页（按 pathname 比较，忽略 query）。
 // 用于 navigate 跳过"已在目标页"的重复导航，避免反复刷/切页。
@@ -28,15 +56,17 @@ function sameFanqiePage(href, target) {
 
 // 工具调用：POST /api/v1/tools/call  body {"tool":tool,"arguments":args}
 // 对齐原前端 unzooCallTool 的返回语义：返回 data.data（成功载荷）。
-async function unzooCallTool(tool, args = {}) {
+async function unzooCallTool(tool, args = {}, timeoutMs = UNZOO_TIMEOUT_MS) {
   let resp;
   try {
     resp = await fetch(`${UNZOO_BASE}/api/v1/tools/call`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tool, arguments: args }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') throw new Error(`调用 ${tool} 超时(${Math.round(timeoutMs / 1000)}s，番茄页可能卡住/弹窗阻塞)`);
     throw new Error(`Unzoo 连接失败 (${tool}): ${e.message || e}`);
   }
   let data;
@@ -56,15 +86,17 @@ async function unzooCallTool(tool, args = {}) {
 
 // 通用 REST 透传：坐标点击 /api/v1/click、真实键盘 /api/v1/type 等。
 // body 直传；返回解析后的 JSON。
-async function unzooRequest(path, body = {}) {
+async function unzooRequest(path, body = {}, timeoutMs = UNZOO_TIMEOUT_MS) {
   let resp;
   try {
     resp = await fetch(`${UNZOO_BASE}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') throw new Error(`请求 ${path} 超时(${Math.round(timeoutMs / 1000)}s)`);
     throw new Error(`Unzoo 连接失败 (${path}): ${e.message || e}`);
   }
   let data;
@@ -194,11 +226,19 @@ class UnzooClient {
 
   async evaluate(script) {
     await this.ensureTabId();
-    const result = await unzooCallTool('browser_evaluate', {
-      tab_id: this.tabId,
-      expression: script
-    });
-    return result?.result;
+    try {
+      const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
+      return result?.result;
+    } catch (e) {
+      // 超时多半是页面弹了阻塞 alert（eval 被卡住）→ 关掉弹窗后重试一次
+      if (/超时/.test(e.message || '')) {
+        const dismissed = await dismissDialog(this.tabId);
+        if (dismissed) this.addLog('检测到阻塞弹窗并已关闭，重试…', 'warn');
+        const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
+        return result?.result;
+      }
+      throw e;
+    }
   }
 
   // 真实鼠标点击（CDP，isTrusted=true）—— 选择器版
@@ -2030,20 +2070,27 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
     publisher.onLog = (message) => log(String(message));
     publisher.onProgress = () => {};
     publisher.setChapters(mapped);
+    RUNNING_PUBLISHERS.set(String(bookId), publisher);   // 注册，供「停止发布」中断
 
-    await publisher.start(innerConfig);
+    try {
+      await publisher.start(innerConfig);
+    } finally {
+      RUNNING_PUBLISHERS.delete(String(bookId));
+    }
 
     const published = publisher.currentIndex; // 已成功处理的章节数（成功后才 ++）
     const lastChapterObj = published > 0 ? mapped[published - 1] : null;
     const ok = publisher.status === 'completed';
+    const stopped = publisher.status === 'stopped' || publisher.interruptReason === 'manual_stop';
     return {
       ok,
       published,
+      stopped,
       lastChapter: lastChapterObj
         ? { num: lastChapterObj.chapterNumber, title: lastChapterObj.title }
         : null,
       status: publisher.status,
-      error: ok ? null : (publisher.lastError || (publisher.status === 'paused' ? '已暂停' : null)),
+      error: ok ? null : (publisher.lastError || (stopped ? '已手动停止' : publisher.status === 'paused' ? '已暂停' : null)),
     };
   } catch (err) {
     log(`❌ 发布失败: ${err.message || err}`, 'error');
@@ -2687,7 +2734,7 @@ export async function listProfiles() {
 
 // 读取某番茄账号(profile)下的【全部书籍】列表(title+bookId)，供前端"从番茄选书"下拉，
 // 免去用户手填 bookId、也避免填错号。返回 { ok, books:[{id,title}], error? }。
-export async function getFanqieBooks({ profilePath, onLog } = {}) {
+async function _getFanqieBooksOnce({ profilePath, onLog } = {}) {
   const client = new UnzooClient(profilePath || null, onLog || null);
   try {
     await client.navigate('https://fanqienovel.com/main/writer/book-manage');
@@ -2722,6 +2769,20 @@ export async function getFanqieBooks({ profilePath, onLog } = {}) {
   } catch (e) {
     return { ok: false, error: String(e.message || e), books: [] };
   }
+}
+
+// 读番茄书籍列表：番茄页偶发慢/空/卡 → 自动重试至多 3 次；登录/域名类硬失败不重试。
+export async function getFanqieBooks({ profilePath, onLog } = {}) {
+  const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
+  let last = { ok: false, error: '未执行', books: [] };
+  for (let i = 1; i <= 3; i++) {
+    last = await _getFanqieBooksOnce({ profilePath, onLog });
+    if (last.ok && last.books.length) return last;
+    // 硬失败（需登录/不在番茄域名）→ 重试也没用，直接返回
+    if (last.error && /登录|域名/.test(last.error)) return last;
+    if (i < 3) { log(`读番茄书籍第 ${i} 次未成功（${last.error || '空'}）→ 重试…`, 'warn'); await new Promise(r => setTimeout(r, 1500)); }
+  }
+  return last;
 }
 
 export { UnzooClient, FanqiePublisher, maxChapterNumInText };

@@ -24,7 +24,7 @@ import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, b
 import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
-import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume } from './fanqie.mjs';
+import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish } from './fanqie.mjs';
 import { getCompletionReport, runFinaleClosure, locateCompletion, buildCompletionNote } from './finale.mjs';
 import { previewFanqieImport, importFromFanqie } from './import_fanqie.mjs';
 import { generateCoverBg, buildArtPrompt } from './imagegen.mjs';
@@ -562,6 +562,15 @@ async function api(p, req, res, u) {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
         const r = await previewPublish(book, { onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie' }) });
         return json(res, 200, r);
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/publish-stop') {   // 停止发布：请求中断在跑的发布器（下一章前优雅收尾）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const bid = (book.publish || {}).bookId;
+        const hit = bid ? stopPublish(bid) : false;
+        pushLog(book.slug, { level: 'act', source: 'fanqie', msg: hit ? '⏹ 已请求停止发布（发完当前章即停）' : '当前没有在跑的发布任务' });
+        return json(res, 200, { ok: true, stopping: hit });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/publish') {   // 真发：后台跑，日志推 SSE。limit 可只发前 N 章(首测)
