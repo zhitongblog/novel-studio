@@ -15,6 +15,7 @@ import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion
 import { getSession, removeSession } from './sessions.mjs';
 import { startWriting } from './writer.mjs';
 import { runStateless } from './statelessWriter.mjs';
+import { runWebWrite, getAdapter } from './webwriter.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
@@ -581,6 +582,21 @@ async function api(p, req, res, u) {
           .then(r => pushLog(book.slug, { level: 'act', source: 'fanqie', msg: `番茄发布结束：已发 ${r.published || 0} 章，状态 ${r.status || '-'}${r.error ? '，错误 ' + r.error : ''}` }))
           .catch(e => pushLog(book.slug, { level: 'error', source: 'fanqie', msg: '番茄发布异常：' + e.message }));
         return json(res, 200, { ok: true, started: true, limit });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/web-write') {   // 网页版写作：后台驱动 通义/ChatGPT/Claude 网页版写小说，日志推 SSE
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const adapterId = body.adapterId || (book.model || '').replace(/^web-/, '') || 'qwen';
+        if (!getAdapter(adapterId)) return json(res, 400, { error: '未知网页适配器：' + adapterId + '（可选 qwen|chatgpt|claude）' });
+        const batches = Math.max(1, Number(body.batches) || 1);
+        // profilePath 优先取 body，其次 book.publish.profilePath
+        const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
+        if (!profilePath) return json(res, 400, { error: '缺少 profilePath（需绑定已登录该聊天站点的 Unzoo 账号）' });
+        runWebWrite({ book, adapterId, batches, profilePath, cfg, onLog: (e) => pushLog(book.slug, { ...e, source: 'web' }) })
+          .then(r => pushLog(book.slug, { level: 'act', source: 'web', msg: `网页版写作结束：共 ${r.batches || 0} 批、新增 ${r.totalWrote || 0} 章` }))
+          .catch(e => pushLog(book.slug, { level: 'error', source: 'web', msg: '网页版写作异常：' + e.message }));
+        return json(res, 200, { ok: true, started: true, adapterId, batches });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/republish') {   // 重发修正：编辑替换 from..to 章（修发错内容）。limit 可只改前 N 章

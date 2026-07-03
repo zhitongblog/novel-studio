@@ -59,6 +59,32 @@ export const MODELS = {
       + '需先装 trae-cli（pip install trae-agent / 见官方仓库）并配好 trae_config.json 或模型 API Key。'
       + '默认 run 模式写完一批即退出；要 autopilot 连续续写可设 traeInteractive=true。',
   },
+  // —— 网页版写作模型（kind:'web'）——
+  // 不跑本地 CLI，而是驱动 通义千问/ChatGPT/Claude 的网页聊天框写小说（白嫖各家免费额度）。
+  // 由 webwriter.mjs 把上下文包送进聊天框、抓正文、自己解析落盘（模型只吐文字、不写文件）。
+  // 「可用性」不靠 where 命令——detectModel 里对 kind:'web' 直接返回 available:true，
+  // 真正的可用性取决于运行时是否配了已登录该站点的 Unzoo profile（在写作端校验）。
+  'web-qwen': {
+    id: 'web-qwen',
+    name: '通义千问 网页版',
+    kind: 'web',
+    adapterId: 'qwen',
+    note: '驱动 chat.qwen.ai 网页版写作。需先在 Unzoo 里用一个已登录通义千问的账号（profilePath），选择器待对真实页面校准。',
+  },
+  'web-chatgpt': {
+    id: 'web-chatgpt',
+    name: 'ChatGPT 网页版',
+    kind: 'web',
+    adapterId: 'chatgpt',
+    note: '驱动 chatgpt.com 网页版写作。需先在 Unzoo 里用一个已登录 ChatGPT 的账号（profilePath），选择器待对真实页面校准。',
+  },
+  'web-claude': {
+    id: 'web-claude',
+    name: 'Claude 网页版',
+    kind: 'web',
+    adapterId: 'claude',
+    note: '驱动 claude.ai 网页版写作。需先在 Unzoo 里用一个已登录 Claude 的账号（profilePath），选择器待对真实页面校准。',
+  },
 };
 
 export function getModel(id) {
@@ -69,6 +95,11 @@ export function getModel(id) {
 export function detectModel(id) {
   const m = getModel(id);
   if (!m) return { id, available: false, reason: '未知模型' };
+  // 网页版模型：不靠 PATH 里的 CLI，可用性取决于运行时的 Unzoo profile（写作端校验）。
+  // 这里直接判为 available，避免 where/which 把它误判为不可用。
+  if (m.kind === 'web') {
+    return { id: m.id, name: m.name, kind: 'web', adapterId: m.adapterId, bin: null, available: true, path: '', note: m.note };
+  }
   const isWin = process.platform === 'win32';
   const probe = isWin
     ? spawnSync('where', [m.bin], { encoding: 'utf8' })

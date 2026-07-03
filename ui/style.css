@@ -74,6 +74,8 @@ body {
 .book-card.new { border-style: dashed; align-items: center; justify-content: center; color: var(--muted); font-size: 15px; }
 .book-card.new:hover { color: var(--accent-2); }
 .running-tag { position: absolute; top: 12px; right: 40px; font-size: 10px; color: var(--green); display: flex; align-items: center; gap: 5px; }
+.book-card .pill.publishing { background: #14314a; color: #6ec0f0; border-color: #1f4c6b; cursor: pointer; }
+.book-card .pill.publishing:hover { filter: brightness(1.15); border-color: var(--accent); }
 .card-del { position: absolute; top: 10px; right: 10px; width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); font-size: 12px; cursor: pointer; opacity: .55; transition: .15s; padding: 0; }
 .card-del:hover { opacity: 1; color: var(--red); border-color: var(--red); }
 .card-actions { display: flex; gap: 8px; margin-top: 12px; }
@@ -180,6 +182,9 @@ textarea { resize: vertical; line-height: 1.5; }
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 50; backdrop-filter: blur(3px); }
 .modal-card { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 26px; width: 460px; max-width: 92vw; max-height: 90vh; overflow: auto; display: flex; flex-direction: column; gap: 13px; box-shadow: 0 30px 80px rgba(0,0,0,.6); }
 .pb-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.pb-book-row { display: flex; gap: 6px; align-items: center; }
+.pb-book-row select { flex: 1 1 auto; min-width: 0; }
+.pb-reload { flex: 0 0 auto; padding: 6px 9px; line-height: 1.2; }
 .pb-grid .field { margin: 0; min-width: 0; }
 .pb-grid .field input, .pb-grid .field select { width: 100%; box-sizing: border-box; }
 #publishModal .modal-card { overflow-x: hidden; }

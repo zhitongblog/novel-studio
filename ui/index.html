@@ -308,7 +308,10 @@
       <p class="modal-hint">通过已登录的 Unzoo 浏览器驱动番茄作者后台。<b>只发番茄还没有的新章</b>（按全书章号去重，绝不重发）；重写过的旧章用「同步重写章」找番茄对应章覆盖。<b>定时发布</b>由番茄侧排程，建卷不可逆——默认不按卷、只追加发，零风险。</p>
       <div class="pb-grid">
         <label class="field"><span>Unzoo 账号</span><select id="pbProfile"><option value="">（加载中…）</option></select></label>
-        <label class="field"><span>番茄书籍（从你账号下自动读取）</span><select id="pbBook"><option value="">（选账号后自动加载…）</option></select><input id="pbBookId" type="hidden"></label>
+        <label class="field"><span>番茄书籍（从你账号下自动读取）</span>
+          <div class="pb-book-row"><select id="pbBook"><option value="">（选账号后自动加载…）</option></select><button class="btn pb-reload" id="pbBookReload" type="button" title="重新读取番茄书籍">🔄</button></div>
+          <input id="pbBookId" type="hidden">
+        </label>
         <label class="field"><span>每日发布数</span><input id="pbPerDay" type="text" placeholder="max=全发 / 或填数字如 5"></label>
         <label class="field"><span>章间隔(秒)</span><input id="pbInterval" type="number" min="1" placeholder="3"></label>
         <label class="field"><span>预约起始日期</span><select id="pbDate"><option value="">立即发（不预约）</option></select></label>
@@ -331,6 +334,7 @@
       <div class="btn-row end" style="margin-top:8px">
         <button class="btn ghost" id="pbCancel">关闭</button>
         <button class="btn ghost" id="pbTest" title="只发第一章做联调验证">🧪 试发1章</button>
+        <button class="btn danger" id="pbStop" style="display:none" title="发完当前章即停止发布">⏹ 停止发布</button>
         <button class="btn primary" id="pbGo" disabled>📤 发布全部新章 ▶</button>
       </div>
       <div class="modal-err" id="pbErr"></div>

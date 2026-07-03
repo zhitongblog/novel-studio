@@ -34,6 +34,7 @@ let STATE = { models: [], books: [], sessions: [], config: {}, env: null };
 let STOP_DRAINING = false;   // 优雅停止中（按钮已变"立即停止"）
 let CUR = null;       // 当前打开的书
 let STREAM = null;    // 当前 SSE
+const PUBLISHING = new Set();   // 正在发布的书 slug（客户端状态；关弹窗后仍可从书卡回到进度）
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden');
@@ -105,6 +106,7 @@ function renderShelf() {
         <span class="pill">${b.stats?.chapters || 0} 章</span>
         <span class="pill">${b.stats?.kb || 0} KB</span>
         <span class="pill">tokens ${fmtTok(b.tokens || 0)}</span>
+        ${PUBLISHING.has(b.slug) ? '<span class="pill publishing" data-act="pubbadge" title="正在发布到番茄，点我看进度">📤 发布中</span>' : ''}
       </div>
       <div class="card-actions">
         <button class="card-btn" data-act="write">✍️ 写作</button>
@@ -115,6 +117,8 @@ function renderShelf() {
     card.querySelector('[data-act="read"]').addEventListener('click', (e) => { e.stopPropagation(); openReader(b); });
     card.querySelector('[data-act="review"]').addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openReview(); });
     card.querySelector('[data-act="del"]').addEventListener('click', (e) => { e.stopPropagation(); openDelete(b); });
+    const pubBadge = card.querySelector('[data-act="pubbadge"]');
+    if (pubBadge) pubBadge.addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openPublish(b); });
     card.addEventListener('click', () => openWrite(b));
     shelf.appendChild(card);
   }
@@ -162,9 +166,19 @@ $('#statelessMode').addEventListener('change', () => {
 $('#btnStart').addEventListener('click', async () => {
   if (!CUR) return;
   $('#btnStart').disabled = true; $('#writeStatus').textContent = '启动中…';
+  const model = $('#writeModel').value;
+  const isWeb = (STATE.models || []).find(m => m.id === model)?.kind === 'web';
   const stateless = $('#statelessMode').checked;
   try {
-    if (stateless) {
+    if (isWeb) {
+      // 网页版写作：驱动 通义千问/ChatGPT/Claude 网页版，模型只吐文字→引擎抓正文自己落盘（批数复用无状态那个输入）。
+      const batches = Math.max(1, parseInt($('#statelessBatches').value, 10) || 3);
+      const nm = (STATE.models || []).find(m => m.id === model)?.name || model;
+      await api('/api/book/web-write', 'POST', { book: CUR.slug, adapterId: model.replace(/^web-/, ''), batches });
+      $('#mirror').textContent = '🌐 网页版写作运行中（驱动网页聊天框写作、抓正文落盘，无窗口镜像）。进度见下方日志。';
+      setWriting(true); openStream(CUR.slug);
+      toast(`网页版写作启动：${nm}（${batches} 批）`);
+    } else if (stateless) {
       const batches = Math.max(1, parseInt($('#statelessBatches').value, 10) || 3);
       const r = await api('/api/book/stateless-start', 'POST', { book: CUR.slug, model: $('#writeModel').value, batches });
       $('#mirror').textContent = '♻️ 无状态省钱模式运行中（无窗口镜像）。进度见下方日志：每批全新进程写作，写完即弃会话。';
@@ -407,49 +421,67 @@ function pbRenderProfiles(saved) {
     return `<option value="${esc(p.path)}"${selAttr}>${esc(label)}（${tag}）</option>`;
   }).join('');
 }
-$('#btnPublish').addEventListener('click', async () => {
-  if (!CUR) return;
+// 打开发布弹窗（btnPublish 和书卡「发布中」徽标共用）。传入的 book 会设为 CUR。
+async function openPublish(book) {
+  book = book || CUR; if (!book) return;
+  CUR = book;
   $('#pbErr').textContent = ''; $('#pbPreviewOut').style.display = 'none';
   $('#pbGo').disabled = true; $('#pbGo').textContent = '🔍 请先点「预览将发」';   // 发布前必须先预览
-  const book = STATE.books.find(x => x.slug === CUR.slug) || CUR;
-  pbFill(book);
+  const b = STATE.books.find(x => x.slug === book.slug) || book;
+  pbFill(b);
+  pbSyncStopBtn();   // 若这本正在发布，展示「停止发布」并接回进度
   $('#publishModal').classList.remove('hidden');
   $('#pbProfile').innerHTML = '<option value="">（加载账号…）</option>';
   $('#pbBook').innerHTML = '<option value="">（选账号后自动加载…）</option>';
   try {
     const r = await api('/api/unzoo/profiles', 'POST', {});
     PB_PROFILES = r.profiles || [];
-    pbRenderProfiles((book.publish || {}).profilePath || '');
+    pbRenderProfiles((b.publish || {}).profilePath || '');
     // 选好账号后，自动读取该账号的番茄书籍并匹配当前书
     if ($('#pbProfile').value) pbLoadBooks($('#pbProfile').value);
   } catch (e) { $('#pbErr').textContent = '取账号失败：' + e.message; PB_PROFILES = []; pbRenderProfiles(''); }
-});
+}
+$('#btnPublish').addEventListener('click', () => openPublish(CUR));
 $('#pbProfile').addEventListener('change', () => pbLoadBooks($('#pbProfile').value));
 $('#pbBook').addEventListener('change', () => { $('#pbBookId').value = $('#pbBook').value; });
+// 🔄 强制重读番茄书籍（读取失败时用户能自助重试）
+$('#pbBookReload').addEventListener('click', () => pbLoadBooks($('#pbProfile').value, true));
 
 // 从所选番茄账号读取其全部书籍，填充下拉，并按 当前书名/已存bookId 自动选中
 let PB_BOOKS = [];
 const PB_BOOKS_CACHE = {};   // profilePath -> books[]（避免重开弹窗/切下拉时反复读番茄）
 async function pbLoadBooks(profilePath, force) {
   const sel = $('#pbBook');
-  if (!profilePath) { sel.innerHTML = '<option value="">（请先选账号）</option>'; $('#pbBookId').value = ''; return; }
+  const reload = $('#pbBookReload');
+  if (!profilePath) { sel.innerHTML = '<option value="">（请先选账号）</option>'; $('#pbBookId').value = ''; if (reload) reload.disabled = false; return; }
   if (!force && PB_BOOKS_CACHE[profilePath]) { PB_BOOKS = PB_BOOKS_CACHE[profilePath]; pbRenderBooks(); return; }
   sel.innerHTML = '<option value="">（读取番茄书籍中…）</option>';
+  if (reload) { reload.disabled = true; reload.textContent = '⏳'; }
   try {
-    const r = await api('/api/fanqie/books', 'POST', { profilePath, book: CUR.slug });
+    // 客户端超时兜底：番茄读取偶尔卡住，60s 后主动失败，别让下拉停在"读取中…"
+    const r = await pbRace(api('/api/fanqie/books', 'POST', { profilePath, book: CUR.slug }), 60000, '读取番茄书籍超时');
     PB_BOOKS = r.books || [];
     if (r.ok && PB_BOOKS.length) PB_BOOKS_CACHE[profilePath] = PB_BOOKS;
     if (!r.ok || !PB_BOOKS.length) {
-      sel.innerHTML = `<option value="">（${r.error || '该账号下没读到书籍'}）</option>`;
+      sel.innerHTML = `<option value="">（${r.error || '该账号下没读到书籍'}，点右侧🔄重试）</option>`;
       $('#pbBookId').value = '';
       if (r.error) $('#pbErr').textContent = '读取番茄书籍：' + r.error;
       return;
     }
     pbRenderBooks();
   } catch (e) {
-    sel.innerHTML = '<option value="">（读取失败）</option>';
+    sel.innerHTML = '<option value="">（读取失败，点右侧🔄重试）</option>';
     $('#pbErr').textContent = '读取番茄书籍失败：' + e.message;
+  } finally {
+    // 无论成败，重读按钮永远可点，让用户能自助重试
+    if (reload) { reload.disabled = false; reload.textContent = '🔄'; }
   }
+}
+// 客户端超时兜底：给可能卡住的网络调用套 60s 上限，避免按钮/下拉永久停在"读取中…"
+function pbRace(promise, ms, msg) {
+  let t;
+  const timeout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(msg || '请求超时')), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
 }
 // 渲染番茄书籍下拉并自动选中（优先已存 bookId，其次书名精确/包含匹配）
 function pbRenderBooks() {
@@ -536,11 +568,11 @@ $('#pbVolList').addEventListener('click', async (ev) => {
   finally { btn.disabled = false; btn.textContent = old; }
 });
 $('#pbPreview').addEventListener('click', async () => {
-  $('#pbErr').textContent = ''; $('#pbGo').disabled = true;
+  $('#pbErr').textContent = ''; $('#pbGo').disabled = true; $('#pbGo').textContent = '🔍 请先点「预览将发」';
   const btn = $('#pbPreview'); const old = btn.textContent; btn.disabled = true; btn.textContent = '读取番茄中…';
   try {
     if (!await pbSave()) return;
-    const r = await api('/api/book/publish-preview', 'POST', { book: CUR.slug });
+    const r = await pbRace(api('/api/book/publish-preview', 'POST', { book: CUR.slug }), 60000, '预览番茄超时');
     const out = $('#pbPreviewOut'); out.style.display = '';
     if (r.blocked) {
       out.textContent = `⛔ 无法确认番茄当前章号，已阻止发布：\n${r.reason}\n\n请确认该 Unzoo 账号的浏览器能正常打开番茄章节管理页（检查代理/网络/登录），再重新预览。`;
@@ -582,43 +614,98 @@ $('#pbPreview').addEventListener('click', async () => {
   } catch (e) { $('#pbErr').textContent = '预览失败：' + e.message; }
   finally { btn.disabled = false; btn.textContent = old; }
 });
-let PB_STREAM = null;   // 发布进度的 SSE（弹窗内实时滚日志）
-function pbCloseStream() { if (PB_STREAM) { try { PB_STREAM.close(); } catch {} PB_STREAM = null; } }
+let PB_STREAM = null;      // 发布进度的 SSE（弹窗内实时滚日志）
+let PB_STREAM_SLUG = null; // 当前 SSE 属于哪本书（用于弹窗重开时判断是否已挂着）
+function pbCloseStream() { if (PB_STREAM) { try { PB_STREAM.close(); } catch {} PB_STREAM = null; PB_STREAM_SLUG = null; } }
+// 发布进入/结束时切换「停止发布」「发布中」等按钮态；发布中禁用发布类按钮，露出停止按钮。
+function pbSetPublishingUI(on) {
+  const stop = $('#pbStop');
+  if (stop) { stop.style.display = on ? '' : 'none'; stop.disabled = !on; stop.textContent = '⏹ 停止发布'; }
+  $('#pbTest').disabled = !!on; $('#pbPreview').disabled = !!on;
+  // 发布中禁用发布并显示"发布中…"；结束后仍保持禁用（需重新预览确认最新章号，避免重发）。
+  $('#pbGo').disabled = true;
+  $('#pbGo').textContent = on ? '📤 发布中…' : '🔍 请先点「预览将发」';
+}
+// 弹窗打开时按该书的发布状态同步 UI，并在正在发布时接回 SSE 进度。
+function pbSyncStopBtn() {
+  if (!CUR) return;
+  if (PUBLISHING.has(CUR.slug)) {
+    pbSetPublishingUI(true);
+    // 若 SSE 没挂在这本书上（如关弹窗后重开），重新接回进度
+    if (PB_STREAM_SLUG !== CUR.slug) pbAttachStream(CUR.slug, '⏳ 发布进行中，接回进度：\n');
+  } else {
+    pbSetPublishingUI(false);
+  }
+}
+// 标记发布结束/停止：清客户端状态、复位 UI、刷新书架去掉徽标。
+function pbMarkDone(slug) {
+  PUBLISHING.delete(slug);
+  pbCloseStream();
+  if (CUR && CUR.slug === slug) pbSetPublishingUI(false);
+  renderShelf();
+}
+// 挂 SSE：把番茄发布日志滚进 pbPreviewOut，命中结束词时收尾。
+function pbAttachStream(slug, header) {
+  const out = $('#pbPreviewOut'); out.style.display = '';
+  if (header) out.textContent = header;
+  pbCloseStream();
+  PB_STREAM_SLUG = slug;
+  PB_STREAM = new EventSource(`${API}/api/stream?book=${encodeURIComponent(slug)}`);
+  PB_STREAM.addEventListener('log', ev => {
+    let e; try { e = JSON.parse(ev.data); } catch { return; }
+    if (e.source !== 'fanqie') return;
+    const tag = e.level === 'error' ? '✖' : e.level === 'act' ? '▶' : '·';
+    out.textContent += `${tag} ${e.msg}\n`;
+    out.scrollTop = out.scrollHeight;
+    // 发布收尾/停止/异常 → 清状态、复位按钮
+    if (/发布结束|重发结束|全部完成|已暂停|已中止|已停止|无新章|发布异常/.test(e.msg)) {
+      out.textContent += '\n——（已结束，可关闭。番茄那边稍后刷新可见）——\n';
+      out.scrollTop = out.scrollHeight;
+      pbMarkDone(slug);
+    }
+  });
+  PB_STREAM.onerror = () => {};
+}
 async function pbPublish(limit) {
   $('#pbErr').textContent = '';
   const warn = limit ? `【联调】只发第一个新章到番茄真实账号《${CUR.title}》，确认？` : `把全部新章发布到番茄真实账号《${CUR.title}》。建卷不可逆、发错改不了，确认配置无误？`;
   if (!confirm(warn)) return;
+  const slug = CUR.slug;
   try {
     if (!await pbSave()) return;
-    await api('/api/book/publish', 'POST', { book: CUR.slug, limit: limit || 0 });
+    await api('/api/book/publish', 'POST', { book: slug, limit: limit || 0 });
+    // 标记这本书正在发布（书卡徽标 + 停止按钮 + 关弹窗后可回来）
+    PUBLISHING.add(slug); renderShelf();
+    pbSetPublishingUI(true);
     // 不关弹窗——发布进度实时滚在弹窗里
-    const out = $('#pbPreviewOut'); out.style.display = ''; out.textContent = '⏳ 已开始发布，进度：\n';
-    $('#pbGo').disabled = true; $('#pbTest').disabled = true; $('#pbPreview').disabled = true;
-    $('#pbGo').textContent = '📤 发布中…';
-    pbCloseStream();
-    PB_STREAM = new EventSource(`${API}/api/stream?book=${encodeURIComponent(CUR.slug)}`);
-    PB_STREAM.addEventListener('log', ev => {
-      let e; try { e = JSON.parse(ev.data); } catch { return; }
-      if (e.source !== 'fanqie') return;
-      const tag = e.level === 'error' ? '✖' : e.level === 'act' ? '▶' : '·';
-      out.textContent += `${tag} ${e.msg}\n`;
-      out.scrollTop = out.scrollHeight;
-      // 发布收尾 → 恢复按钮
-      if (/发布结束|重发结束|全部完成|已暂停|已中止|无新章/.test(e.msg)) {
-        $('#pbTest').disabled = false; $('#pbPreview').disabled = false;
-        $('#pbGo').textContent = '📤 发布全部新章 ▶';
-        out.textContent += '\n——（已结束，可关闭。番茄那边稍后刷新可见）——\n';
-        out.scrollTop = out.scrollHeight;
-        pbCloseStream();
-      }
-    });
-    PB_STREAM.onerror = () => {};
+    pbAttachStream(slug, '⏳ 已开始发布，进度：\n');
     toast(limit ? '已开始试发 1 章，进度见下方' : '已开始发布，进度见下方');
-  } catch (e) { $('#pbErr').textContent = '发布失败：' + e.message; $('#pbGo').disabled = false; $('#pbTest').disabled = false; $('#pbPreview').disabled = false; }
+  } catch (e) {
+    // 启动失败：清状态、恢复所有按钮，绝不卡死
+    PUBLISHING.delete(slug); renderShelf();
+    pbSetPublishingUI(false);
+    $('#pbErr').textContent = '发布失败：' + e.message;
+  }
 }
+// ⏹ 停止发布：请求后台停发（发完当前章即停），保留状态直到 SSE 报结束。
+$('#pbStop').addEventListener('click', async () => {
+  if (!CUR) return;
+  const btn = $('#pbStop'); btn.disabled = true; const old = btn.textContent; btn.textContent = '⏹ 停止中…';
+  try {
+    await pbRace(api('/api/book/publish-stop', 'POST', { book: CUR.slug }), 60000, '停止请求超时');
+    toast('已请求停止（发完当前章即停）');
+  } catch (e) {
+    $('#pbErr').textContent = '停止失败：' + e.message;
+    btn.disabled = false; btn.textContent = old;   // 停止请求本身失败时恢复按钮，让用户能重试
+  }
+});
 $('#pbGo').addEventListener('click', () => pbPublish(0));
 $('#pbTest').addEventListener('click', () => pbPublish(1));
-function pbCloseModal() { pbCloseStream(); $('#publishModal').classList.add('hidden'); }
+// 关弹窗：若该书仍在发布，保留 SSE 让书卡徽标能在后台发布结束时自动消失；否则收流。
+function pbCloseModal() {
+  if (!(PB_STREAM_SLUG && PUBLISHING.has(PB_STREAM_SLUG))) pbCloseStream();
+  $('#publishModal').classList.add('hidden');
+}
 $('#pbClose').addEventListener('click', pbCloseModal);
 $('#pbCancel').addEventListener('click', pbCloseModal);
 $('#publishModal').addEventListener('click', (e) => { if (e.target === $('#publishModal')) pbCloseModal(); });
