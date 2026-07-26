@@ -26,6 +26,12 @@ const ENGINE_PORT: &str = "8799";
 // 2) 打包后：Tauri 资源目录 <resource_dir>/engine/bin/novel.mjs（v2 标准）
 // 3) 兼容：exe 同级 resources/engine/bin/novel.mjs
 // 4) 开发期：编译期 src-tauri/../../bin/novel.mjs
+// Windows 的 resource_dir() 会返回 \\?\ 前缀的 verbatim 路径，Node 的模块加载器无法解析
+// （会误把 "D:" 当目录 lstat 报 EISDIR）。传给 node 前必须剥掉该前缀。
+fn strip_verbatim(s: String) -> String {
+    s.strip_prefix(r"\\?\").map(|x| x.to_string()).unwrap_or(s)
+}
+
 fn engine_path(resource_dir: Option<PathBuf>) -> String {
     if let Ok(p) = std::env::var("NOVEL_STUDIO_ENGINE") {
         return p;
@@ -43,7 +49,7 @@ fn engine_path(resource_dir: Option<PathBuf>) -> String {
     }
     for c in candidates {
         if c.exists() {
-            return c.to_string_lossy().to_string();
+            return strip_verbatim(c.to_string_lossy().to_string());
         }
     }
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../bin/novel.mjs").to_string()
