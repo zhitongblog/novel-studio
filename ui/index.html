@@ -108,6 +108,21 @@
               <input id="sendInput" placeholder="穿插一条指令到正在写作的窗口…" />
               <button class="btn" id="btnSend">穿插</button>
             </div>
+            <details class="plan-box" id="planBox">
+              <summary>📋 设定 / 大纲 · 边写边改（保存后写作中自动生效）</summary>
+              <div class="plan-inner">
+                <div class="plan-row">
+                  <select id="planFile"><option value="">选文件…（设定圣经 / 台账 / 各卷大纲）</option></select>
+                  <button class="btn tiny ghost" id="planReload" title="重新加载">↻</button>
+                  <button class="btn tiny primary" id="planSave">💾 保存</button>
+                </div>
+                <textarea id="planEditor" rows="9" spellcheck="false" placeholder="上面选一个文件查看/编辑。改完点保存——写作中会自动让 AI 重读并遵循（大纲每批本就重读，圣经改后即时生效）。"></textarea>
+                <div class="plan-dictate">
+                  <input id="planDictate" placeholder="或用大白话说要改什么，让 AI 落进上面选中的文件（如：给主角加个宿敌）" />
+                  <button class="btn tiny" id="planDictateBtn">让 AI 改</button>
+                </div>
+              </div>
+            </details>
             <div class="review-bar hidden" id="reviewBar">
               <div class="rb-head">⏸ <b id="rbTitle">审稿意见待确认</b><span class="rb-file" id="rbFile"></span></div>
               <pre class="rb-critique" id="rbCritique"></pre>

@@ -1247,6 +1247,55 @@ async function cwSubmit(then) {
 }
 $('#cwSubmitAi').addEventListener('click', () => cwSubmit('ai'));
 $('#cwSubmitMe').addEventListener('click', () => cwSubmit('me'));
+
+// ---------- 📋 设定/大纲 · 边写边改（工作台内嵌抽屉）----------
+let PLAN_REL = '';
+async function planLoadList() {
+  if (!CUR) return;
+  try {
+    const f = await api('/api/book/files?book=' + encodeURIComponent(CUR.slug));
+    const opts = [];
+    (f.meta || []).forEach(m => { if (/(novel_bible|continuity_ledger|chapter_index)/.test(m.rel)) opts.push({ rel: m.rel, label: m.label || m.rel }); });
+    (f.outlines || []).forEach(o => opts.push({ rel: o.rel, label: '大纲 · ' + o.name }));
+    const sel = $('#planFile'); const keep = sel.value;
+    sel.innerHTML = '<option value="">选文件…（设定圣经 / 台账 / 各卷大纲）</option>' +
+      opts.map(o => `<option value="${esc(o.rel)}">${esc(o.label)}</option>`).join('');
+    if (keep && opts.some(o => o.rel === keep)) sel.value = keep;
+  } catch (e) { toast('读取文件列表失败：' + e.message); }
+}
+async function planLoadFile(rel) {
+  PLAN_REL = rel || '';
+  if (!rel) { $('#planEditor').value = ''; return; }
+  $('#planEditor').value = '（加载中…）';
+  try { const r = await api('/api/book/read?book=' + encodeURIComponent(CUR.slug) + '&rel=' + encodeURIComponent(rel)); $('#planEditor').value = r.content || ''; }
+  catch (e) { $('#planEditor').value = ''; toast('读取失败：' + e.message); }
+}
+$('#planBox').addEventListener('toggle', () => { if ($('#planBox').open) planLoadList(); });
+$('#planFile').addEventListener('change', () => planLoadFile($('#planFile').value));
+$('#planReload').addEventListener('click', () => { planLoadList(); if (PLAN_REL) planLoadFile(PLAN_REL); });
+$('#planSave').addEventListener('click', async () => {
+  if (!CUR || !PLAN_REL) { toast('先在上面选一个文件'); return; }
+  const btn = $('#planSave'); btn.disabled = true;
+  try {
+    const r = await api('/api/book/save-file', 'POST', { book: CUR.slug, rel: PLAN_REL, content: $('#planEditor').value });
+    toast(r.reread ? '已保存 → 已让 AI 重读并遵循' : '已保存：' + PLAN_REL);
+  } catch (e) { toast('保存失败：' + e.message); }
+  finally { btn.disabled = false; }
+});
+$('#planDictateBtn').addEventListener('click', async () => {
+  if (!CUR) return;
+  const text = $('#planDictate').value.trim();
+  if (!text) { toast('说说要改什么'); $('#planDictate').focus(); return; }
+  const rel = PLAN_REL || 'novel_bible.md';
+  const btn = $('#planDictateBtn'); btn.disabled = true;
+  try {
+    await api('/api/book/cowrite', 'POST', { book: CUR.slug, action: 'editdoc', rel, text });
+    $('#planDictate').value = '';
+    toast('已让 AI 把改动落进 ' + rel);
+    setTimeout(() => { if (PLAN_REL) planLoadFile(PLAN_REL); }, 2500);
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; }
+});
 function appendLog(e) {
   if (e.kind === 'pending-review' || e.kind === 'pending-batch') showReviewBar();   // 待确认/待审核 → 弹动作条
   if (e.kind === 'pending-cowrite' || e.kind === 'cowrite-release') syncCowriteBar(); // 接力接管/交还 → 同步控制条

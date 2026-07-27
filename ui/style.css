@@ -254,6 +254,19 @@ textarea { resize: vertical; line-height: 1.5; }
 .cw-compose textarea:focus { outline: none; border-color: #2e7d6e; }
 .btn.tiny.ghost { padding: 1px 7px; font-size: 12px; }
 
+/* 📋 设定/大纲 边写边改抽屉 */
+.plan-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 4px 10px; }
+.plan-box > summary { cursor: pointer; font-size: 13px; color: #b7c6bf; padding: 5px 2px; list-style: none; user-select: none; }
+.plan-box > summary::before { content: '▸ '; color: var(--muted); }
+.plan-box[open] > summary::before { content: '▾ '; }
+.plan-inner { padding: 6px 0 8px; }
+.plan-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.plan-row select { flex: 1; min-width: 0; }
+.plan-box textarea { width: 100%; box-sizing: border-box; resize: vertical; padding: 8px; border-radius: 6px; background: #0d1613; border: 1px solid #1e3a34; color: #e6f2ee; font: 12.5px/1.6 ui-monospace, Consolas, monospace; }
+.plan-box textarea:focus { outline: none; border-color: #2e7d6e; }
+.plan-dictate { display: flex; gap: 6px; margin-top: 6px; }
+.plan-dictate input { flex: 1; min-width: 0; }
+
 /* ===== 阅读 / 工作台 ===== */
 .reader { flex: 1; display: flex; gap: 14px; min-height: 0; }
 .rd-nav { width: 270px; flex-shrink: 0; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 10px; }

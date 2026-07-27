@@ -234,7 +234,18 @@ async function api(p, req, res, u) {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
         const r = saveBookFile(book, body.rel, body.content);
         pushLog(book.slug, { level: 'act', msg: '已保存编辑：' + body.rel });
-        return json(res, 200, r);
+        // 改了设定/大纲且正在写作 → 自动穿插一句让 AI 立即重读并遵循（否则圣经不每批重读、改了不生效）
+        let reread = false;
+        const rel = String(body.rel || '');
+        const isBible = /(^|\/)novel_bible\.md$/i.test(rel);
+        const isOutline = /(^|\/)outlines\//i.test(rel);
+        if (body.notify !== false && (isBible || isOutline) && sessionLive(book.slug)) {
+          const note = isBible
+            ? '我刚更新了 novel_bible.md（设定圣经）。请立刻重读该文件，并在后续写作中严格遵循更新后的设定；不必回头改已写正文。'
+            : '我刚更新了 outlines/ 分章大纲。请按更新后的大纲写后续章节；不必回头改已写正文。';
+          try { await sendToBook(book.slug, note, cfg); await ensureAutopilot(book.slug, cfg); reread = true; pushLog(book.slug, { level: 'act', msg: (isBible ? '设定圣经' : '大纲') + '已更新 → 已让 AI 重读并遵循' }); } catch {}
+        }
+        return json(res, 200, { ...r, reread });
       } catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (p === '/api/book/open-dir') {
@@ -561,6 +572,19 @@ async function api(p, req, res, u) {
           try { await ensureAutopilot(slug, cfg); } catch {}
           pushLog(slug, { level: 'act', msg: '🎬 已采纳你的想法，AI 顺着写下去：' + idea, kind: 'cowrite-release' });
           return json(res, 200, { ok: true, held: false });
+        }
+        if (action === 'editdoc') {
+          // 口述改设定/大纲：作者用大白话给改动，AI 落进指定文件(rel)并后续遵循，不改已写正文。
+          const text = String(body.text || '').replace(/[\r\n]+/g, ' ').trim();
+          const rel = String(body.rel || 'novel_bible.md').trim();
+          if (!text) return json(res, 400, { error: '说说要改什么' });
+          if (!sessionLive(slug)) return json(res, 400, { error: '写作会话未运行，请先开始写作' });
+          const target = /outlines\//i.test(rel) ? `分章大纲文件 ${rel}` : (/novel_bible/i.test(rel) ? '设定圣经 novel_bible.md' : rel);
+          const instr = `请把下面这条改动【落实到 ${target}】——直接更新该文件本身，使其自洽；改完在后续写作中严格遵循，不必回头改已写正文。改动：「${text}」`;
+          await sendToBook(slug, instr, cfg);
+          try { await ensureAutopilot(slug, cfg); } catch {}
+          pushLog(slug, { level: 'act', msg: `📝 让 AI 改 ${rel}：${text}` });
+          return json(res, 200, { ok: true, rel });
         }
         return json(res, 400, { error: '未知 action：' + action });
       } catch (e) { pushLog(slugOf(body.book), { level: 'error', msg: '灵感共创失败：' + e.message }); return json(res, 500, { error: e.message }); }
