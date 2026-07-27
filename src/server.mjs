@@ -21,7 +21,7 @@ import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './u
 import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction } from './planner.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildEndingRenudgeInstruction } from './editor.mjs';
-import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
+import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
 import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume } from './fanqie.mjs';
@@ -121,17 +121,33 @@ async function api(p, req, res, u) {
         return json(res, 200, readBookFile(book, u.searchParams.get('rel') || ''));
       } catch (e) { return json(res, 400, { error: e.message }); }
     }
-    if (p === '/api/book/pending') {   // 写作台重开时恢复"待确认审稿/审核"动作条
+    if (p === '/api/book/pending') {   // 写作台重开时恢复"待确认审稿/审核/接力"动作条
       const slug = slugOf(u.searchParams.get('book') || '');
       const pend = getPending(slug);
       const reviewEvery = getReviewEvery(slug);
-      const base = { reviewEvery, writeMode: reviewEvery > 0 ? 'review' : 'auto' };
+      // 持久化的 cowrite 优先（其 reviewEvery=0，不能只靠 reviewEvery 反推）
+      const persisted = (getBook(slug) || {}).writeMode;
+      const writeMode = persisted === 'cowrite' ? 'cowrite' : (reviewEvery > 0 ? 'review' : 'auto');
+      const base = { reviewEvery, writeMode, held: !!(pend && pend.kind === 'cowrite') };
       if (!pend) return json(res, 200, { pending: false, ...base });
       return json(res, 200, {
         pending: true, kind: pend.kind || 'outline', scope: pend.scope,
         file: path.basename(pend.file || ''), critique: pend.critique || '',
         chapters: pend.chapters, n: pend.n, ...base,
       });
+    }
+    if (p === '/api/book/latest-text') {   // 接力共写：取最新章节结尾，供用户接着往下写
+      try {
+        const book = getBook(u.searchParams.get('book') || ''); if (!book) return json(res, 400, { error: '找不到书' });
+        const cap = Math.min(6000, Math.max(200, parseInt(u.searchParams.get('cap') || '1800', 10)));
+        const vols = (listBookFiles(book).volumes || []);
+        const all = vols.flatMap(v => v.chapters || []);
+        if (!all.length) return json(res, 200, { name: '', rel: '', tail: '', empty: true });
+        const latest = all.reduce((a, b) => (b.num >= a.num ? b : a), all[0]);
+        const content = (readBookFile(book, latest.rel).content || '');
+        const tail = content.length > cap ? '…' + content.slice(-cap) : content;
+        return json(res, 200, { name: latest.name, rel: latest.rel, tail, chars: content.length });
+      } catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (p === '/api/env') {   // 环境自检：unterm 路径 + 模型 + 代理 + 实例 + 书库（供环境页展示与操作）
       const proxy = readProxyConfig();
@@ -452,17 +468,21 @@ async function api(p, req, res, u) {
       // 既持久化进 book(下次默认值/重启恢复)，又热更新运行时开关(立即生效，无需重开窗口)。
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
-        const mode = body.mode === 'review' ? 'review' : 'auto';
+        const mode = body.mode === 'review' ? 'review' : (body.mode === 'cowrite' ? 'cowrite' : 'auto');
         const every = mode === 'review' ? Math.max(1, Math.floor(Number(body.reviewEvery) || 1)) : 0;
         setBookWriteMode(book.slug, mode, every || 1);
-        setReviewEvery(book.slug, every);
-        // 切回全自动时，若正卡在"逐批审核"暂停 → 放行让它自动续写下去
+        setReviewEvery(book.slug, every);   // review→N，其余(含 cowrite)→0 连续写
+        // 切出某个暂停态时放行，避免卡在旧门上：
         const pend = getPending(book.slug);
-        if (mode === 'auto' && pend && pend.kind === 'batch-review') {
+        if (mode !== 'review' && pend && pend.kind === 'batch-review') {
           setResume(book.slug, getReviewDefault(book.slug) || cfg.autopilot?.continueText || '继续');
           clearPending(book.slug);
         }
-        pushLog(book.slug, { level: 'act', msg: mode === 'review' ? `已切到【逐批审核】模式：每写 ${every} 批停下等你审核` : '已切到【全自动】模式：连续写作不再停顿' });
+        if (mode !== 'cowrite' && pend && pend.kind === 'cowrite') clearPending(book.slug); // 退出接力 → 解除接管，AI 继续
+        const msg = mode === 'review' ? `已切到【逐批审核】模式：每写 ${every} 批停下等你审核`
+          : mode === 'cowrite' ? '已切到【灵感共创】模式：你随时给方向 / 要灵感，文笔交给 AI'
+          : '已切到【全自动】模式：连续写作不再停顿';
+        pushLog(book.slug, { level: 'act', msg });
         return json(res, 200, { ok: true, writeMode: mode, reviewEvery: every });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -493,6 +513,57 @@ async function api(p, req, res, u) {
         pushLog(book.slug, { level: 'act', msg: req ? `已批准并下达本批要求 → 继续：${req}` : '已批准 → 继续写下一批' });
         return json(res, 200, { ok: true, requirements: req });
       } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/cowrite') {
+      // 灵感共创（导演模式）：作者点子多、文笔交给 AI，不拘泥完整大纲。
+      // action=idea(下达一个想法/方向→AI 据此写) | inspire(要 AI 给几个走向并停下) | hold(停一下) | release(你自己发挥)
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const slug = book.slug;
+        const action = String(body.action || '').trim();
+        if (action === 'hold') {
+          setPending(slug, { kind: 'cowrite' });   // 挂 cowrite 门 → autopilot 本拍即暂停；当前 AI 若在写会自然写完本段
+          pushLog(slug, { level: 'act', msg: '⏸ 已暂停，等你给方向或要灵感', kind: 'pending-cowrite' });
+          return json(res, 200, { ok: true, held: true });
+        }
+        if (action === 'release') {
+          clearPending(slug);   // 你自己发挥 → autopilot 恢复，空闲时自动续写
+          if (sessionLive(slug)) { try { await ensureAutopilot(slug, cfg); } catch {} }
+          pushLog(slug, { level: 'act', msg: '🤖 你自己发挥 → AI 顺着往下写', kind: 'cowrite-release' });
+          return json(res, 200, { ok: true, held: false });
+        }
+        if (action === 'inspire') {
+          // 要灵感：让 AI 停下，抛几个"接下来可以怎么走"的走向供作者挑/改。挂 pending 防止 autopilot 自动续写盖过选项。
+          if (!sessionLive(slug)) return json(res, 400, { error: '写作会话未运行，请先开始写作' });
+          const n = Math.min(6, Math.max(2, parseInt(body.count, 10) || 4));
+          const instr = `先别继续写正文。基于目前的剧情，给我 ${n} 个"接下来可以怎么走"的方向：每个用①②③…标号，一句话点出走向 + 它的冲突或爽点(可各不相同、甚至大胆些)，最后一行给出你的推荐并说明理由。只列方向、不要展开正文，给完停下等我选或补充想法。`;
+          await sendToBook(slug, instr, cfg);
+          setPending(slug, { kind: 'cowrite' });
+          pushLog(slug, { level: 'act', msg: `💡 已让 AI 给 ${n} 个走向（见右侧镜像），选好在想法框里说“走①”或补充你的想法`, kind: 'pending-cowrite' });
+          return json(res, 200, { ok: true, held: true, inspired: true });
+        }
+        if (action === 'idea' || action === 'submit' || action === 'whisper') {
+          // 下达一个想法/方向：作者用大白话给意图，AI 负责把文笔写好；与旧设定冲突以作者为准。
+          const idea = String(body.text || '').replace(/[\r\n]+/g, ' ').trim();
+          if (!idea) return json(res, 400, { error: '说说你的想法/方向吧' });
+          if (!sessionLive(slug)) return json(res, 400, { error: '写作会话未运行，请先开始写作' });
+          const tail = body.then === 'me'
+            ? '写完这一段【停下】，另起一行用①②③给我 3 个"后续可以怎么走"的方向(各一句、点出冲突或爽点)，然后等我。'
+            : '写完自然往下继续。';
+          const instr = `我是作者(点子多、文笔交给你)。这是我对接下来的想法/方向，不必拘泥已有大纲：「${idea}」。请据此把接下来的正文写好写足——文笔、细节、对话、爽点都由你发挥；若与既有设定冲突，以我这个新想法为准并顺势圆过去。${tail}`;
+          await sendToBook(slug, instr, cfg);
+          if (body.then === 'me') {
+            setPending(slug, { kind: 'cowrite' });   // 写完这段后 AI 会给走向并停，保持 pending 等作者
+            pushLog(slug, { level: 'act', msg: '🎬 已按你的想法写 → 写完会再给你几个走向：' + idea, kind: 'pending-cowrite' });
+            return json(res, 200, { ok: true, held: true });
+          }
+          clearPending(slug);
+          try { await ensureAutopilot(slug, cfg); } catch {}
+          pushLog(slug, { level: 'act', msg: '🎬 已采纳你的想法，AI 顺着写下去：' + idea, kind: 'cowrite-release' });
+          return json(res, 200, { ok: true, held: false });
+        }
+        return json(res, 400, { error: '未知 action：' + action });
+      } catch (e) { pushLog(slugOf(body.book), { level: 'error', msg: '灵感共创失败：' + e.message }); return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/unzoo/profiles') {   // 列出 Unzoo 账号(权威路径)+已开番茄页，供发布账号下拉
       try { return json(res, 200, await listUnzooProfiles()); }

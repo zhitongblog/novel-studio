@@ -40,12 +40,14 @@ export function setBookTarget(slugOrId, n) {
   return b;
 }
 
-// 写作模式：'auto'(全自动) | 'review'(逐批审核·半自动)。review 时 reviewEvery=每几批停下等审核(默认1)。
+// 写作模式：'auto'(全自动) | 'review'(逐批审核·半自动) | 'cowrite'(接力共写)。
+//   review  时 reviewEvery=每几批停下等审核(默认1)。
+//   cowrite 时 AI 连续写(reviewEvery=0)，用户可随时接管/抽身——参与由 pending 门即时驱动，不按批次。
 // 持久化进 book.writeMode/book.reviewEvery：作为开写默认值、并在重启后恢复。运行时的实时开关另存内存(pending store)。
 export function setBookWriteMode(slugOrId, mode, reviewEvery) {
   const b = getBook(slugOrId);
   if (!b) throw new Error('找不到书：' + slugOrId);
-  const m = mode === 'review' ? 'review' : 'auto';
+  const m = mode === 'review' ? 'review' : (mode === 'cowrite' ? 'cowrite' : 'auto');
   b.writeMode = m;
   if (m === 'review') b.reviewEvery = Math.max(1, Math.floor(Number(reviewEvery) || 1));
   else delete b.reviewEvery;

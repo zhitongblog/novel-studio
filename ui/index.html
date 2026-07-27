@@ -68,6 +68,7 @@
               <select id="writeMode">
                 <option value="auto">🤖 全自动 · 连续写作不停顿</option>
                 <option value="review">✋ 逐批审核 · 每批写完停下等我审核</option>
+                <option value="cowrite">🎬 灵感共创 · 你导演 AI 执笔，随时给方向 / 要灵感</option>
               </select>
             </label>
             <label class="field stateless-toggle" title="每章用全新无头进程写作、写完即弃会话，靠精准上下文包重喂前文。对长篇可省一个数量级 token、更快、不漂移。无窗口镜像，进度看下方日志。">
@@ -119,6 +120,25 @@
                 <button class="btn primary" id="rbContinue">✅ 批准并继续</button>
                 <button class="btn" id="rbContinueReq">📝 按我的要求继续</button>
                 <button class="btn ghost danger" id="rbStop">■ 停止</button>
+              </div>
+            </div>
+            <div class="cowrite-bar hidden" id="cowriteBar">
+              <div class="cw-head">🎬 灵感共创 · 你导演，AI 执笔 <span class="cw-state" id="cwState">AI 正在写…</span></div>
+              <div class="cw-actions" id="cwActionsMain">
+                <button class="btn primary" id="cwIdea">🎬 我有个想法</button>
+                <button class="btn" id="cwInspire">💡 给我几个走向</button>
+                <button class="btn ghost" id="cwPause">⏸ 停一下</button>
+                <button class="btn ghost" id="cwHandback">🤖 你自己发挥</button>
+              </div>
+              <div class="cw-compose hidden" id="cwCompose">
+                <div class="cw-ctx-head" id="cwCtxHead">当前正文进度（AI 写到这，供参考）<button class="btn tiny ghost" id="cwCtxRefresh" title="刷新">↻</button></div>
+                <pre class="cw-ctx" id="cwCtx">（加载中…）</pre>
+                <textarea id="cwText" rows="4" placeholder="用大白话说你的想法/方向就行，文笔交给 AI。例：让反派这时候登场，主角发现被出卖，气氛压抑点…（要灵感时也可先看右侧镜像里 AI 给的走向，再说“走①”或补一句你的想法）"></textarea>
+                <div class="cw-actions">
+                  <button class="btn primary" id="cwSubmitAi">🎬 就照这个写下去</button>
+                  <button class="btn" id="cwSubmitMe">🎬 写完再给我几个走向</button>
+                  <button class="btn ghost" id="cwCancel">取消</button>
+                </div>
               </div>
             </div>
             <div class="log-feed" id="logFeed"></div>

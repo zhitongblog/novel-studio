@@ -133,7 +133,7 @@ function openWrite(book) {
   $('#mirror').textContent = '（开始写作后，这里实时显示 AI 写作过程）';
   $('#logFeed').innerHTML = '';
   $('#wbTarget').value = book.targetChapters || 0;
-  $('#writeMode').value = book.writeMode === 'review' ? 'review' : 'auto';
+  $('#writeMode').value = normMode(book.writeMode);
   $('#synText').value = book.synopsis || '';
   const running = STATE.sessions.find(s => s.slug === book.slug && s.running !== false);
   setWriting(!!running);
@@ -152,6 +152,7 @@ function setWriting(on) {
   $('#writeStatus').textContent = on ? '写作中' : '未开始';
   $('#writeStatus').classList.toggle('on', on);
   $('#mirrorDot').style.display = on ? '' : 'none';
+  syncCowriteBar();   // 接力控制条随"是否写作中 + 当前模式"显示/隐藏
 }
 $('#btnBack').addEventListener('click', () => { closeStream(); showView('shelf'); refresh(); });
 
@@ -171,23 +172,28 @@ $('#btnStart').addEventListener('click', async () => {
       setWriting(true); openStream(CUR.slug);
       toast(r.untilTarget ? '无状态模式：写到目标章数（可随时停）' : `无状态模式：写 ${batches} 批`);
     } else {
-      const writeMode = $('#writeMode').value === 'review' ? 'review' : 'auto';
+      const writeMode = normMode($('#writeMode').value);
       await api('/api/write', 'POST', { book: CUR.slug, model: $('#writeModel').value, task: $('#writeTask').value, writeMode });
       if (CUR) CUR.writeMode = writeMode;
       setWriting(true); openStream(CUR.slug);
-      toast(writeMode === 'review' ? '已开窗 · 逐批审核模式（每批写完会停下等你）' : '已开窗，autopilot 全自动运行中');
+      toast(writeMode === 'review' ? '已开窗 · 逐批审核模式（每批写完会停下等你）'
+        : writeMode === 'cowrite' ? '已开窗 · 灵感共创：你随时给方向 / 要灵感，文笔交给 AI'
+        : '已开窗，autopilot 全自动运行中');
     }
   } catch (e) { toast('启动失败：' + e.message); setWriting(false); }
 });
 // 写作模式热切换（提前选或写作中随时切）：立即生效，无需重开窗口
 $('#writeMode').addEventListener('change', async () => {
   if (!CUR) return;
-  const mode = $('#writeMode').value === 'review' ? 'review' : 'auto';
+  const mode = normMode($('#writeMode').value);
   try {
     await api('/api/book/review-mode', 'POST', { book: CUR.slug, mode });
     CUR.writeMode = mode; const b = STATE.books.find(x => x.slug === CUR.slug); if (b) b.writeMode = mode;
-    if (mode === 'auto') hideReviewBar();
-    toast(mode === 'review' ? '已切到逐批审核：下一批写完会停下等你' : '已切到全自动：连续写作不再停顿');
+    if (mode !== 'review') hideReviewBar();
+    syncCowriteBar();
+    toast(mode === 'review' ? '已切到逐批审核：下一批写完会停下等你'
+      : mode === 'cowrite' ? '已切到灵感共创：你随时给方向 / 要灵感，文笔交给 AI'
+      : '已切到全自动：连续写作不再停顿');
   } catch (e) { toast('切换失败：' + e.message); }
 });
 $('#btnStop').addEventListener('click', async () => {
@@ -1165,8 +1171,85 @@ async function batchStop() {
 $('#rbContinue').addEventListener('click', () => batchContinue(false));
 $('#rbContinueReq').addEventListener('click', () => batchContinue(true));
 $('#rbStop').addEventListener('click', batchStop);
+// ---------- 🤝 接力共写（Relay co-writing）动作条 ----------
+function normMode(v) { return v === 'review' ? 'review' : (v === 'cowrite' ? 'cowrite' : 'auto'); }
+function hideCowriteBar() { $('#cowriteBar').classList.add('hidden'); }
+function cwShowCompose(on) {
+  $('#cwCompose').classList.toggle('hidden', !on);
+  $('#cwActionsMain').classList.toggle('hidden', on);
+}
+// 仅在【接力模式 + 写作中】显示控制条；据接管态(held)决定是否展开续写编辑区
+async function syncCowriteBar() {
+  const writing = !$('#btnStop').disabled;   // setWriting 会同步该按钮
+  if (!CUR || normMode($('#writeMode').value) !== 'cowrite' || !writing) { hideCowriteBar(); return; }
+  $('#cowriteBar').classList.remove('hidden');
+  try {
+    const p = await api('/api/book/pending?book=' + encodeURIComponent(CUR.slug));
+    const held = !!p.held;
+    if (held) { $('#cwState').textContent = '🎬 轮到你（给方向 / 选走向）'; cwShowCompose(true); cwLoadCtx(); }
+    else { $('#cwState').textContent = 'AI 正在写…'; cwShowCompose(false); }
+  } catch {}
+}
+async function cwLoadCtx() {
+  if (!CUR) return;
+  $('#cwCtx').textContent = '（加载中…）';
+  try {
+    const r = await api('/api/book/latest-text?book=' + encodeURIComponent(CUR.slug));
+    $('#cwCtx').textContent = r.empty ? '（还没有正文，直接开写这一段）' : (r.tail || '（空）');
+    $('#cwCtx').scrollTop = $('#cwCtx').scrollHeight;
+  } catch (e) { $('#cwCtx').textContent = '（读取失败：' + e.message + '）'; }
+}
+function cwAction(action, extra) { return api('/api/book/cowrite', 'POST', { book: CUR.slug, action, ...(extra || {}) }); }
+// 🎬 我有个想法：先暂停 AI，展开想法框（用大白话给方向，文笔交给 AI）
+$('#cwIdea').addEventListener('click', async () => {
+  if (!CUR) return;
+  try { await cwAction('hold'); $('#cwState').textContent = '🎬 说说你的想法/方向'; $('#cwCtxHead').firstChild.nodeValue = '当前正文进度（AI 写到这，供参考）'; cwShowCompose(true); cwLoadCtx(); $('#cwText').focus(); }
+  catch (e) { toast(e.message); }
+});
+// 💡 给我几个走向：让 AI 停下抛几个方向，展开框供你选/补充
+$('#cwInspire').addEventListener('click', async () => {
+  if (!CUR) return;
+  try {
+    await cwAction('inspire');
+    $('#cwState').textContent = '💡 AI 正在给走向…（见右侧镜像）';
+    $('#cwCtxHead').firstChild.nodeValue = 'AI 给的走向在右侧镜像里 ↗ 选好在下面说“走①”或补充想法';
+    cwShowCompose(true); $('#cwText').focus();
+  } catch (e) { toast(e.message); }
+});
+$('#cwPause').addEventListener('click', async () => {
+  if (!CUR) return;
+  try { await cwAction('hold'); $('#cwState').textContent = '⏸ 已暂停（“我有个想法” / “你自己发挥”）'; toast('已暂停：AI 写完当前段就停'); }
+  catch (e) { toast(e.message); }
+});
+$('#cwHandback').addEventListener('click', async () => {
+  if (!CUR) return;
+  try { await cwAction('release'); $('#cwState').textContent = 'AI 正在写…'; cwShowCompose(false); toast('你自己发挥 → AI 顺着往下写'); }
+  catch (e) { toast(e.message); }
+});
+$('#cwCancel').addEventListener('click', async () => {
+  try { await cwAction('release'); } catch {}
+  $('#cwState').textContent = 'AI 正在写…'; cwShowCompose(false);
+});
+$('#cwCtxRefresh').addEventListener('click', cwLoadCtx);
+// 下达想法：text=大白话方向；then=ai(照这个写下去) | me(写完再给我几个走向)
+async function cwSubmit(then) {
+  if (!CUR) return;
+  const text = $('#cwText').value.trim();
+  if (!text) { toast('说说你的想法/方向吧'); $('#cwText').focus(); return; }
+  const btns = ['#cwSubmitAi', '#cwSubmitMe', '#cwCancel'].map(s => $(s)); btns.forEach(b => b.disabled = true);
+  try {
+    const r = await cwAction('idea', { text, then });
+    $('#cwText').value = '';
+    if (then === 'me' || r.held) { $('#cwState').textContent = '🎬 已按你的想法写，写完会再给你走向'; setTimeout(cwLoadCtx, 2000); toast('已采纳你的想法，AI 写完这段会再给几个走向'); }
+    else { $('#cwState').textContent = 'AI 正在写…'; cwShowCompose(false); toast('已采纳你的想法 → AI 顺着写下去'); }
+  } catch (e) { toast(e.message); }
+  finally { btns.forEach(b => b.disabled = false); }
+}
+$('#cwSubmitAi').addEventListener('click', () => cwSubmit('ai'));
+$('#cwSubmitMe').addEventListener('click', () => cwSubmit('me'));
 function appendLog(e) {
   if (e.kind === 'pending-review' || e.kind === 'pending-batch') showReviewBar();   // 待确认/待审核 → 弹动作条
+  if (e.kind === 'pending-cowrite' || e.kind === 'cowrite-release') syncCowriteBar(); // 接力接管/交还 → 同步控制条
   const feed = $('#logFeed');
   const cls = 'log-line ' + (e.source === 'autopilot' ? 'autopilot ' : '') + (e.level || 'info');
   const tag = e.level === 'act' ? '●' : e.level === 'warn' ? '▲' : e.level === 'error' ? '✖' : '○';

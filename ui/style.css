@@ -242,6 +242,18 @@ textarea { resize: vertical; line-height: 1.5; }
 .rb-req { width: 100%; box-sizing: border-box; resize: vertical; margin: 0 0 8px; padding: 8px; border-radius: 6px; background: #11141c; border: 1px solid #2a2e3a; color: #e6e9f0; font: 13px/1.5 inherit; }
 .rb-req:focus { outline: none; border-color: #5a4a1e; }
 
+/* 🤝 接力共写控制条 */
+.cowrite-bar { background: #142826; border: 1px solid #1e5a50; border-radius: 10px; padding: 10px 12px; margin: 6px 0; }
+.cw-head { color: #6fe0c8; font-size: 13px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.cw-state { color: #9aa3b5; font-size: 12px; }
+.cw-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.cw-compose { margin-top: 8px; }
+.cw-ctx-head { font-size: 11px; color: #7f8a9c; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+.cw-ctx { max-height: 22vh; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 12px/1.6 ui-monospace, Consolas, monospace; background: #0d1613; border: 1px solid #1e3a34; border-radius: 6px; padding: 8px; margin: 0 0 8px; color: #b7c6bf; }
+.cw-compose textarea { width: 100%; box-sizing: border-box; resize: vertical; margin: 0 0 8px; padding: 9px; border-radius: 6px; background: #0d1613; border: 1px solid #1e3a34; color: #e6f2ee; font: 14px/1.65 inherit; }
+.cw-compose textarea:focus { outline: none; border-color: #2e7d6e; }
+.btn.tiny.ghost { padding: 1px 7px; font-size: 12px; }
+
 /* ===== 阅读 / 工作台 ===== */
 .reader { flex: 1; display: flex; gap: 14px; min-height: 0; }
 .rd-nav { width: 270px; flex-shrink: 0; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 10px; }
