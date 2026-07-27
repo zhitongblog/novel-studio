@@ -20,6 +20,9 @@ export class UntermMcp {
     return new Promise((resolve, reject) => {
       const sock = net.connect(this.port, this.host);
       this.sock = sock;
+      // 永久兜底 error 处理：socket 任何阶段的 error（写到已关闭的 pane→write EOF/EPIPE/ECONNRESET）都不能让整个引擎进程崩。
+      // （原来只在 connect 成功后才挂 error 处理 → 半开/写失败时无监听 → Unhandled 'error' 直接 crash 引擎，图书预览/写作全挂。）
+      sock.on('error', () => {});
       const to = setTimeout(() => { sock.destroy(); reject(new Error('MCP 连接超时')); }, timeoutMs);
       sock.once('connect', async () => {
         clearTimeout(to);

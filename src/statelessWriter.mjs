@@ -13,6 +13,7 @@ import { proxyUrl } from './unterm.mjs';
 import { buildBatchPack } from './contextpack.mjs';
 import { bookStats, getBook } from './books.mjs';
 import { gitSnapshot } from './scaffold.mjs';
+import { reviewOutline } from './editor.mjs';   // 卷边界大纲审稿门复用长驻那套主编无头审稿
 
 // 各模型"无头 + 自动批准文件读写"的参数。
 function writeArgs(model) {
@@ -41,13 +42,17 @@ function runHeadless(model, prompt, { cwd, cfg, timeoutMs = 900000, onChunk }) {
 
 // 跨卷自愈指令：模型在卷边界因"该卷无章级大纲"而停下（输出【大纲待审：卷NN】）时，
 // 授权它在无状态快速模式下【先补该卷章级大纲、再直接接着写】，不要停下等人工审稿。
-function buildBoundaryRetryPrompt(book, pack, scope) {
+function buildBoundaryRetryPrompt(book, pack, scope, reviewed = false) {
   const { nextNum, lastNum } = pack.meta;
+  const reviewLine = reviewed
+    ? `0. 【先过大纲审稿门】主编已审本卷分章大纲，意见在 reviews/大纲审稿-${scope}.md：先打开它，按其中【硬伤】逐条修订 outlines/ 里本卷的分章大纲并保存，再做下面的步骤。\n`
+    : '';
   return pack.prompt + `\n\n## 补充授权（卷边界自愈）\n` +
     `检测到你认为需要先补「${scope}」的章级大纲才能继续——对。请在【本次调用内】一次做完：\n` +
-    `1. 先在 outlines/ 下把该卷的【章级分章大纲】补好（逐章 beat：核心事件/冲突、推进了什么、章末钩子；并标出本卷伏笔布点 埋设→回收章号），覆盖到至少第 ${String(lastNum).padStart(3, '0')} 章。\n` +
+    reviewLine +
+    `1. ${reviewed ? '据修订后的大纲，确保' : '先在 outlines/ 下把'}该卷的【章级分章大纲】${reviewed ? '完整覆盖' : '补好（逐章 beat：核心事件/冲突、推进了什么、章末钩子；并标出本卷伏笔布点 埋设→回收章号），覆盖'}到至少第 ${String(lastNum).padStart(3, '0')} 章。\n` +
     `2. 然后【不要停下、不要输出任何待审哨兵】，直接接着写第 ${String(nextNum).padStart(3, '0')}–${String(lastNum).padStart(3, '0')} 章正文并落盘、更新索引与台账、自检。\n` +
-    `（无状态模式下大纲审稿改为事后人工复检，此刻请连贯地把大纲补全并把正文写出来。）`;
+    `（${reviewed ? '大纲审稿已在本轮前置完成' : '无状态模式下大纲审稿改为事后人工复检'}，此刻请连贯地把大纲改好并把正文写出来。）`;
 }
 
 // 写一批（count 章）。dryRun 时只组装并返回上下文包，不调模型、不写文件。
@@ -64,12 +69,19 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
   let after = bookStats(book);
   let grew = (after.chapters || 0) - (before.chapters || 0);
 
-  // 卷边界自愈：模型输出【大纲待审：卷NN】而没写章 → 授权它补大纲后直接续写，重试一次。
+  // 卷边界：模型输出【大纲待审：卷NN】而没写章 → 先过【大纲审稿门】(默认开)：主编审该卷分章大纲，
+  // 再授权模型按审稿意见改大纲并续写。关掉审稿门(outlineReview:false)则退回"补大纲直接写"的自愈。
   const m = (r.out + '\n' + r.err).match(/【大纲待审[:：]\s*([^】\n]+)】/);
   if (grew <= 0 && m) {
     const scope = m[1].trim();
-    onLog({ level: 'info', msg: `卷边界：模型请求先补「${scope}」大纲 → 授权补大纲并直接续写，重试中…` });
-    r = await runHeadless(model, buildBoundaryRetryPrompt(book, pack, scope), { cwd: book.dir, cfg, timeoutMs });
+    let reviewed = false;
+    if (cfg?.stateless?.outlineReview !== false) {
+      onLog({ level: 'act', msg: `卷边界【${scope}】：先过大纲审稿门——主编审该卷分章大纲…` });
+      try { await reviewOutline({ book, scope, cfg, authorModel: model, onLog: (e) => onLog({ ...e, source: 'editor' }) }); reviewed = true; }
+      catch (e) { onLog({ level: 'warn', msg: '大纲审稿失败（放行不阻断）：' + e.message }); }
+    }
+    onLog({ level: 'info', msg: `卷边界【${scope}】：${reviewed ? '按审稿意见改大纲后' : '补大纲后'}直接续写…` });
+    r = await runHeadless(model, buildBoundaryRetryPrompt(book, pack, scope, reviewed), { cwd: book.dir, cfg, timeoutMs });
     after = bookStats(book);
     grew = (after.chapters || 0) - (before.chapters || 0);
   }

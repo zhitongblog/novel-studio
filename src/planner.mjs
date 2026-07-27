@@ -7,10 +7,25 @@ import { getModel, detectAll } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { STYLES, getStyle } from './styles.mjs';
 
+// runModelOnce 能非交互驱动的本地 CLI（一次性喂 prompt 走 stdin 取文本）。trae 用法不同(run 子命令)，不在此列。
+const CLI_GEN_PREF = ['codex', 'gemini', 'qwen', 'claude'];
+
+// 把「用于文本生成的模型」解析成一个真正能本地 spawn 的 CLI：
+// 网页版模型(kind:'web')/无 bin 的模型不能 spawn（会 "file argument must be string, received undefined"）——
+// 立项/书名/简介/文风这些【元任务】改用一个可用的本地 CLI 跑（正文才用网页版）。返回 null=无可用 CLI。
+export function resolveGenModel(model) {
+  const m = getModel(model);
+  if (m && m.kind !== 'web' && m.bin && CLI_GEN_PREF.includes(m.id)) return m.id; // 本身就是可跑的生成 CLI
+  const avail = detectAll().filter(x => x.available && x.kind !== 'web' && x.bin).map(x => x.id);
+  return CLI_GEN_PREF.find(id => avail.includes(id)) || null;
+}
+
 // 选"附带文本生成"(简介/封面提示词兜底)用的模型：写作模型是 claude 时自动换 codex/gemini，
-// 既满足"claude 不跑这些杂活"的要求，也把 claude 额度留给正文写作。其它模型则沿用本书模型。
+// 既满足"claude 不跑这些杂活"的要求，也把 claude 额度留给正文写作。网页版模型不能跑本地生成 → 也换 CLI。
 export function pickAuxModel(bookModel, cfg) {
-  const avail = detectAll().filter(m => m.available).map(m => m.id);
+  const bm = getModel(bookModel);
+  if (bm && bm.kind === 'web') return resolveGenModel(bookModel) || 'codex';
+  const avail = detectAll().filter(m => m.available && m.kind !== 'web' && m.bin).map(m => m.id);
   if (bookModel && bookModel !== 'claude' && avail.includes(bookModel)) return bookModel;
   const alt = ['codex', 'gemini'].find(id => avail.includes(id));
   return alt || bookModel || 'codex';
@@ -49,19 +64,24 @@ export function generateSynopsis(book, cfg) {
 
 // 非交互跑一次模型，拿文本输出
 function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
-  const m = getModel(model);
-  if (!m) throw new Error('未知模型：' + model);
+  // 网页版/无 bin 模型不能本地 spawn → 解析到一个可用的本地生成 CLI（立项/书名/简介等元任务）
+  const useId = resolveGenModel(model);
+  if (!useId) {
+    throw new Error('没有可用于「立项 / 书名 / 简介」等生成的本地 CLI 模型。网页版模型只能写正文、不能跑这些元任务——'
+      + '请先装一个 CLI（如 qwen / gemini / codex），或在上一步用「✍️ 我自己起名（跳过 AI 建议）」直接立项。');
+  }
+  const m = getModel(useId);
   const env = { ...process.env };
   if (cfg?.enableProxy) {
     const px = proxyUrl();
     if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; }
   }
   // prompt 走 stdin（避免参数里 JSON 双引号/中文在 Windows cmd 下的引号地狱）；
-  // shell:true 让 Windows 能解析 npm 的 .cmd shim（codex/claude/gemini 都是 shim）。
+  // shell:true 让 Windows 能解析 npm 的 .cmd shim（codex/claude/gemini/qwen 都是 shim）。
   let args;
-  if (model === 'codex') args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
-  else if (model === 'claude') args = ['-p'];
-  else args = ['-p']; // gemini
+  if (useId === 'codex') args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
+  else if (useId === 'claude') args = ['-p'];
+  else args = ['-p']; // gemini / qwen（gemini-cli 分支，同样 -p + stdin）
   const r = spawnSync(m.bin, args, {
     encoding: 'utf8', timeout: timeoutMs, input: prompt, cwd: os.tmpdir(),
     env, maxBuffer: 8 * 1024 * 1024, shell: true, windowsHide: true,
@@ -179,7 +199,7 @@ export function buildRebuildOutlineInstruction(book) {
   const s = `这是一本已有正文的小说《${book.title}》，但【设定圣经与大纲】缺失或不完整。请【只重建规划、绝不写任何新正文】：` +
     `第一步：通读 chapters/ 下所有已写章节（按文件名顺序）。` +
     `第二步：据正文逆向重建 novel_bible.md——世界观与力量/设定体系、主角与关键人物及其当前处境、对抗势力、主题与禁区、命名与文风基线、已埋未回收的伏笔与未决线索；关键事实同步进 continuity_ledger.md。` +
-    `第三步：在 outlines/ 下为【每一卷】建或补「卷xx分章大纲.md」——逐章一行写清"该章核心事件/冲突、推进了什么、章末钩子"，并列【本卷伏笔布点表】(埋设→回收章号)；已写到的卷据正文回填，未写到的卷据 bible 主线给章级骨架，覆盖到全书结局。` +
+    `第三步：为【每一卷】起一个有意境的卷名（4–6字副标题；已写到的卷据其正文主线取名），在 outlines/ 下建或补【带卷名的】「卷xx<卷名>分章大纲.md」（如 卷03静海旧火分章大纲.md）——逐章一行写清"该章核心事件/冲突、推进了什么、章末钩子"，并列【本卷伏笔布点表】(埋设→回收章号)；已写到的卷据正文回填，未写到的卷据 bible 主线给章级骨架，覆盖到全书结局；把各卷卷名列进 novel_bible.md 的“全书规模/卷名”处（发布番茄按卷名建卷，卷必须有名、不能只叫“卷xx”）。` +
     `第四步：校对 chapter_index.md，使每章一行(章号/章名/卷/路径/状态)与 chapters/ 实际一致。` +
     `【硬性约束】本次绝不新增/改写/删除任何正文章节(.txt)，只产出或更新 novel_bible.md、outlines/、continuity_ledger.md、chapter_index.md。完成后输出一行「【设定与大纲已重建】」并停下。全程遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范。`;
   return s.replace(/[\r\n]+/g, ' ');
@@ -202,7 +222,7 @@ export function buildReprojectInstruction(book, note) {
   const focus = note ? `调整重点：${String(note).replace(/[\r\n]+/g, ' ')}。` : '';
   const s = `对《${book.title}》做【整本推倒重立项】（旧的 bible / 大纲 / 正文已 git 存档、可回退）。保留题材大方向，但重做规划与正文：` +
     `第一步重写 novel_bible.md：一句话卖点、目标读者、时代世界观、力量/设定体系、主角与关键人物、对抗势力、主题、禁区、开篇策略、节奏与格局承诺、全书规模（卷数/每卷章数/总字数）。${focus}` +
-    `第二步在 outlines/ 重排全卷分章大纲（每卷章级 beat 表 + 伏笔布点表，覆盖到全书结局）。` +
+    `第二步在 outlines/ 重排全卷分章大纲（每卷章级 beat 表 + 伏笔布点表，覆盖到全书结局）；为每一卷起一个有意境的卷名（4–6字副标题），大纲文件名带上卷名（卷xx<卷名>分章大纲.md），并把各卷卷名列进 bible 的“全书规模/卷名”（发布番茄按卷名建卷、卷必须有名）。` +
     `第三步从第 1 章开始重写正文，旧正文作废（可参考、不照搬），按 longform-webnovel-writer 规范与新大纲写，每批 ${book.standards?.batchSize || 3} 章自检；务必落实【开篇定位】（尽早立住主角身份+时代+核心爽点）与【题材承诺兑现】。` +
     `第四步重建 chapter_index.md，使其与新正文一致。全程遵守 AGENTS.md 规范。`;
   return s.replace(/[\r\n]+/g, ' ');
@@ -235,13 +255,26 @@ export function buildAfterwordInstruction(book) {
 
 // 构造"全卷大纲都搭好再开写"的立项指令。
 // 必须是【单行】——多行 prompt 会被 agent 当作多行草稿、等待人工回车，无法自动开跑。
-export function buildKickoffInstruction(book, theme, words) {
+export function buildKickoffInstruction(book, theme, words, opts = {}) {
   const batch = book.standards?.batchSize || 3;
+  // planOnly：网页版模型立项——只建 设定圣经 + 全卷大纲，不写正文（正文由网页版引擎另行续写）。
+  if (opts.planOnly) {
+    const p = `你是资深网文主编，现在为《${book.title}》做【立项规划】（只搭设定与大纲，绝不写正文）。` +
+      `题材：${theme || '（见题材说明）'}；目标总字数：${words || '长篇，自定但需匹配卷数章数'}。` +
+      `第一步立项：撰写 novel_bible.md（一句话卖点、目标读者、时代世界观、力量或设定体系、主角、关键配角、对抗势力、主题、禁区、命名风格基线）。` +
+      `第二步全书规划（必须落实，不许留空）：据目标字数确定【总卷数、每卷约章数、单章目标字数】，并为每一卷写一句【格局承诺】，写入 bible 的“全书规模”与“节奏与格局承诺”。一个卷内单个阶段目标用 3–8 章兑现，严禁把小事拉成几十章。` +
+      `第三步全书骨架：为每一卷【起一个有意境的卷名】（4–6字副标题，贴合本卷主线），在 outlines/ 下建【带卷名的】大纲文件 卷xx<卷名>分章大纲.md（如 卷03静海旧火分章大纲.md），文件内含卷级骨架（本卷阶段目标、关键转折、卷末交给下一卷的局面、章号区间）；并把各卷卷名列进 novel_bible.md 的“全书规模/卷名”处（发布番茄按卷名建卷，卷必须有名）。覆盖到全书结局，并建【全书主线伏笔表】（每条标注埋设→回收章号）。` +
+      `第四步把第 1 卷细化到【章级】：卷01 分章大纲逐章一行写清“该章核心事件/冲突、推进了什么、章末钩子”，并列出本卷伏笔布点表。` +
+      `第五步：建立并初始化 continuity_ledger.md。` +
+      `第六步：完成上述全部规划后【立即停止，绝对不要写任何正文章节】——本书正文将由网页版模型另行续写。完成后单独输出一行「【立项完成：规划就绪，待网页版续写】」然后停下。` +
+      `全程严格遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范中关于设定与大纲的部分。`;
+    return p.replace(/[\r\n]+/g, ' ');
+  }
   const s = `你是资深网文主编与作者，现在为《${book.title}》立项并开写。` +
     `题材：${theme || '（见题材说明）'}；目标总字数：${words || '长篇，自定但需匹配卷数章数'}。` +
     `第一步立项：撰写 novel_bible.md（一句话卖点、目标读者、时代世界观、力量或设定体系——传统武侠国术宜用弱系统只记录或结算不替代修炼与道德抉择、主角、关键配角、对抗势力、主题、禁区、命名风格基线）。` +
     `第二步全书规划（必须落实，不许留空）：据目标字数确定【总卷数、每卷约章数、单章目标字数】，并为每一卷写一句【格局承诺】——本卷主角的处境(地点/权力层级/实力/对手量级)从什么状态升到什么状态；这些一并写入 bible 的“全书规模”与“节奏与格局承诺”。一个卷内的单个阶段目标原则上用 3–8 章兑现，严禁把一桩小事拉成几十章。` +
-    `第三步全书骨架：在 outlines/ 下为每一卷创建 卷xx分章大纲.md，先给出卷级骨架（本卷阶段目标、关键转折、卷末交给下一卷的局面、章号区间），覆盖到全书结局；并在 bible 或 outlines/主线伏笔表.md 里建一张【全书主线伏笔表】，每条伏笔标注"埋设章号→计划回收章号"。` +
+    `第三步全书骨架：为每一卷【起一个有意境的卷名】（4–6字副标题，贴合本卷主线），在 outlines/ 下建【带卷名的】大纲文件 卷xx<卷名>分章大纲.md（如 卷03静海旧火分章大纲.md），先给出卷级骨架（本卷阶段目标、关键转折、卷末交给下一卷的局面、章号区间），覆盖到全书结局；把各卷卷名列进 novel_bible.md 的“全书规模/卷名”处（发布番茄按卷名建卷，卷必须有名、不能只叫“卷xx”）；并在 bible 或 outlines/主线伏笔表.md 里建一张【全书主线伏笔表】，每条伏笔标注"埋设章号→计划回收章号"。` +
     `第四步把第 1 卷细化到【章级】：卷01 分章大纲必须逐章一行写清"该章核心事件/冲突、推进了什么(人物/关系/线索)、章末钩子"，并列出本卷【伏笔布点表】(埋设→回收章号)。【硬性闸门】：任何一卷在动笔前，其分章大纲都必须已细化到章级 beat，否则先补该卷章级大纲再写，绝不在只有卷级骨架时就开写。` +
     `第五步：建立并初始化 continuity_ledger.md。` +
     `第六步【大纲待审】：完成上述全部规划后，先【不要写正文】。在窗口单独输出一行哨兵「【大纲待审：立项】」然后停下等待——系统会自动调一位主编审你的 bible 与大纲。收到主编审稿意见（reviews/大纲审稿-立项.md）后，按意见修订 bible 与大纲。` +

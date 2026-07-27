@@ -5,7 +5,7 @@ import path from 'node:path';
 import { getModel, detectModel } from './models.mjs';
 import {
   ensureProfile, spawnInstance, instancePids, waitForNewInstance,
-  resolveProxyNode, proxyUrl, findUntermCli,
+  resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess,
 } from './unterm.mjs';
 import { connectInstance } from './mcpclient.mjs';
 import { Autopilot } from './autopilot.mjs';
@@ -74,7 +74,8 @@ export function writeLaunchScript(book, model, instruction, cfg) {
 }
 
 // 主流程。返回 { instance, mcp, autopilot, paneId }。
-export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true, onFreshRestart = null }) {
+// autopilotConfirmOnly：只挂"自动确认提问"的极简 autopilot，绝不自动续写（共创窗口模式用）。
+export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true, autopilotConfirmOnly = false, onFreshRestart = null }) {
   const m = getModel(model);
   if (!m) throw new Error('未知模型：' + model);
   const det = detectModel(model);
@@ -102,6 +103,18 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   // 写 launch.ps1
   const launch = writeLaunchScript(book, model, instruction, cfg);
   onLog({ msg: `已生成启动脚本：${path.relative(book.dir, launch)}` });
+
+  // 【去重】startWriting 只在会话已死/探不到时才走到这（doWrite/resume 已判过 sessionLive）——此时该书目录若还残留活窗口，
+  // 就是引擎驱动不了的"孤儿窗口"（会 sentinel 卡死、又抢写同一本撞章）。开新窗口前先把它们杀掉，保证一本书只有一个受控窗口。
+  try {
+    const normDir = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase();
+    const orphans = listInstances().filter(i => normDir(i.cwd) === normDir(book.dir));
+    for (const inst of orphans) {
+      onLog({ level: 'warn', msg: `发现《${book.title}》残留孤儿窗口 ${inst.id}(pid ${inst.pid})，引擎未在驱动 → 关闭，避免开出重复窗口抢写` });
+      try { killProcess(inst.pid); } catch {}
+    }
+    if (orphans.length) await new Promise(r => setTimeout(r, 1500));
+  } catch {}
 
   // spawn 新实例
   const beforePids = instancePids();
@@ -140,14 +153,23 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   // 启动 autopilot
   let autopilot = null;
   const tokenKey = instance.id + '@' + (instance.started_at || '');
-  if (attachAutopilot && cfg.autopilot?.enabled) {
+  if (attachAutopilot && cfg.autopilot?.enabled && autopilotConfirmOnly) {
+    // 【共创窗口模式】只挂"自动确认提问"的极简 autopilot：确认 y/n、菜单、信任目录，绝不自动续写下一章。
+    autopilot = new Autopilot(mcp, paneId, {
+      ...cfg.autopilot, confirmOnly: true,
+      onLog: (e) => onLog({ ...e, source: 'autopilot' }),
+      onTokens: (n) => recordUsage(book.slug, tokenKey, n),
+    });
+    autopilot.start();
+  } else if (attachAutopilot && cfg.autopilot?.enabled) {
     // 大纲审稿门：作者输出「【大纲待审：xxx】」时，换一个模型无头审稿。
     const editorOff = cfg.editorReview?.enabled === false;
     const slug = book.slug;
     // 从持久化的写作模式播种运行时审核开关（重启/重挂后恢复）：review→每 reviewEvery 批审核；auto→0。
     // 读 store 最新值，不用入参 book（它可能是 setBookWriteMode 之前抓的旧引用，writeMode 会缺）。
     { const fb = getBook(slug) || book; setReviewEvery(slug, fb.writeMode === 'review' ? (fb.reviewEvery || 1) : 0); }
-    const gateOn = cfg.editorReview?.requireApproval !== false;   // 全局确认门
+    // 确认门：仅【逐批审核 review 模式】要人工确认；【全自动 auto 模式】审稿后直接自动采纳、不停手（自动处理）。
+    const gateOn = ((getBook(slug) || book)?.writeMode !== 'auto') && cfg.editorReview?.requireApproval !== false;
     const renudge = new Map();   // scope -> 已重催次数
     const onOutlineReady = editorOff ? undefined : async (scope) => {
       try {
@@ -276,6 +298,8 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       onFinaleReady,
       reviewEvery: () => getReviewEvery(slug),   // 0=全自动；N=每 N 批审核（实时热切换）
       onBatchReview,
+      // 写完一批后：给"写够章却没卷名"的卷自动起名写回 bible（后台、best-effort，不阻塞）
+      onBatchDone: async () => { try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(getBook(slug) || book, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {} },
       takeReviewResume: () => takeResume(slug),
       // 省 token：上下文快满就重开新会话（靠 continuity_ledger 重建）
       contextSize: () => currentContextSize((getBook(slug) || book).dir, model),

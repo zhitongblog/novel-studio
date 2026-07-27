@@ -110,11 +110,16 @@ async function unzooRequest(path, body = {}, timeoutMs = UNZOO_TIMEOUT_MS) {
 
 // ===== UnzooClient 辅助类（从 unzoo-client.ts 搬过来）=====
 // 适配：构造函数注入 profilePath（替换原模块级 selectedProfilePath）与 onLog（替换原全局 addLog）。
+// 已在文件底部 export（covergen_web.mjs 复用它驱动 ChatGPT 站点标签页）。
 class UnzooClient {
-  constructor(profilePath = null, onLog = null) {
+  // siteHost：锁定标签页用的站点域（默认番茄）。网页版写作会传入 qianwen.com/chatgpt.com 等，
+  // 让同一套 getActiveTab 逻辑改为锁定该聊天站点的标签页。siteLabel 仅用于日志文案。
+  constructor(profilePath = null, onLog = null, siteHost = '', siteLabel = '') {
     this.tabId = null;
     this.selectedProfilePath = profilePath || null;
     this.onLog = onLog || (() => {});
+    this.siteHost = siteHost || 'fanqienovel.com';
+    this.siteLabel = siteLabel || '番茄';
   }
 
   // 原前端的全局 addLog(msg, level) → 实例 log（转发到 onLog）
@@ -153,9 +158,15 @@ class UnzooClient {
 
     // 严格锁定选中账号——绝不用其他账号顶替（防发错号）
     if (selectedProfilePath) {
+      // 【按 profile 名匹配】：Unzoo 升级会改 profile 根目录(如 Chromium\User Data → Unzoo\User Data)，
+      // 老配置里存的全路径会对不上。故除全路径相等外，再按【profile 文件夹名】(如 Profile_lixd220)兜底匹配，
+      // 根目录变了也照样锁到同名账号——profile 名唯一，不会发错号。
+      const wantBase = String(selectedProfilePath).split(/[\\/]/).filter(Boolean).pop();
+      const sameProfile = (t) => t.profile_path === selectedProfilePath
+        || (t.profile_path && String(t.profile_path).split(/[\\/]/).filter(Boolean).pop() === wantBase);
       const collect = () => {
         const m = new Map();
-        for (const t of (tabs || []).filter(t => t.profile_path === selectedProfilePath)) m.set(String(t.tab_id), t);
+        for (const t of (tabs || []).filter(sameProfile)) m.set(String(t.tab_id), t);
         return m;
       };
       // 重试 tab_list（偶发只返回部分窗口/漏读，多读几次取并集）
@@ -178,31 +189,31 @@ class UnzooClient {
       }
       let inProfile = [...union.values()];
       if (inProfile.length === 0) {
-        this.addLog('⚠️ 启动后仍未读到该账号标签页（Unzoo 异常），请手动打开该账号浏览器并登录番茄后重试', 'error');
+        this.addLog(`⚠️ 启动后仍未读到该账号标签页（Unzoo 异常），请手动打开该账号浏览器并登录${this.siteLabel}后重试`, 'error');
         return null;
       }
 
-      const fanqieInProfile = inProfile.filter(t => t.url && t.url.includes('fanqienovel.com'));
-      if (fanqieInProfile.length > 0) {
-        // 已锁定的标签页仍在该账号番茄页 → 继续用它，绝不来回切
+      const siteInProfile = inProfile.filter(t => t.url && t.url.includes(this.siteHost));
+      if (siteInProfile.length > 0) {
+        // 已锁定的标签页仍在该账号目标站点页 → 继续用它，绝不来回切
         if (this.tabId) {
-          const locked = fanqieInProfile.find(t => String(t.tab_id) === String(this.tabId));
+          const locked = siteInProfile.find(t => String(t.tab_id) === String(this.tabId));
           if (locked) return locked;
         }
-        const t = fanqieInProfile.find(x => x.active) || fanqieInProfile[0];
+        const t = siteInProfile.find(x => x.active) || siteInProfile[0];
         this.tabId = t.tab_id;
         return t;
       }
-      // 账号已开但没番茄页 → 用该账号一个标签页（优先非活动页），由调用方 navigate 打开番茄。
+      // 账号已开但没目标站点页 → 用该账号一个标签页（优先非活动页），由调用方 navigate 打开。
       // 同一 profile cookie 共享，已登录则能进；未登录会跳登录页，被页面有效性闸拦下（失败安全）。
       const t = inProfile.find(x => !x.active) || inProfile[0];
       this.tabId = t.tab_id;
-      this.addLog('该账号下暂无番茄页 → 用一个标签页打开番茄后台', 'info');
+      this.addLog(`该账号下暂无${this.siteLabel}页 → 用一个标签页打开${this.siteLabel}`, 'info');
       return t;
     }
 
-    // 未选账号：用任意已打开的番茄页（保留兼容）
-    const fanqieTabs = tabs.filter(t => t.url && t.url.includes('fanqienovel.com'));
+    // 未选账号：用任意已打开的目标站点页（保留兼容）
+    const fanqieTabs = tabs.filter(t => t.url && t.url.includes(this.siteHost));
     if (fanqieTabs.length > 0) {
       if (this.tabId) {
         const locked = fanqieTabs.find(t => String(t.tab_id) === String(this.tabId));
@@ -264,6 +275,40 @@ class UnzooClient {
     await this.humanDelay(40, 100);
   }
 
+  // 真实可信点击（CDP Input.dispatchMouseEvent，isTrusted=true）—— 走 Unzoo CDP shim(ws://127.0.0.1:9222)。
+  // 番茄新版 Arco 弹窗卡片/「确认」/「立即创建」等只认可信点击（合成 pointer、/api/v1/click 坐标点、JS .click()
+  // 都可能落空不触发）。CDP page-id 即 daemon tab_id：ws://<host>:<port>/devtools/page/<tabId>。
+  async cdpClick(x, y) {
+    await this.ensureTabId();
+    if (typeof WebSocket === 'undefined') throw new Error('运行时无 WebSocket，无法用 CDP 可信点击（需 Node 22+）');
+    const port = process.env.UNZOO_CDP_PORT || '9222';
+    let wsUrl = null;
+    try {
+      const list = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(8000) })).json();
+      const pages = Array.isArray(list) ? list : [];
+      const pg = pages.find(p => String(p.id) === String(this.tabId))
+              || pages.find(p => (p.url || '').includes(this.siteHost));
+      wsUrl = pg && pg.webSocketDebuggerUrl;
+    } catch (e) { throw new Error(`CDP shim 不可用(${e.message})，请在 Unzoo 设置里开启 CDP(ws://127.0.0.1:${port})`); }
+    if (!wsUrl) throw new Error(`CDP 未找到目标页(tabId=${this.tabId})`);
+    const ws = new WebSocket(wsUrl);
+    let mid = 0;
+    const send = (method, params) => new Promise((resolve) => {
+      const i = ++mid;
+      const h = (e) => { try { const j = JSON.parse(e.data); if (j.id === i) { ws.removeEventListener('message', h); resolve(j); } } catch {} };
+      ws.addEventListener('message', h);
+      ws.send(JSON.stringify({ id: i, method, params: params || {} }));
+    });
+    try {
+      await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('CDP ws 连接失败')); setTimeout(() => reject(new Error('CDP ws 连接超时')), 8000); });
+      const cx = Math.round(x), cy = Math.round(y);
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: cx, y: cy });
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: cx, y: cy, button: 'left', buttons: 1, clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cx, y: cy, button: 'left', buttons: 0, clickCount: 1 });
+    } finally { try { ws.close(); } catch {} }
+    await this.humanDelay(40, 100);
+  }
+
   // 定位后点击：locatorBody 是返回目标 DOM 元素(或 null)的 JS 函数体。
   // 用 element.click()(JS)触发——实测本环境坐标点击(/api/v1/click)对番茄发布页顶部按钮/弹窗按钮
   // 常落空不触发(下一步、错别字"忽略"按钮均如此)，JS .click() 才稳定。返回 true=已点击。
@@ -289,10 +334,29 @@ class UnzooClient {
     await unzooRequest('/api/v1/type', { tab_id: Number(this.tabId), text: String(text) });
   }
 
+  // 【CDP 可信逐字输入】browser_type：真 WebKeyboardEvent 逐字（isTrusted=true），【后台安全、无需前台】。
+  // 用于千问 Lexical 这类只认可信输入、且对合成/execCommand 会反爬 blank 的富文本框。
+  // selector 支持 CSS；delayMs 控制打字速度；clearFirst 先清空。
+  async trustedType(selector, text, { delayMs = 6, clearFirst = false, timeoutMs = 180000 } = {}) {
+    await this.ensureTabId();
+    return await unzooCallTool('browser_type', {
+      tab_id: String(this.tabId), selector, text: String(text),
+      delay_ms: delayMs, clear_first: !!clearFirst, timeout: 8000,
+    }, timeoutMs);
+  }
+
   // 真实按键（browser_press_key，支持修饰键，isTrusted=true）
   async pressKey(key, modifiers) {
     await this.ensureTabId();
     await unzooCallTool('browser_press_key', { tab_id: Number(this.tabId), key, modifiers: modifiers || [] });
+  }
+
+  // 上传文件（可信注入）：走 daemon 独立 REST 端点 `POST /api/v1/set_input_files`——产生 isTrusted 文件事件，
+  // 番茄等硬化站点才认。selector 传【已存在的 <input type=file>】。⚠️旧的 `browser_upload`(MCP工具桥) 番茄改版后
+  // 已失效(files:0)，别再用；这是全站唯一经过验证的上传法(封面/多书名实验/新书封面都走它)。返回 {data:{trusted,uploaded,count},success}。
+  async uploadFile(selector, filePaths) {
+    await this.ensureTabId();
+    return await unzooRequest('/api/v1/set_input_files', { tab_id: Number(this.tabId), selector, file_paths: filePaths });
   }
 
   // 真实键盘清空：Ctrl+A 全选 + Delete
@@ -507,6 +571,14 @@ class UnzooClient {
     }
     // 导航后等待页面加载（不再事后重选标签页——保持锁定，避免来回切）
     await this.sleep(1500);
+  }
+
+  // 刷新当前标签页（重载当前会话 URL）。用于 ChatGPT 生图卡在"预览"占位时——刷新后完整图才渲染出来。
+  async reload() {
+    await this.ensureTabId();
+    try { await unzooCallTool('browser_reload', { tab_id: String(this.tabId) }); }
+    catch { await unzooCallTool('browser_navigate', { tab_id: this.tabId, url: await this.evaluate('location.href') }); }
+    await this.sleep(2500);
   }
 }
 
@@ -2152,17 +2224,29 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
         const hasManageChrome = (text.indexOf('章节管理') >= 0) || (text.indexOf('作品管理') >= 0) || (text.indexOf('新建章节') >= 0) || (text.indexOf('卷') >= 0 && hasArco);
         // 空书的合法空状态（番茄空表）：在后台 UI 下出现"暂无"且无章节
         const emptyState = hasArco && (text.indexOf('暂无') >= 0 || text.indexOf('还没有') >= 0 || text.indexOf('快去创作') >= 0);
-        const valid = onDomain && !errorPage && !loginPage && (max > 0 || hasManageChrome || emptyState);
-        return { max, maxRowDate, currentPage, totalPages, valid, errorPage, loginPage, onDomain, hasArco, hasManageChrome, emptyState, bodyLen: text.length, head: text.slice(0, 80) };
+        // ⚠️修复"读到别的书的章号"：校验页面确属【目标 bookId】。番茄后台是 SPA，切书时上一本书的
+        // 章节行会残留在 DOM（曾读到别本的 601 章）——只判"是不是章节管理页"会把残留当本书→读错章号→
+        // 发布误判(算出0新章=发布失败 / 或极端下从第1章重发)。要求 url 与页面内容都出现目标 bookId
+        // （空书允许 emptyState 放行），否则视为"还没真正切到本书"，继续轮询等待。
+        const wantId = ${JSON.stringify(String(bookId || ''))};
+        const htmlAll = document.documentElement ? document.documentElement.innerHTML : '';
+        const belongsToBook = !wantId ? true : (url.indexOf(wantId) >= 0 && (htmlAll.indexOf(wantId) >= 0 || emptyState));
+        const valid = onDomain && !errorPage && !loginPage && belongsToBook && (max > 0 || hasManageChrome || emptyState);
+        return { max, maxRowDate, currentPage, totalPages, valid, belongsToBook, errorPage, loginPage, onDomain, hasArco, hasManageChrome, emptyState, bodyLen: text.length, head: text.slice(0, 80) };
       })()
     `;
 
-    // 先校验页面有效性（防"假0→重复发"）。番茄页异步渲染——轮询至多 ~15s，避免读早了拿空页误判"页面无效"。
+    // 先校验页面有效性（防"假0→重复发"）。番茄页异步渲染——轮询至多 ~17s。
+    // ⚠️关键：必须等到【确定结果】才停——读到章号(max>0) 或 真空状态(emptyState) 或 硬失败(登录/错误)。
+    // 只出现"章节管理"框架但【章节行还没渲染】(max=0 且非空态)不算确定结果，继续等；否则会把
+    // "还没加载完"误当"空书"→返回 0→上层从第1章把已发章重复发布（本次修复的根因）。
     let firstRead = null;
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 14; i++) {
       firstRead = await client.evaluate(readPage);
-      if (firstRead && firstRead.valid) break;
-      if (firstRead && (firstRead.loginPage || firstRead.errorPage)) break;   // 硬失败立即停，不空等
+      if (firstRead) {
+        if (firstRead.loginPage || firstRead.errorPage) break;      // 硬失败立即停，不空等
+        if (firstRead.belongsToBook && (firstRead.max > 0 || firstRead.emptyState)) break; // 确认已切到本书且拿到确定结果才停
+      }
       await client.sleep(1200);
     }
     if (!firstRead) return { maxChapter: 0, approx: true, error: '页面读取为空，无法确认番茄章节状态' };
@@ -2170,6 +2254,7 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
       let why = firstRead.errorPage ? '番茄页面加载失败(网络/代理错误页)'
         : firstRead.loginPage ? '番茄需要登录(登录/扫码页)'
         : !firstRead.onDomain ? '当前不在番茄域名'
+        : !firstRead.belongsToBook ? '页面不属于本书(番茄残留了上一本书的章节，读到的会是别的书的章号)——已中止防止读错，请重试'
         : '无法确认是番茄章节管理页(可能未加载完/改版)';
       log(`⛔ ${why}：拒绝读取最大章号以防误判空书重复发布。页面首段「${(firstRead.head || '').replace(/\\n/g, ' ')}」`, 'error');
       return { maxChapter: 0, error: why, pageInvalid: true };
@@ -2250,6 +2335,15 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
       // 单卷 / 读不到卷选择器 → 直接读当前卷
       const r = await readCurVolMax();
       maxChapter = r.max; latestDate = r.latestDate; approx = r.approx;
+      // 🛡️安全网（本次修复）：单卷读到 0 章，但页面【并非真空状态】→ 章节表没渲染出来/读取异常，
+      // 绝不返回 0（会被当空书从第1章把已发章重复发布）→ 阻断并提示重试。真空书(emptyState)才放行 0。
+      if (maxChapter === 0) {
+        const chk = await client.evaluate(readPage);
+        if (!chk || !chk.emptyState) {
+          log('⛔ 单卷读到 0 章但页面非"暂无章节"空状态——疑似章节表未加载完/读取异常，已中止以防从第1章重复发布，请重试', 'error');
+          return { maxChapter: 0, error: '番茄读到 0 章但页面非空状态(疑似未加载完)，已中止以防重复发布，请重试', pageInvalid: true };
+        }
+      }
     } else {
       // ⚠️关键修复：卷号最高的卷【可能是空的】（如刚建的新卷），全局最大章号在【最新的非空卷】里。
       // 章号全局连续、按序追加 → 从卷号高到低逐卷读，命中第一个非空卷即全局最大章号（不会把已发的当新章重发）。
@@ -2501,6 +2595,12 @@ export async function createFanqieVolumes({ profilePath, bookId, volumes, onLog 
       // 聚焦副标题输入框
       const focused = await client.evaluate(`(function(){const inp=document.querySelector(${JSON.stringify(INP_SEL)});if(!inp)return false;inp.focus();return true;})()`);
       if (!focused) { return { ok: false, created, error: '未找到卷名输入框（番茄改版？）' }; }
+      // 【安全网】番茄要求分卷必须有名字。副标题为空（卷目录只叫"卷03"、大纲里也没取到卷名）→ 不硬提交空名
+      //（硬提交会在番茄留个未命名空行、界面卡住不动），而是撤销该行 + 给清楚可操作的提示。
+      if (!sub) {
+        try { await client.clickByLocator(cancelRow); } catch {}
+        return { ok: false, created, error: `卷「${v.name}」没有名字，番茄要求分卷必须命名。请三选一后重发：①把本地卷目录改成带名字的（如「卷${numToCn(v.num)}_静海旧火」）；②让该卷大纲文件名带上卷名（如 outlines/卷0${v.num}静海旧火分章大纲.md）；③在「📚番茄卷管理」里手动建好这一卷。` };
+      }
       // 填副标题：真实键盘(typeText)优先，setter 兜底
       if (sub) await client.typeText(sub);
       await client.sleep(400);
@@ -2738,8 +2838,8 @@ async function _getFanqieBooksOnce({ profilePath, onLog } = {}) {
   const client = new UnzooClient(profilePath || null, onLog || null);
   try {
     await client.navigate('https://fanqienovel.com/main/writer/book-manage');
-    await client.sleep(4000);
-    const ev = await client.evaluate(`(function(){
+    await client.sleep(2500);
+    const readExpr = `(function(){
       var text = document.body ? document.body.innerText : '';
       var errMarkers=['ERR_','未连接到互联网','代理服务器','net::'];
       if(errMarkers.some(function(s){return text.indexOf(s)>=0;})) return {invalid:'errorPage'};
@@ -2757,15 +2857,54 @@ async function _getFanqieBooksOnce({ profilePath, onLog } = {}) {
         if(!title){ var lines=(card.innerText||'').split('\\n').map(function(s){return s.trim();}); title=lines.filter(function(s){return s.length>=3 && s.length<=30 && !/章|更新|置顶|别名|创建|管理|数据|征文|作品|置顶/.test(s);})[0]||''; }
         if(!seen[id]){ seen[id]=1; books.push({id:id, title:title.split('\\n')[0].slice(0,30)}); }
       });
-      return {books:books};
-    })()`);
+      var emptyState = books.length===0 && /还没有作品|去创作|暂无作品|发布你的第一|创作你的第一/.test(text);
+      var pagItems=[].slice.call(document.querySelectorAll('.arco-pagination-item:not(.arco-pagination-item-prev):not(.arco-pagination-item-next)'));
+      var totalPages=1; pagItems.forEach(function(p){var n=parseInt(p.textContent);if(!isNaN(n)&&n>totalPages)totalPages=n;});
+      var actItem=document.querySelector('.arco-pagination-item-active'); var currentPage=actItem?(parseInt(actItem.textContent)||1):1;
+      return {books:books, emptyState:emptyState, totalPages:totalPages, currentPage:currentPage};
+    })()`;
+    // 番茄作品管理页【异步渲染】——书卡比页面框架晚出来。轮询等到读到书(books.length>0)或真"还没有作品"
+    // 空状态才停，别像以前那样只读一次(4s后)就拿空/半列表→上层"书籍匹配不上"。
+    let ev = null;
+    for (let i = 0; i < 12; i++) {
+      ev = await client.evaluate(readExpr);
+      if (ev) {
+        if (ev.invalid) break;                                     // 硬失败(登录/错误/离域)立即停
+        if ((ev.books && ev.books.length) || ev.emptyState) break; // 读到书 / 真"还没有作品"
+      }
+      await client.sleep(1200);
+    }
     if (!ev) return { ok: false, error: '读取书籍列表失败(页面空)', books: [] };
     if (ev.invalid) {
       const why = ev.invalid === 'errorPage' ? '番茄页面加载失败(网络/代理)' : ev.invalid === 'loginPage' ? '番茄需要登录' : '不在番茄域名';
       return { ok: false, error: why, books: [] };
     }
-    const books = (ev.books || []).filter(b => b.id);
-    return { ok: true, books };
+    // 作品管理页【分页】——每页约 10 本；书多必须翻页读全，否则下拉里"少书"。
+    // ⚠️关键修复：不能假设初始读到的就是第1页！navigate 若已在 book-manage 会【跳过刷新】，
+    // 页面可能停在上次翻到的第2/3页。旧代码只从第2页往后翻→漏掉整个第1页(用户的书全在第1页)。
+    // 改为从第1页起【逐页显式点选并读】，覆盖所有页。
+    const seenIds = new Set(), allBooks = [];
+    const totalPages = Math.min(ev.totalPages || 1, 30);
+    for (let pg = 1; pg <= totalPages; pg++) {
+      if (totalPages > 1) {
+        await client.clickByLocator(`
+          const want=${pg};
+          const items=document.querySelectorAll('.arco-pagination-item');
+          for(const it of items){ if(parseInt(it.textContent)===want) return it; }
+          return null;
+        `);
+      }
+      // 轮询等这一页书卡渲染出来、且已切到该页
+      let pr = null;
+      for (let i = 0; i < 12; i++) {
+        await client.sleep(800);
+        pr = await client.evaluate(readExpr);
+        if (pr && pr.books && pr.books.length && (totalPages <= 1 || pr.currentPage === pg)) break;
+      }
+      if (pr && pr.books) for (const b of pr.books) if (b.id && !seenIds.has(b.id)) { seenIds.add(b.id); allBooks.push(b); }
+    }
+    if (totalPages > 1) onLog && onLog({ level: 'info', msg: `📚 翻页读全番茄书：共 ${allBooks.length} 本（${totalPages} 页）` });
+    return { ok: true, books: allBooks.length ? allBooks : (ev.books || []) };
   } catch (e) {
     return { ok: false, error: String(e.message || e), books: [] };
   }
@@ -2783,6 +2922,423 @@ export async function getFanqieBooks({ profilePath, onLog } = {}) {
     if (i < 3) { log(`读番茄书籍第 ${i} 次未成功（${last.error || '空'}）→ 重试…`, 'warn'); await new Promise(r => setTimeout(r, 1500)); }
   }
   return last;
+}
+
+// ===== 共用：番茄封面【可信注入 + 全屏遮罩两步确认】=====
+// 换封面 / 多书名实验封面 / 新书封面 都走这两个助手，保证只有一条经过验证的上传路径。
+//
+// injectTrustedCover：番茄唯一认的上传法 = `POST /api/v1/set_input_files`（产生 isTrusted 文件事件；
+//   browser_upload/DataTransfer/拖拽/CDP-shim 都不认）。中文书名目录路径先拷成 ASCII 临时文件避编码坑。
+//   返回 { ok, rmTmp }：⚠️ rmTmp 必须在“确认按钮点亮/上传完成”之后再调用——set_input_files 只是把磁盘
+//   文件引用塞给 input，番茄异步读取上传，删早了上传就失败、确认按钮永不点亮（踩过的坑）。
+async function injectTrustedCover(client, filePath, selectors = ['.byte-upload input[type=file]', '.cover-modal-upload input[type=file]', 'input[type=file]']) {
+  let injPath = filePath, tmpFile = null;
+  try {
+    const [fsm, osm, pm] = await Promise.all([import('node:fs'), import('node:os'), import('node:path')]);
+    tmpFile = pm.join(osm.tmpdir(), 'ns_fqup_' + Date.now() + '_' + Math.floor(Math.random() * 1e6) + '.png');
+    fsm.copyFileSync(filePath, tmpFile); injPath = tmpFile;
+  } catch {}
+  const rmTmp = async () => { if (tmpFile) { try { (await import('node:fs')).unlinkSync(tmpFile); } catch {} tmpFile = null; } };
+  let ok = false;
+  for (const sel of selectors) {
+    try {
+      const r = await unzooRequest('/api/v1/set_input_files', { tab_id: Number(client.tabId), selector: sel, file_paths: [injPath] });
+      if (r && (r.success || r.data?.uploaded || r.data?.trusted)) { ok = true; break; }
+    } catch {}
+  }
+  return { ok, rmTmp };
+}
+
+// confirmCoverOverlay：番茄封面选择器是【全屏遮罩】(非 arco-modal 小弹窗)，确认常是【两步】：先“确认上传”、
+//   再出现橙色“确定”。confirmLabels 只精确匹配确认文案——绝不兜底点“最后一个/主按钮”，否则会误点同页的
+//   “立即修改”(提前保存) 或“取消”。先轮询等确认按钮点亮(=图被接受)，再循环点确认按钮直到遮罩关闭。
+//   返回 { accepted, closed }。accepted=false 说明图没被番茄接受（不合规/审核中）。
+async function confirmCoverOverlay(client, { confirmLabels = ['确认上传', '确定', '确认'], overlayTabText = '本地上传', waitTries = 16 } = {}) {
+  const CONFIRM_JS = `(function(){
+    function norm(t){return (t||'').replace(/\\s+/g,'');}
+    var labels=${JSON.stringify(confirmLabels)};
+    var pool=[].slice.call(document.querySelectorAll('button,[role=button],.arco-btn')).filter(function(e){return e.offsetParent!==null;});
+    var named=pool.filter(function(e){return labels.indexOf(norm(e.textContent))>=0;});
+    return named.find(function(e){return !(e.disabled||/disabled/.test(e.className));})||null;
+  })`;
+  const OVERLAY_OPEN_JS = `[].slice.call(document.querySelectorAll('*')).some(function(e){return (e.textContent||'').trim()===${JSON.stringify(overlayTabText)}&&e.offsetParent!==null&&e.children.length===0;})`;
+  let accepted = false;
+  for (let i = 0; i < waitTries; i++) {
+    accepted = await client.evaluate(`!!${CONFIRM_JS}()`);
+    if (accepted) break;
+    await client.sleep(900);
+  }
+  if (!accepted) return { accepted: false, closed: false };
+  const clickConfirm = `(function(){var el=${CONFIRM_JS}();if(!el)return false;try{el.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`;
+  for (let k = 0; k < 4; k++) {
+    const clicked = await client.evaluate(clickConfirm);
+    await client.sleep(2000);
+    if (!(await client.evaluate(OVERLAY_OPEN_JS))) break;                       // 遮罩已关 → 完成
+    if (!clicked && !(await client.evaluate(`!!${CONFIRM_JS}()`))) break;       // 没按钮可点了也退出，避免空转
+  }
+  return { accepted: true, closed: !(await client.evaluate(OVERLAY_OPEN_JS)) };
+}
+
+// ===== 更换番茄图书封面 =====
+// 把本地封面图推到番茄「作品信息」页。流程（实地研究得出）：
+//   book-info 页 → 点"修改"进编辑态 → "选择封面"开全屏遮罩 → "本地上传" → set_input_files 可信注入
+//   → 确认上传→确定(两步) → autoSubmit ? 点"立即修改"提交 : 停在"待提交"让用户手动确认。
+// 番茄封面竖版 3:4，用本地 cover.png(600×800) 正好。
+export async function changeFanqieCover({ bookId, coverPath, profilePath, autoSubmit = false, onLog } = {}) {
+  const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
+  if (!bookId) return { ok: false, error: '缺少番茄 bookId' };
+  if (!coverPath) return { ok: false, error: '缺少封面文件路径' };   // 文件存在性由调用方(server)校验，本模块不碰 fs
+  const client = new UnzooClient(profilePath || null, onLog || null, 'fanqienovel.com', '番茄');
+
+  const Q = (label) => JSON.stringify(label);
+  // 轮询等某文字的【可见】按钮出现
+  const waitText = async (label, tries = 15, gap = 1000) => {
+    for (let i = 0; i < tries; i++) {
+      const ok = await client.evaluate(`[].slice.call(document.querySelectorAll('button,div,span,a')).some(function(e){return (e.textContent||'').trim()===${Q(label)} && e.offsetParent!==null;})`);
+      if (ok) return true;
+      await client.sleep(gap);
+    }
+    return false;
+  };
+  // 合成点击某文字按钮（不弹文件框的普通按钮用这个够了）
+  const jsClick = async (label) => await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('button,div,span,a')).find(function(e){return (e.textContent||'').trim()===${Q(label)} && e.offsetParent!==null;});if(!b)return false;b.click();return true;})()`);
+  // 【可信点击】某文字按钮（打标记 + browser_click）——用于会弹文件框的"选择封面"
+  const trustedClick = async (label) => {
+    const marked = await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('button,div,span,a')).find(function(e){return (e.textContent||'').trim()===${Q(label)} && e.offsetParent!==null;});if(!b)return false;b.setAttribute('data-ns-cvclick','1');return true;})()`);
+    if (!marked) return false;
+    try { await client.click('[data-ns-cvclick="1"]'); }
+    finally { await client.evaluate(`(function(){var e=document.querySelector('[data-ns-cvclick="1"]');if(e)e.removeAttribute('data-ns-cvclick');})()`); }
+    return true;
+  };
+
+  try {
+    await client.getActiveTab();
+    log('打开番茄作品信息页…');
+    await client.navigate(`https://fanqienovel.com/main/writer/book-info/${bookId}?type=1`);
+    await client.sleep(2000);
+    // 强制刷新到干净态：navigate 若已在该页会跳过刷新，上一次编辑残留会让"修改"点了不进编辑态。
+    try { await client.reload(); } catch {}
+    await client.sleep(3000);
+    // 把标签页激活置前——番茄部分按钮的 handler 要页面有焦点才触发，否则 CDP 可信点击也会落空。
+    try { await unzooCallTool('tab_activate', { tab_id: String(client.tabId) }); } catch {}
+    await client.sleep(600);
+
+    // 可信点击文字按钮：先 scrollIntoView 再 CDP 真实点击。番茄按钮只认【可信点击】(合成/坐标点都不触发)，
+    // 且按钮可能在视口外(如底部第二个"修改")；which='first' 取最靠上的(封面那个"修改"在基础信息区顶部)。
+    // 点番茄按钮：在【元素本身】派发完整指针序列(pointerdown→…→click)。位置无关(不靠坐标)，实测对
+    // 修改/选择封面/本地上传/确定/立即修改 都触发。优先点真正的 <button>(同文字常有 span 子节点，点 span 不触发)。
+    const cdpClickText = async (txt, which = 'last') => {
+      const pick = which === 'first' ? 'els[0]' : 'els[els.length-1]';
+      return !!(await client.evaluate(`(function(){var all=[].slice.call(document.querySelectorAll('button,div[role=button],span,a')).filter(function(e){return (e.textContent||'').trim()===${Q(txt)}&&e.offsetParent!==null;});var btns=all.filter(function(e){return e.tagName==='BUTTON'||e.getAttribute('role')==='button';});var els=btns.length?btns:all;var el=${pick};if(!el)return false;try{el.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`));
+    };
+
+    // 1. 进编辑态：已在编辑态(有"选择封面")直接用；否则点顶部"修改"进入（可信点击；番茄编辑态刷新不重置，故容错）
+    const inEdit = await client.evaluate(`[].slice.call(document.querySelectorAll('button,div,span,a')).some(function(e){return (e.textContent||'').trim()==='选择封面' && e.offsetParent!==null;})`);
+    if (!inEdit) {
+      if (!(await waitText('修改'))) return { ok: false, error: '未找到"修改"按钮（未登录/页面没加载完/该书不可改）' };
+      for (let i = 0; i < 3 && !(await client.evaluate("[].slice.call(document.querySelectorAll('button,div,span')).some(function(e){return (e.textContent||'').trim()==='选择封面'&&e.offsetParent!==null;})")); i++) {
+        await cdpClickText('修改', 'first'); await client.sleep(2000);
+      }
+      log('进入编辑模式…');
+      if (!(await waitText('选择封面'))) return { ok: false, error: '进入编辑模式后未出现"选择封面"' };
+    } else {
+      log('已在编辑模式…');
+    }
+
+    // 2. 打开封面弹窗：点"选择封面"。⚠️番茄的按钮/上传触发器只认【完整指针事件序列】(pointerdown→
+    //    mousedown→pointerup→mouseup→click)——合成 .click()、CDP browser_click、坐标点击都【不触发】
+    //    (实测踩出来的坑)。故用 JS 派发完整序列点击番茄的按钮/tab。
+    const firePointer = async (txt) => await client.evaluate(`(function(){var btn=[].slice.call(document.querySelectorAll('button')).find(function(e){return (e.textContent||'').trim()===${Q(txt)}&&e.offsetParent!==null;});var el=btn;if(!el){var c=[].slice.call(document.querySelectorAll('div,span,a')).filter(function(e){return (e.textContent||'').trim()===${Q(txt)}&&e.offsetParent!==null;});el=c[c.length-1];}if(!el)return false;['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
+    log('打开番茄封面弹窗…');
+    let modalOpen = false;
+    for (let a = 0; a < 3 && !modalOpen; a++) {
+      await cdpClickText('选择封面');
+      for (let i = 0; i < 6; i++) {
+        if (await client.evaluate(`[].slice.call(document.querySelectorAll('*')).some(function(e){return (e.textContent||'').trim()==='本地上传'&&e.offsetParent!==null;})`)) { modalOpen = true; break; }
+        await client.sleep(800);
+      }
+    }
+    if (!modalOpen) return { ok: false, error: '没能打开番茄封面弹窗（未见"本地上传"），请重试。' };
+
+    // 3. 切到"本地上传"tab，并把该标签页激活置前
+    await cdpClickText('本地上传');
+    await client.sleep(1200);
+    try { await unzooCallTool('tab_activate', { tab_id: String(client.tabId) }); } catch {}
+
+    // 4. 等文件输入框出现
+    let hasInput = false;
+    for (let i = 0; i < 8; i++) {
+      if (await client.evaluate("document.querySelectorAll('input[type=file]').length>0")) { hasInput = true; break; }
+      await client.sleep(700);
+    }
+    if (!hasInput) return { ok: false, error: '未找到番茄封面上传文件框（本地上传弹窗没开好），请重试' };
+
+    // 5. 【可信注入】封面文件（共用助手：set_input_files，番茄唯一认的上传法）
+    log('注入封面文件（可信上传 set_input_files）…');
+    const { ok: injOk, rmTmp } = await injectTrustedCover(client, coverPath);
+    if (!injOk) { await rmTmp(); return { ok: false, error: 'set_input_files 注入未成功（Unzoo 版本可能不支持 /api/v1/set_input_files，需升级 Unzoo）' }; }
+
+    // 6-7. 两步确认（确认上传→确定）直到全屏遮罩关闭（共用助手）。
+    //    ⚠️ rmTmp 放确认之后——番茄异步读文件上传，删早了确认按钮永不点亮（坑）。
+    log('确认选图…');
+    const { accepted, closed } = await confirmCoverOverlay(client);
+    await rmTmp();
+    if (!accepted) return { ok: false, error: '封面已注入但番茄确认按钮未点亮（图可能不合规/未被接受，或该书封面正在审核中），请人工核对' };
+    if (!closed) return { ok: false, error: '封面确认后番茄选择遮罩未关闭（确认按钮可能变了），请人工核对' };
+
+    if (!autoSubmit) {
+      return { ok: true, semiManual: false, submitted: false, msg: '封面已上传并确认到「待提交」。去浏览器点「立即修改」保存即可（开「全自动提交」下次自动保存）。' };
+    }
+
+    // 8. 立即修改（保存到线上 · 不可逆）
+    log('保存封面（立即修改）…');
+    await cdpClickText('立即修改');
+    await client.sleep(3800);
+    const okToast = await client.evaluate("/修改成功|成功|已提交/.test((document.querySelector('.arco-message,[class*=message]')||{}).textContent||'')");
+    return { ok: true, semiManual: false, submitted: true, msg: okToast ? '✅ 番茄封面已更换并提交（修改成功，等番茄审核）' : '已点「立即修改」，请到浏览器确认结果' };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+// ===== 在番茄【创建一本新书】=====
+// 全自动：导航 /main/writer/create → 原生 setter 填 书名/男女频/主角名/简介 →
+//         CDP 可信点击 打开作品标签弹窗、选主分类卡片、确认 → 点「立即创建」→ 跳转后抓回 bookId。
+// autoSubmit=false 则填好停在表单，返回 semiManual（人工核对后自己点「立即创建」）。
+// 坑：Arco 受控输入要用原生 value setter；弹窗卡片/确认/立即创建 合成点击不触发，必须 CDP 可信点击。
+export async function createFanqieBook({ profilePath, title, channel = '男频', mainCategory, hero = '', hero2 = '', synopsis, coverPath = '', autoSubmit = true, onLog } = {}) {
+  const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
+  title = String(title || '').trim();
+  const intro = String(synopsis || '').trim();
+  const cat = String(mainCategory || '').trim();
+  if (!title) return { ok: false, error: '缺少书名' };
+  if (title.length > 15) return { ok: false, error: `书名「${title}」超过番茄上限(15字)` };
+  if (!cat) return { ok: false, error: '缺少主分类（如「历史脑洞」）' };
+  if (intro.length < 50) return { ok: false, error: `简介仅 ${intro.length} 字，番茄要求 50–500 字` };
+  if (intro.length > 500) return { ok: false, error: `简介 ${intro.length} 字，超过番茄上限(500字)` };
+  if (channel !== '男频' && channel !== '女频') channel = '男频';
+
+  const client = new UnzooClient(profilePath, onLog, 'fanqienovel.com', '番茄');
+  await client.ensureTabId();
+
+  // 原生 setter：填 Arco 受控 input/textarea（合成 input+change 触发 React 状态）
+  const SETTER = `function __sv(el,val){var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(pr,'value').set;s.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}`;
+
+  log('打开番茄「创建作品」页…');
+  await client.navigate('https://fanqienovel.com/main/writer/create');
+  await client.sleep(5000);
+  let ready = false;
+  for (let k = 0; k < 12; k++) {
+    if (await client.evaluate("!!document.querySelector('input[placeholder*=作品名称]')")) { ready = true; break; }
+    await client.sleep(800);
+  }
+  if (!ready) return { ok: false, error: '创建作品表单未加载（番茄改版/未登录/网络？）' };
+
+  // 1. 书名
+  log(`填书名《${title}》…`);
+  await client.evaluate(`(function(){${SETTER} var el=document.querySelector('input[placeholder*=作品名称]');if(el){el.focus();__sv(el,${JSON.stringify(title)});}return 1;})()`);
+  await client.sleep(400);
+  // 2. 男频/女频
+  await client.evaluate(`(function(){var m=[].slice.call(document.querySelectorAll('.arco-radio,label')).find(function(e){return (e.textContent||'').trim()===${JSON.stringify(channel)};});if(m){['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){m.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});}return 1;})()`);
+  await client.sleep(400);
+  // 3. 主角名
+  if (hero) { await client.evaluate(`(function(){${SETTER} var el=document.querySelector('input[placeholder*=主角名1]');if(el){el.focus();__sv(el,${JSON.stringify(String(hero).slice(0, 5))});}return 1;})()`); await client.sleep(300); }
+  if (hero2) { await client.evaluate(`(function(){${SETTER} var el=document.querySelector('input[placeholder*=主角名2]');if(el){el.focus();__sv(el,${JSON.stringify(String(hero2).slice(0, 5))});}return 1;})()`); await client.sleep(300); }
+  // 4. 简介
+  log(`填简介(${intro.length}字)…`);
+  await client.evaluate(`(function(){${SETTER} var el=document.querySelector('textarea');if(el){el.focus();__sv(el,${JSON.stringify(intro)});}return 1;})()`);
+  await client.sleep(500);
+
+  // 5. 作品标签弹窗 → 主分类卡片 → 确认（CDP 可信点击）
+  log(`选择主分类「${cat}」…`);
+  const selCoord = await client.evaluate("(function(){var s=[].slice.call(document.querySelectorAll('.arco-select,[class*=select]')).find(function(e){return /请选择作品标签/.test(e.textContent);});if(!s)return '';var r=s.getBoundingClientRect();return Math.round(r.x+30)+','+Math.round(r.y+r.height/2);})()");
+  if (!selCoord) return { ok: false, error: '未找到「作品标签」选择框' };
+  { const [x, y] = selCoord.split(',').map(Number); await client.cdpClick(x, y); }
+  await client.sleep(1600);
+  // 主分类卡片：番茄弹窗里每张分类卡为 .category-choose-item（含标题+描述）。优先按此类名匹配，兜底取含分类名的最小元素。
+  const cardCoord = await client.evaluate(`(function(){var name=${JSON.stringify(cat)};var els=[].slice.call(document.querySelectorAll('.category-choose-item')).filter(function(e){return (e.textContent||'').indexOf(name)>=0;});if(!els.length){els=[].slice.call(document.querySelectorAll('*')).filter(function(e){var t=e.textContent||'';return t.indexOf(name)>=0&&t.length<40;}).sort(function(a,b){return a.textContent.length-b.textContent.length;});}var c=els[0];if(!c)return '';var r=c.getBoundingClientRect();return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);})()`);
+  if (!cardCoord) return { ok: false, error: `标签弹窗里没找到主分类「${cat}」（频道选对了吗？男/女频分类不同）` };
+  { const [x, y] = cardCoord.split(',').map(Number); await client.cdpClick(x, y); }
+  await client.sleep(900);
+  const okCoord = await client.evaluate("(function(){var b=[].slice.call(document.querySelectorAll('button')).find(function(e){return (e.textContent||'').trim()==='确认';});if(!b)return '';var r=b.getBoundingClientRect();return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);})()");
+  if (okCoord) { const [x, y] = okCoord.split(',').map(Number); await client.cdpClick(x, y); }
+  await client.sleep(1400);
+
+  if (!autoSubmit) {
+    return { ok: true, semiManual: true, msg: `已在番茄填好《${title}》创建表单（${channel}·${cat}·简介${intro.length}字）。请到该浏览器核对后点「立即创建」。` };
+  }
+
+  // 6. 立即创建（不可逆）
+  log('点击「立即创建」…');
+  const createCoord = await client.evaluate("(function(){var b=[].slice.call(document.querySelectorAll('button')).find(function(e){return (e.textContent||'').trim()==='立即创建';});if(!b)return '';var r=b.getBoundingClientRect();return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);})()");
+  if (!createCoord) return { ok: false, error: '未找到「立即创建」按钮' };
+  { const [x, y] = createCoord.split(',').map(Number); await client.cdpClick(x, y); }
+
+  // 7. 等跳转 book-info/<id> 抓 bookId；期间若弹校验错误则报错
+  let bookId = null;
+  for (let k = 0; k < 15; k++) {
+    await client.sleep(1000);
+    const href = await client.evaluate('location.href');
+    const m = String(href || '').match(/book-info\/(\d+)/);
+    if (m) { bookId = m[1]; break; }
+    const err = await client.evaluate("(function(){var e=document.querySelector('.arco-message-error,[class*=message-error]');return e?(e.textContent||'').trim().slice(0,60):'';})()");
+    if (err) return { ok: false, error: '番茄拒绝创建：' + err };
+  }
+  if (!bookId) return { ok: false, error: '已点「立即创建」但未跳到作品页（可能有校验未过/网络慢），请到浏览器核对' };
+  log(`✅ 已在番茄创建《${title}》，bookId=${bookId}`, 'act');
+
+  // 8. 上传本地封面（番茄建书默认自动生成封面；有本地 cover.png 就换成我们的）。best-effort：
+  //    失败只告警、不影响“建书成功”——封面之后随时能用「更换番茄封面」补。复用换封面全流程(可信注入+两步确认+立即修改)。
+  let cover = null;
+  if (coverPath) {
+    log('上传本地封面到新书…', 'act');
+    try {
+      await client.sleep(1500);   // 等新书 book-info 页稳定
+      cover = await changeFanqieCover({ bookId, coverPath, profilePath, autoSubmit: true, onLog });
+      if (cover.ok) log('✅ 新书封面已上传' + (cover.submitted ? '并提交' : '（待提交，去浏览器点保存）'), 'act');
+      else log('新书封面上传未成功（可稍后用「更换番茄封面」重试）：' + (cover.error || ''), 'warn');
+    } catch (e) { cover = { ok: false, error: String(e.message || e) }; log('新书封面上传异常（不影响建书）：' + cover.error, 'warn'); }
+  }
+  return { ok: true, bookId, title, channel, mainCategory: cat, cover };
+}
+
+// ===== 把「书名实验」候选推到番茄「多书名实验·实验配置」（设置别名 + 逐个上传封面）=====
+// items: [{title, coverPath}]（coverPath 可空=该候选不传封面）。autoSubmit=false 默认：填好停在实验配置，
+//   让用户核对后自己点「开启实验」(不可逆)；autoSubmit=true 才自动开启。封面上传复用换封面的可信注入+两步确认。
+// ⚠️ 番茄门槛：20万字+/已签约/未完结，且该字数里程碑实验【未跑过】时才开放「实验配置」表单。不满足时本函数
+//   【不瞎点】，而是切到该书、把候选清单列出来、把页面留在多书名实验页，返回 semiManual 让人工配。
+//   （实验配置表单当前无处于实验期的书可实地观测→ step 3 表单填充为通用尽力实现，需在有资格的书上校准。）
+export async function pushNameExperiment({ bookId, bookTitle, items = [], profilePath, autoSubmit = false, onLog } = {}) {
+  const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
+  items = (items || []).filter(x => x && x.title);
+  if (!items.length) return { ok: false, error: '没有候选书名可推' };
+  const client = new UnzooClient(profilePath || null, onLog || null, 'fanqienovel.com', '番茄');
+  const Q = (s) => JSON.stringify(s);
+  // 完整指针序列点某文字元素（番茄按钮只认这个，合成 .click()/坐标点不触发）
+  const clickText = async (txt) => await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('button,div[role=button],span,a,li')).find(function(e){return (e.textContent||'').trim()===${Q(txt)}&&e.offsetParent!==null;});if(!b)return false;try{b.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
+  const SETTER = `function __sv(el,val){var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(pr,'value').set;s.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}`;
+
+  try {
+    await client.getActiveTab();
+    log('打开番茄「多书名实验」页…');
+    await client.navigate('https://fanqienovel.com/main/writer/name-experiment');
+    await client.sleep(2500);
+    try { await client.reload(); } catch {}
+    await client.sleep(3500);
+    try { await unzooCallTool('tab_activate', { tab_id: String(client.tabId) }); } catch {}
+    await client.sleep(600);
+
+    // 1. 确认/切换到目标书。「切换作品」打开的是【arco 抽屉 .book-switch-drawer】：每本书一行
+    //    .book-switch-drawer-list-item(.book-select，标题在 .book-select-info-title)，行内 radio 选中，
+    //    【必须】再点抽屉底部 .book-switch-drawer-footer 的「确定」(.arco-btn-primary) 才真正切过去
+    //    ——旧代码只点了标题文字节点、没选 radio 也没点确定(“没点击选择”)，故切不过去。
+    //    书名匹配要【去标点/空白归一化】：番茄显示的标题常与本地略有出入(如“国术：每日清算从不讲武德到武圣”少个逗号)。
+    const NORMJS = `function __nm(s){return (s||'').replace(/[\\s，,。：:！!？?、·—\\-]/g,'');}`;
+    const READ_SHOWN = `(function(){var t=[].slice.call(document.querySelectorAll('[class*=book-title],[class*=title]')).find(function(e){var s=(e.textContent||'').trim();return e.offsetParent!==null&&s.length>=3&&s.length<40&&!/多书名|多封面|封面推荐|实验/.test(s)&&!e.closest('[class*=drawer]');});return t?(t.textContent||'').trim():'';})()`;
+    const norm = (s) => String(s || '').replace(/[\s，,。：:！!？?、·—\-]/g, '');
+    const matches = (shown) => { const a = norm(shown), b = norm(bookTitle); return !!(a && b && (a.indexOf(b) >= 0 || b.indexOf(a) >= 0)); };
+    let shown = await client.evaluate(READ_SHOWN);
+    if (bookTitle && !matches(shown)) {
+      let inList = true;
+      for (let attempt = 0; attempt < 2 && !matches(shown); attempt++) {
+        log(`当前是《${shown || '?'}》，切换到《${bookTitle}》…`);
+        await clickText('切换作品');
+        await client.sleep(2000);
+        // 在抽屉里【点目标书那一行】(归一化匹配标题)选中它
+        const picked = await client.evaluate(`(function(){${NORMJS}var name=__nm(${Q(bookTitle)});var items=[].slice.call(document.querySelectorAll('.book-switch-drawer-list-item,.book-select')).filter(function(e){return e.offsetParent!==null;});var row=items.find(function(it){var t=it.querySelector('.book-select-info-title');return t&&__nm(t.textContent).indexOf(name)>=0;})||items.find(function(it){return __nm(it.textContent).indexOf(name)>=0;});if(!row)return false;try{row.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){row.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
+        if (!picked) { inList = false; break; }        // 列表里根本没这本书 → 不在可选范围，别再试
+        await client.sleep(800);
+        // 点抽屉底部「确定」确认切换（这一步旧代码漏了）
+        await client.evaluate(`(function(){var f=document.querySelector('.book-switch-drawer-footer,.arco-drawer-footer');var btn=f&&(f.querySelector('.arco-btn-primary')||[].slice.call(f.querySelectorAll('button')).find(function(b){return /确定|确认|切换/.test(b.textContent||'');}));if(!btn)return false;try{btn.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){btn.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
+        await client.sleep(2800);
+        shown = await client.evaluate(READ_SHOWN);
+      }
+      if (!matches(shown)) {
+        const why = inList
+          ? `切到《${bookTitle}》没成功（当前仍是《${shown || '?'}》）——已点选该书并确认，但页面没切过去，可能番茄抽屉改版/网络延迟，请重试或人工在「切换作品」里选它。`
+          : `《${bookTitle}》不在番茄「切换作品」列表里——多书名实验要求 20万字+/已签约/未完结，该书可能不满足。`;
+        log(why, 'warn');
+        return {
+          ok: true, semiManual: true, opened: true, switched: false,
+          msg: `${why}\n候选书名（够条件后可手动配）：\n` +
+            items.map((x, i) => `${i + 1}. ${x.title}${x.coverPath ? '  ← ' + x.coverPath : ''}`).join('\n'),
+        };
+      }
+      log(`已切到《${shown}》`, 'act');
+    }
+    const bookLabel = shown || bookTitle || '';
+
+    // 2. 找【配置实验】按钮（某个字数里程碑实验处于「待实验」时才有；已跑过/失效则无）。点开右侧「配置实验」抽屉。
+    const hasCfgBtn = await client.evaluate(`[].slice.call(document.querySelectorAll('button,[class*=btn]')).some(function(e){return (e.textContent||'').trim()==='配置实验'&&e.offsetParent!==null&&!(e.disabled||/disabled/.test(e.className));})`);
+    if (!hasCfgBtn) {
+      const state = await client.evaluate(`(function(){var t=document.body.innerText;if(/最优书名生效/.test(t))return '该书里程碑实验已结束（最优书名已生效），不能再配置';if(/实验中|进行中/.test(t))return '该书实验进行中，暂不能改配置';if(/不符合字数|已失效|未达/.test(t))return '未达字数里程碑（20万字/100万字实验尚未解锁「配置实验」）';return '未找到「配置实验」按钮（番茄可能改版，或该书暂不可配）';})()`);
+      log('番茄未开放「配置实验」：' + state, 'warn');
+      return {
+        ok: true, semiManual: true, opened: true, switched: true,
+        msg: `已在番茄打开《${bookLabel}》的多书名实验页。${state}。\n候选书名（够条件后可在「配置实验」里逐个添加，封面用下方路径）：\n` +
+          items.map((x, i) => `${i + 1}. ${x.title}${x.coverPath ? '  ← ' + x.coverPath : ''}`).join('\n'),
+      };
+    }
+    log('打开「配置实验」…');
+    await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('button,[class*=btn]')).find(function(e){return (e.textContent||'').trim()==='配置实验'&&e.offsetParent!==null&&!(e.disabled||/disabled/.test(e.className));});if(b)['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return !!b;})()`);
+    let drawerOpen = false;
+    for (let i = 0; i < 8; i++) { if (await client.evaluate("!!document.querySelector('input[placeholder*=书名]')")) { drawerOpen = true; break; } await client.sleep(700); }
+    if (!drawerOpen) return { ok: false, error: '点了「配置实验」但配置抽屉没打开（番茄改版/加载慢），请重试' };
+
+    // 3. 逐个候选：确保有第 i 个【实验组】(.ne-config-item，不含 -adder) → 填书名(≤15字) → 点该组封面框传封面。
+    //    实验组封面框点开的是【与换封面同一个全屏遮罩】(AI封面/本地上传 tab)，故复用 injectTrustedCover+confirmCoverOverlay。
+    const GROUPS_JS = `[].slice.call(document.querySelectorAll('.ne-config-item')).filter(function(g){return !/adder/.test(g.className)&&g.querySelector('input');})`;
+    log(`开始配置 ${items.length} 个实验书名（含封面）…`, 'act');
+    let done = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const title = String(it.title).slice(0, 15);
+      log(`(${i + 1}/${items.length}) 实验组${i + 1}：《${title}》…`);
+      // 3a. 确保第 i 组存在：不够就点「添加实验组」(.ne-config-item-adder)
+      const gc = await client.evaluate(`(${GROUPS_JS}).length`);
+      if (i >= gc) {
+        await client.evaluate(`(function(){var a=document.querySelector('.ne-config-item-adder');if(!a)return false;['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){a.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
+        await client.sleep(1000);
+      }
+      // 3b. 填第 i 组书名（原生 setter 触发 React 状态）
+      const nameOk = await client.evaluate(`(function(){${SETTER} var g=(${GROUPS_JS})[${i}];if(!g)return false;var inp=g.querySelector('input');if(!inp)return false;inp.focus();__sv(inp,${Q(title)});return true;})()`);
+      if (!nameOk) { log(`《${title}》没找到第${i + 1}组书名输入框`, 'warn'); continue; }
+      await client.sleep(500);
+      // 3c. 传第 i 组封面：点该组封面框 → 遮罩 → 本地上传 → 可信注入 → 两步确认
+      if (it.coverPath) {
+        const opened = await client.evaluate(`(function(){var g=(${GROUPS_JS})[${i}];if(!g)return false;var box=g.querySelector('.ne-config-item-body-cover-add')||g.querySelector('.ne-config-item-body-cover')||g.querySelector('[class*=cover]');if(!box)return false;['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){box.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
+        if (opened) {
+          await client.sleep(1500);
+          // 切到「本地上传」tab
+          await client.evaluate(`(function(){var t=[].slice.call(document.querySelectorAll('*')).find(function(e){return (e.textContent||'').trim()==='本地上传'&&e.offsetParent!==null&&e.children.length===0;});if(t)['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(x){t.dispatchEvent(new MouseEvent(x,{bubbles:true,cancelable:true,view:window}));});return !!t;})()`);
+          await client.sleep(1000);
+          let hasInput = false;
+          for (let k = 0; k < 8; k++) { if (await client.evaluate("document.querySelectorAll('input[type=file]').length>0")) { hasInput = true; break; } await client.sleep(700); }
+          if (hasInput) {
+            const { ok: injOk, rmTmp } = await injectTrustedCover(client, it.coverPath);
+            const { accepted, closed } = await confirmCoverOverlay(client);
+            await rmTmp();
+            if (injOk && accepted && closed) log(`《${title}》封面已传`);
+            else log(`《${title}》封面未完成(注入${injOk}/接受${accepted}/关闭${closed})`, 'warn');
+          } else { log(`《${title}》没出现封面文件框`, 'warn'); }
+        } else { log(`《${title}》没找到第${i + 1}组封面入口`, 'warn'); }
+      }
+      done++;
+    }
+    log(`已填入 ${done}/${items.length} 个实验书名`, 'act');
+
+    if (!autoSubmit) {
+      return { ok: true, semiManual: true, submitted: false, filled: done, msg: `已把 ${done} 个候选书名${items.some(x => x.coverPath) ? '+封面' : ''}填入番茄《${bookLabel}》的「配置实验」抽屉（待提交）。请到浏览器核对无误后点「提交」保存（开启实验·不可逆）。` };
+    }
+    // 4. 提交（抽屉底部主按钮「提交」·不可逆）
+    log('提交实验配置…');
+    await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('.arco-drawer-footer button,[class*=footer] button,.arco-btn-primary')).find(function(e){return e.offsetParent!==null&&(e.textContent||'').trim()==='提交'&&!(e.disabled||/disabled/.test(e.className));});if(!b)return false;['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
+    await client.sleep(2800);
+    const okToast = await client.evaluate("/成功|已提交|已开启/.test((document.querySelector('.arco-message,[class*=message]')||{}).textContent||'')");
+    return { ok: true, submitted: true, filled: done, msg: okToast ? '✅ 多书名实验已提交（等番茄跑 A/B）' : '已点「提交」，请到浏览器确认结果' };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
 }
 
 export { UnzooClient, FanqiePublisher, maxChapterNumInText };

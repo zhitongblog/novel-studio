@@ -15,6 +15,48 @@
 // 三个具体站点适配器实现见 ./qwen.mjs / ./chatgpt.mjs / ./claude.mjs。
 // 由于无法联网实测真实 DOM，选择器均为「最合理猜测 + // TODO 校准」，后续对着真实页面改选择器即可。
 
+// ===== 回答定位哨兵 =====
+// 网页版写作把「上下文包 + 严格输出格式指令」整段发进聊天框。我们【不依赖各站点脆弱的
+// 回答容器 class】来抓回答——而是用两个「哨兵串」在整页文本里切出「最新一条回答」：
+//   - FORMAT_SENTINEL：指令段开头（用户气泡里必然出现）
+//   - TAIL_SENTINEL   ：指令段最后一行（指令与回答的分界）
+// 取「最后一次出现 TAIL_SENTINEL 之后」的文本 = 本轮刚发的 prompt 之后的内容 = 最新回答。
+// 这样：① 选择器错了也能抓到；② 天然排除历史批次（在更早的哨兵之前）；③ 排除指令里的示例块。
+// buildFormatInstruction（webwriter.mjs）里必须原样包含这两串，改词时一并改这里。
+export const FORMAT_SENTINEL = '输出格式（本次是网页对话';
+export const TAIL_SENTINEL = '除这些带分隔符的章节块外';
+
+// 抓「最新一条回答」的纯文本。selector 命中且文本实质、且不含指令哨兵 → 用容器文本；
+// 否则回退到「整页文本里最后一个 TAIL_SENTINEL 之后」的片段（选择器无关、稳）。
+export async function grabLatestAnswerText(client, selector = '') {
+  return await client.evaluate(`
+    (function(){
+      const TAIL = ${JSON.stringify(TAIL_SENTINEL)};
+      const FMT  = ${JSON.stringify(FORMAT_SENTINEL)};
+      const sel  = ${JSON.stringify(selector || '')};
+      // 1) 优先用回答容器选择器（命中、文本足够长、且不含指令哨兵才采信）
+      if (sel) {
+        try {
+          const nodes = document.querySelectorAll(sel);
+          if (nodes && nodes.length) {
+            const last = nodes[nodes.length - 1];
+            const t = (last.innerText || last.textContent || '');
+            const clean = t.replace(/\\s/g, '');
+            if (clean.length > 100 && t.indexOf(FMT) < 0) return t;
+          }
+        } catch (e) {}
+      }
+      // 2) 兜底：整页文本，取最后一次 TAIL 之后（= 本轮 prompt 之后 = 最新回答）
+      const body = (document.body && document.body.innerText) || '';
+      let at = body.lastIndexOf(TAIL);
+      if (at >= 0) return body.slice(at + TAIL.length);
+      at = body.lastIndexOf(FMT);
+      if (at >= 0) return body.slice(at + FMT.length);
+      return body;
+    })()
+  `);
+}
+
 // 命中这些关键词判定为「不可继续」（额度/登录/人机验证），上层应优雅停并提示。
 export const BLOCK_KEYWORDS = [
   '已达上限', '达到上限', '额度已用', '免费额度', '本次对话已达',
@@ -91,7 +133,7 @@ export async function ensureOnSite(client, adapter, { onLog = () => {} } = {}) {
   await client.getActiveTab();          // 锁定/自启该账号标签页
   let href = '';
   try { href = await client.evaluate('location.href'); } catch {}
-  const host = adapterHost(adapter.url);
+  const host = adapter.host || adapterHost(adapter.url);
   if (!href || !String(href).includes(host)) {
     onLog({ level: 'info', msg: `网页版[${adapter.name}]：导航到 ${adapter.url}` });
     await client.navigate(adapter.url);

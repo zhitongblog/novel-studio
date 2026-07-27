@@ -7,30 +7,45 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, setBookPublish, setBookFanqieStatus, setBookWriteMode } from './books.mjs';
+import { CONFIG_DIR } from './paths.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, setBookPublish, setBookFanqieStatus, setBookWriteMode, bookStats } from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
-import { detectAll } from './models.mjs';
+import { detectAll, getModel } from './models.mjs';
 import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { startWriting } from './writer.mjs';
 import { runStateless } from './statelessWriter.mjs';
 import { runWebWrite, getAdapter } from './webwriter.mjs';
+import { runApiWrite, isApiProvider } from './apiwriter.mjs';
+import { API_PROVIDERS, providerConfigured } from './apichat.mjs';
+import { brainstorm, writeChapterInWindow, isCowriteModel, COWRITE_MODELS } from './cowrite.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
-import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot } from './attach.mjs';
+import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
-import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction } from './planner.mjs';
+import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, resolveGenModel } from './planner.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildEndingRenudgeInstruction } from './editor.mjs';
 import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
-import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish } from './fanqie.mjs';
+import { generateVolumeName, existingVolName } from './volname.mjs';
+import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment } from './fanqie.mjs';
 import { getCompletionReport, runFinaleClosure, locateCompletion, buildCompletionNote } from './finale.mjs';
 import { previewFanqieImport, importFromFanqie } from './import_fanqie.mjs';
 import { generateCoverBg, buildArtPrompt } from './imagegen.mjs';
+import { generateNameExperiment, readNameExperiment } from './nameexp.mjs';
+import { generateCoverViaChatGPT, grabCoverFromChatGPT, buildChatGptCoverPrompt } from './covergen_web.mjs';
 
 const UI_DIR = path.resolve(fileURLToPath(import.meta.url), '..', '..', 'ui');
+
+// ChatGPT 网页版生成封面是慢活（2~4 分钟）→ 后台跑，前端轮询状态。slug -> {status,url,error,msg}
+const coverJobs = new Map();
+// 推送封面到番茄（换封面）后台任务。slug -> {status,submitted,error,msg}
+const fanqieCoverJobs = new Map();
+const fanqieCreateJobs = new Map();
+const nameExpJobs = new Map();
+const nameExpPushJobs = new Map();   // 书名实验「推到番茄」job
 
 // 每本书的运行时状态（仅在 serve 进程内）
 const rt = new Map(); // slug -> { logs:[], clients:Set<res>, streamer, session }
@@ -52,7 +67,32 @@ function broadcast(slug, event, data) {
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json' };
 
+// —— 无状态写作的【断电续跑】持久化 ——
+// 无状态模式没有 Unterm 窗口，引擎一旦重启/崩溃，内存里的 runStateless 循环随之消失，
+// 长驻模式能被 reattachLiveSessions/看门狗接回、无状态却会【静默停掉】（用户 22:05 崩溃丢了两本）。
+// 既然无状态已是默认写作方式，就把"正在跑哪些书"落盘，引擎启动时自动接着跑。
+const STATELESS_ACTIVE_FILE = path.join(CONFIG_DIR, 'stateless-active.json');
+function readStatelessActive() {
+  try { return JSON.parse(fs.readFileSync(STATELESS_ACTIVE_FILE, 'utf8')) || {}; } catch { return {}; }
+}
+function writeStatelessActive(map) {
+  try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); fs.writeFileSync(STATELESS_ACTIVE_FILE, JSON.stringify(map, null, 2)); } catch {}
+}
+function markStatelessActive(slug, info) {
+  const map = readStatelessActive(); map[slug] = { ...info, t: Date.now() }; writeStatelessActive(map);
+}
+function clearStatelessActive(slug) {
+  const map = readStatelessActive(); if (slug in map) { delete map[slug]; writeStatelessActive(map); }
+}
+
 export function runServer(port = 8787) {
+  // 引擎是长驻进程，托管所有写作会话/autopilot——绝不能被一条野生 socket error（写到已关的 pane / 断开的 SSE 客户端）
+  // 或未捕获 promise 拒绝整个拖崩（一崩全崩：图书预览/阅读/发布/写作都没了）。这里兜底记录、保持存活。
+  if (!globalThis.__nsEngineGuarded) {
+    globalThis.__nsEngineGuarded = true;
+    process.on('uncaughtException', (e) => { try { console.error('[engine] uncaughtException(已忽略保活):', e?.stack || e?.message || e); } catch {} });
+    process.on('unhandledRejection', (e) => { try { console.error('[engine] unhandledRejection(已忽略保活):', e?.message || e); } catch {} });
+  }
   const server = http.createServer(async (req, res) => {
     // CORS（Tauri webview 跨源调用）
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -75,6 +115,8 @@ export function runServer(port = 8787) {
   server.listen(port, '127.0.0.1', () => {
     console.log(`Novel Studio engine 已启动: http://127.0.0.1:${port}`);
     setTimeout(reattachLiveSessions, 1500);
+    setTimeout(() => { resumeStatelessRuns().catch(e => console.error('[engine] resumeStatelessRuns:', e?.message || e)); }, 2500);
+    startOrphanWatchdog();
   });
   return server;
 }
@@ -83,12 +125,138 @@ export function runServer(port = 8787) {
 async function reattachLiveSessions() {
   const cfg = loadConfig();
   for (const s of listSessions()) {
-    if (rt.get(s.slug)?.session) continue;
+    if (rt.get(s.slug)?.session?.autopilot?.running) continue;   // 只有【活着的】autopilot 才跳过
     try {
       const h = await attachAutopilot(s.slug, cfg, (e) => pushLog(s.slug, e), mkFresh(s.slug, cfg));
       rtOf(s.slug).session = { autopilot: h.autopilot, mcp: h.mcp, reattached: true };
       pushLog(s.slug, { msg: '引擎启动 → 已重新挂载 autopilot 继续监控' });
     } catch (e) { /* 会话可能已死，listSessions 会自动清理 */ }
+  }
+}
+
+// 【孤儿窗口看门狗】：写作窗口可能在崩溃/重启/重开后丢了 autopilot（在册但没人监控）→ 静默卡死（霍元甲卡5天的根因）。
+// 每 60s 巡检：凡是在册会话没挂 autopilot 的，补挂一个（新代码带审稿门/完本门处理器）；死窗口 attach 会失败自动跳过。
+function startOrphanWatchdog() {
+  if (globalThis.__nsOrphanWatchdog) return;
+  globalThis.__nsOrphanWatchdog = setInterval(async () => {
+    let cfg; try { cfg = loadConfig(); } catch { return; }
+    for (const s of listSessions()) {
+      let st = rt.get(s.slug);
+      const ap = st?.session?.autopilot;
+      // ⚠️ 关键：不能只看 autopilot【对象是否存在】，要看它【是否还活着(running)】。
+      // 之前 bug：autopilot 在会话慢启动/启动报错时 stop() 掉了(running=false)，但对象还挂在 rt.session 上，
+      // 看门狗以为"有人盯着"就不补挂 → 窗口其实无人应答、卡在 Yes/No 门里没人点(圣女 csld 卡死的根因)。
+      if (!ap || !ap.running) {
+        try { st?.session?.mcp?.close?.(); } catch {}                 // 清掉停掉的旧连接，避免泄漏
+        try {
+          const h = await attachAutopilot(s.slug, cfg, (e) => pushLog(s.slug, e), mkFresh(s.slug, cfg));
+          rtOf(s.slug).session = { ...(st?.session || {}), autopilot: h.autopilot, mcp: h.mcp, reattached: true };
+          pushLog(s.slug, { level: 'act', msg: ap ? '🐕 看门狗：写作窗口的 autopilot 已停掉/掉线 → 重新补挂继续盯' : '🐕 看门狗：发现写作窗口无人监控 → 已补挂 autopilot 继续盯' });
+          st = rt.get(s.slug);
+        } catch { continue; /* 窗口已死或连不上 → 跳过，下一轮再看 */ }
+      }
+      // 状态驱动审稿门：不阻塞主循环（fire-and-forget，内部 dedup 防重入）
+      checkOutlineGate(s.slug, cfg).catch(() => {});
+    }
+  }, 60000);
+  globalThis.__nsOrphanWatchdog.unref?.();
+}
+
+// 启动一次无状态写作（后台跑、日志推 SSE、登记 rt + 落盘 stateless-active 供崩溃后自愈）。
+// 供 /api/book/stateless-start 端点与引擎启动时的 resumeStatelessRuns 共用同一条路径。
+function startStatelessRun(book, { model, batches = 1, untilTarget = false, cfg }) {
+  const slug = book.slug;
+  const control = { stopped: false };
+  rtOf(slug).statelessRun = control;
+  rtOf(slug).logs = [];
+  markStatelessActive(slug, { book: book.title || slug, model, batches, untilTarget });
+  pushLog(slug, { level: 'act', msg: `▶ 无状态省钱模式启动（模型 ${model}，${untilTarget ? '写到目标章数' : batches + ' 批'}）` });
+  runStateless({
+    book, model, cfg, batches, untilTarget, control,
+    onLog: (e) => pushLog(slug, { ...e, source: e.source || 'stateless' }),
+    onReachedTarget: () => { try { maybeAutoPublish(getBook(slug) || book, { cfg, onLog: (e) => pushLog(slug, { ...e }) }); } catch {} },
+  })
+    .catch(e => pushLog(slug, { level: 'error', source: 'stateless', msg: '无状态写作异常：' + e.message }))
+    .finally(() => {
+      const st = rt.get(slug); if (st) st.statelessRun = null;
+      clearStatelessActive(slug);   // 正常/停止结束 → 从"待自愈清单"移除；崩溃时不会执行到这里，故重启会自愈
+      broadcast(slug, 'stopped', { stateless: true });
+      pushLog(slug, { level: 'act', msg: '■ 无状态写作已结束' });
+    });
+  return { ok: true, started: true, mode: 'stateless', untilTarget, batches };
+}
+
+// 引擎(重)启动时：把上次崩溃/被杀时仍在跑的无状态写作接着跑起来。
+// 只自愈"落盘登记了、但当前既没在跑无状态、也没有长驻窗口"的书；未达目标才续。
+async function resumeStatelessRuns() {
+  const map = readStatelessActive();
+  const slugs = Object.keys(map);
+  if (!slugs.length) return;
+  let cfg; try { cfg = loadConfig(); } catch { return; }
+  for (const slug of slugs) {
+    const info = map[slug] || {};
+    const book = getBook(slug);
+    if (!book) { clearStatelessActive(slug); continue; }
+    if (sessionLive(slug)) { clearStatelessActive(slug); continue; }           // 已被长驻模式接管 → 放弃自愈
+    if (rtOf(slug).statelessRun && !rtOf(slug).statelessRun.stopped) continue;  // 已经在跑
+    // 已达目标章数就别再拉起来了
+    const target = book.targetChapters || 0;
+    if (target > 0) { try { if (bookStats(book).chapters >= target) { clearStatelessActive(slug); continue; } } catch {} }
+    const model = info.model || book.model || cfg.defaultModel;
+    const untilTarget = info.untilTarget === true || (target > 0 && info.batches == null);
+    const batches = Math.max(1, parseInt(info.batches, 10) || 1);
+    try {
+      startStatelessRun(book, { model, batches, untilTarget, cfg });
+      pushLog(slug, { level: 'act', msg: '🔁 引擎重启 → 自动接续上次未完成的无状态写作' });
+    } catch (e) { pushLog(slug, { level: 'warn', msg: '无状态写作自愈失败：' + e.message }); }
+  }
+}
+
+// 【状态驱动·自动过门】治"autopilot 读屏识别门天生脆"：看门狗读一次窗口屏幕，只要出现明确门信号
+// （sentinel【大纲待审：卷N】或大白话"缺 大纲审稿-卷N / 不能动笔"）且审稿文件不存在 → 直接用 codex 生成审稿
+// （editor 里失败会自动放行），再把"据审稿修订并继续"指令送进窗口。绝不打扰正常写作的书（没门信号就不动）。
+const _gateHandled = new Map();   // slug -> Set，防重复处理同一 scope
+async function checkOutlineGate(slug, cfg) {
+  const st = rt.get(slug);
+  const mcp = st?.session?.mcp;
+  const paneId = st?.session?.autopilot?.paneId;
+  if (!mcp || paneId == null) return;
+  let tail = '';
+  try {
+    const scr = await mcp.screenText(paneId);
+    tail = (typeof scr === 'string' ? scr : '').split(/\r?\n/).filter(l => l.trim()).slice(-40).join('\n');
+  } catch { return; }
+  // 提取"待审卷"
+  let scope = null;
+  const sm = tail.match(/【大纲待审[:：]\s*([^】\n]+)】/);
+  if (sm) scope = sm[1].trim();
+  else {
+    const pm = tail.match(/大纲审稿[-－]?\s*(卷\s*[0-9零一二三四五六七八九十百]+)/);
+    if (pm && /(需要等|缺|没有|尚未|还没|不能[动开]笔|无法继续|才能(继续|写))/.test(tail)) scope = pm[1].replace(/\s+/g, '');
+  }
+  if (!scope) return;
+  const book = getBook(slug); if (!book) return;
+  const safe = scope.replace(/[\\/:*?"<>|]/g, '_');
+  const reviewFile = path.join(book.dir, 'reviews', `大纲审稿-${safe}.md`);
+  const handled = _gateHandled.get(slug) || new Set();
+  _gateHandled.set(slug, handled);
+  if (fs.existsSync(reviewFile)) {
+    // 审稿已在 → 门其实已过、作者卡着没回头 → 催一次让它据审稿修订并继续（每 scope 只催一次）
+    if (handled.has(scope + ':nudge')) return;
+    handled.add(scope + ':nudge');
+    try { await sendToBook(slug, buildReviseInstruction(book, scope, reviewFile), cfg); pushLog(slug, { level: 'act', msg: `🐕 看门狗：${scope}审稿已在 → 已催作者据此修订并继续写作` }); } catch {}
+    return;
+  }
+  if (handled.has(scope + ':gen')) return;   // 正在生成，勿重入
+  handled.add(scope + ':gen');
+  pushLog(slug, { level: 'act', msg: `🐕 看门狗：检测到卡在【${scope}大纲审稿门】→ 自动生成审稿（codex）并放行…` });
+  try {
+    const r = await reviewOutline({ book, scope, cfg, authorModel: book.model || cfg.defaultModel, onLog: (e) => pushLog(slug, { ...e, source: 'editor' }) });
+    await sendToBook(slug, buildReviseInstruction(book, scope, r.file), cfg);
+    pushLog(slug, { level: 'act', msg: `🐕 看门狗：${scope}审稿已生成（${r.editorModel}）→ 已让作者据此修订并继续写作` });
+  } catch (e) {
+    pushLog(slug, { level: 'warn', msg: `看门狗自动过门失败：${e.message}（下一轮重试）` });
+    handled.delete(scope + ':gen');   // 允许下一轮重试
   }
 }
 
@@ -99,14 +267,24 @@ async function api(p, req, res, u) {
       const book = getBook(u.searchParams.get('book'));
       const f = book && path.join(book.dir, 'cover.png');
       if (!f || !fs.existsSync(f)) { res.writeHead(404); return res.end('no cover'); }
-      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache' });
+      // 【关键】带 CORS 头：前端 <img crossOrigin=anonymous> 画到 canvas 后才不会"污染"画布，
+      // 否则 canvas.toDataURL() 会抛 SecurityError → 保存封面失败（尤其带 AI 底图时）。
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });
       return fs.createReadStream(f).pipe(res);
     }
     if (p === '/api/book/cover-bg') {   // AI 生成的封面底图（未叠字），给前端 canvas 当背景
       const book = getBook(u.searchParams.get('book'));
       const f = book && path.join(book.dir, 'cover_bg.png');
       if (!f || !fs.existsSync(f)) { res.writeHead(404); return res.end('no bg'); }
-      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache' });
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });
+      return fs.createReadStream(f).pipe(res);
+    }
+    if (p === '/api/book/exp-image') {   // 书名实验里某个候选的封面底图（experiment/NN.png）
+      const book = getBook(u.searchParams.get('book'));
+      const rel = path.basename(u.searchParams.get('file') || '');   // 只取文件名，防目录穿越
+      const f = book && /^[\w.-]+\.png$/.test(rel) && path.join(book.dir, 'experiment', rel);
+      if (!f || !fs.existsSync(f)) { res.writeHead(404); return res.end('no img'); }
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });
       return fs.createReadStream(f).pipe(res);
     }
     if (p === '/api/bootstrap') return json(res, 200, bootstrap(cfg));
@@ -152,13 +330,18 @@ async function api(p, req, res, u) {
     if (p === '/api/books') return json(res, 200, withUsage(listBooksWithStats()));
     if (p === '/api/sessions') return json(res, 200, sessionsInfo());
     if (p === '/api/usage') {
+      const usage = loadUsage();
       const books = {};
-      for (const b of listBooksWithStats()) { const t = bookTokens(b); if (t) books[b.slug] = { total: t, sessions: {} }; }
+      for (const b of listBooksWithStats()) {
+        const t = bookTokens(b);                                   // codex/claude 订阅制 token（真实日志优先）
+        const apiU = (usage.books[b.slug] && usage.books[b.slug].api) || null;  // API 付费用量+成本
+        if (t || apiU) books[b.slug] = { total: t, sessions: {}, api: apiU };
+      }
       return json(res, 200, { books });
     }
     if (p === '/api/models') return json(res, 200, detectAll());
     if (p === '/api/styles') return json(res, 200, STYLES);
-    if (p === '/api/config') return json(res, 200, { ...cfg, gemini: { ...cfg.gemini, apiKey: cfg.gemini?.apiKey ? '***已设置***' : '', hasKey: !!cfg.gemini?.apiKey } });
+    if (p === '/api/config') return json(res, 200, maskConfig(cfg));
     if (p === '/api/logs') { const slug = u.searchParams.get('book'); return json(res, 200, rtOf(slug).logs); }
     return json(res, 404, { error: 'not found' });
   }
@@ -300,9 +483,228 @@ async function api(p, req, res, u) {
         return json(res, 200, { ok: true, prompt: buildArtPrompt(book) });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
-    if (p === '/api/config/update') {   // 保存设置（如 Gemini key / 代理）
-      try { const next = updateConfig(body.patch || {}); const safe = { ...next, gemini: { ...next.gemini, apiKey: next.gemini?.apiKey ? '***已设置***' : '' } }; return json(res, 200, { ok: true, config: safe }); }
-      catch (e) { return json(res, 400, { error: e.message }); }
+    if (p === '/api/book/gen-cover-chatgpt') {   // 用【已登录的 ChatGPT(Pro)】网页版生成封面底图（免费、慢，后台跑）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
+        if (!profilePath) return json(res, 400, { error: '请先选一个【已登录 ChatGPT】的浏览器账号' });
+        const slug = book.slug;
+        const cur = coverJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        coverJobs.set(slug, { status: 'running', msg: '正在打开 ChatGPT…' });
+        const onLog = (e) => { const j = coverJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'cover' }); };
+        generateCoverViaChatGPT(book, { prompt: body.prompt, profilePath, onLog })
+          .then((r) => {
+            coverJobs.set(slug, { status: 'done', url: '/api/book/cover-bg?book=' + encodeURIComponent(slug) + '&t=' + Date.now(), prompt: r.prompt, w: r.w, h: r.h, msg: '封面已生成' });
+            pushLog(slug, { level: 'act', source: 'cover', msg: '✅ ChatGPT 封面底图已生成' });
+          })
+          .catch((e) => {
+            coverJobs.set(slug, { status: 'error', error: e.message, msg: e.message });
+            pushLog(slug, { level: 'error', source: 'cover', msg: 'ChatGPT 生成封面失败：' + e.message });
+          });
+        return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/grab-cover-chatgpt') {   // 手动【抓取封面】：从当前 ChatGPT 页把已生成好的图抓下来（不再生成，快）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
+        if (!profilePath) return json(res, 400, { error: '请先选一个【已登录 ChatGPT】的浏览器账号' });
+        const slug = book.slug;
+        const cur = coverJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        coverJobs.set(slug, { status: 'running', msg: '正在抓取当前 ChatGPT 页的图…' });
+        const onLog = (e) => { const j = coverJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'cover' }); };
+        grabCoverFromChatGPT(book, { profilePath, onLog })
+          .then((r) => {
+            coverJobs.set(slug, { status: 'done', url: '/api/book/cover-bg?book=' + encodeURIComponent(slug) + '&t=' + Date.now(), w: r.w, h: r.h, msg: '封面已抓取' });
+            pushLog(slug, { level: 'act', source: 'cover', msg: '✅ 已抓取 ChatGPT 封面底图' });
+          })
+          .catch((e) => {
+            coverJobs.set(slug, { status: 'error', error: e.message, msg: e.message });
+            pushLog(slug, { level: 'error', source: 'cover', msg: '抓取封面失败：' + e.message });
+          });
+        return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/gen-cover-status') {   // 轮询 ChatGPT 生成/抓取封面进度
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const j = coverJobs.get(book.slug) || { status: 'idle' };
+        return json(res, 200, { ok: true, ...j });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/push-fanqie-cover') {   // 把本地 cover.png 推到番茄换封面（autoSubmit:false 停在待提交）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const pc = book.publish || {};
+        if (!pc.profilePath || !pc.bookId) return json(res, 400, { error: '该书未配番茄账号/bookId（先在发布里配好账号并选中番茄书籍）' });
+        const coverPath = path.join(book.dir, 'cover.png');
+        if (!fs.existsSync(coverPath)) return json(res, 400, { error: '还没有封面 cover.png，请先在「生成封面」里做好并点"保存到书"' });
+        const autoSubmit = !!body.autoSubmit;
+        const slug = book.slug;
+        const cur = fanqieCoverJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        fanqieCoverJobs.set(slug, { status: 'running', msg: '开始…' });
+        const onLog = (e) => { const j = fanqieCoverJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'fanqie' }); };
+        // 半自动：番茄新版上传器只认真实文件框选图，自动化只能把弹窗打开到「本地上传」，最后人工选图确认。
+        changeFanqieCover({ bookId: pc.bookId, coverPath, profilePath: pc.profilePath, autoSubmit, onLog })
+          .then((r) => {
+            if (r.ok) {
+              const msg = r.semiManual ? (r.msg + '\ncover.png 路径：' + coverPath) : r.msg;
+              fanqieCoverJobs.set(slug, { status: 'done', submitted: !!r.submitted, semiManual: !!r.semiManual, coverPath, msg });
+              pushLog(slug, { level: 'act', source: 'fanqie', msg: '✅ ' + msg });
+            } else { fanqieCoverJobs.set(slug, { status: 'error', error: r.error, msg: r.error }); pushLog(slug, { level: 'error', source: 'fanqie', msg: '番茄换封面失败：' + r.error }); }
+          })
+          .catch((e) => { fanqieCoverJobs.set(slug, { status: 'error', error: e.message, msg: e.message }); pushLog(slug, { level: 'error', source: 'fanqie', msg: '番茄换封面异常：' + e.message }); });
+        return json(res, 200, { ok: true, started: true, autoSubmit });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/push-fanqie-cover-status') {   // 轮询番茄换封面进度
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const j = fanqieCoverJobs.get(book.slug) || { status: 'idle' };
+        return json(res, 200, { ok: true, ...j });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/fanqie/create-book') {   // 在番茄【创建一本新书】：填表→立即创建→抓回 bookId 并写入发布配置
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const profilePath = (body.profilePath || (book.publish || {}).profilePath || '').trim();
+        if (!profilePath) return json(res, 400, { error: '请先选择 Unzoo 账号（发布弹窗顶部）' });
+        const title = String(body.title || book.title || '').trim();
+        const synopsis = String(body.synopsis || book.synopsis || '').trim();
+        const mainCategory = String(body.mainCategory || '').trim();
+        const channel = body.channel === '女频' ? '女频' : '男频';
+        const hero = String(body.hero || '').trim();
+        const hero2 = String(body.hero2 || '').trim();
+        // 有本地封面就一并传（番茄建书默认自动生成封面，我们换成 cover.png）；没有则番茄用自动封面。可用 uploadCover:false 关掉。
+        const _cp = path.join(book.dir, 'cover.png');
+        const coverPath = (body.uploadCover !== false && fs.existsSync(_cp)) ? _cp : '';
+        const autoSubmit = body.autoSubmit !== false;   // 默认全自动（用户已授权）
+        if (!title) return json(res, 400, { error: '书名为空' });
+        if (title.length > 15) return json(res, 400, { error: `书名「${title}」超过番茄上限(15字)` });
+        if (!mainCategory) return json(res, 400, { error: '请选择主分类' });
+        if (synopsis.length < 50) return json(res, 400, { error: `简介仅 ${synopsis.length} 字，番茄要求 50–500 字，请先在「作品简介」写好` });
+        const slug = book.slug;
+        const cur = fanqieCreateJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        fanqieCreateJobs.set(slug, { status: 'running', msg: '开始…' });
+        const onLog = (e) => { const j = fanqieCreateJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'fanqie' }); };
+        createFanqieBook({ profilePath, title, channel, mainCategory, hero, hero2, synopsis, coverPath, autoSubmit, onLog })
+          .then((r) => {
+            if (r.ok && r.bookId) {
+              try { setBookPublish(slug, { profilePath, bookId: r.bookId, bookName: title }); } catch {}
+              const cvNote = coverPath ? (r.cover?.ok ? '，封面已上传' : '，封面待补传') : '';
+              fanqieCreateJobs.set(slug, { status: 'done', bookId: r.bookId, cover: r.cover || null, msg: `✅ 已创建，bookId=${r.bookId}，已写入发布配置${cvNote}` });
+              pushLog(slug, { level: 'act', source: 'fanqie', msg: `✅ 番茄已创建《${title}》 bookId=${r.bookId}（已回填发布配置${cvNote}）` });
+            } else if (r.ok && r.semiManual) {
+              fanqieCreateJobs.set(slug, { status: 'done', semiManual: true, msg: r.msg });
+              pushLog(slug, { level: 'act', source: 'fanqie', msg: r.msg });
+            } else {
+              fanqieCreateJobs.set(slug, { status: 'error', error: r.error, msg: r.error });
+              pushLog(slug, { level: 'error', source: 'fanqie', msg: '番茄创建作品失败：' + r.error });
+            }
+          })
+          .catch((e) => { fanqieCreateJobs.set(slug, { status: 'error', error: e.message, msg: e.message }); pushLog(slug, { level: 'error', source: 'fanqie', msg: '番茄创建作品异常：' + e.message }); });
+        return json(res, 200, { ok: true, started: true, autoSubmit });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/fanqie/create-book-status') {   // 轮询番茄创建作品进度
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const j = fanqieCreateJobs.get(book.slug) || { status: 'idle' };
+        return json(res, 200, { ok: true, ...j });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/name-experiment') {   // 书名实验生成器：批量出 N 个候选书名 + 每个一张不同画面封面（后台跑）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const slug = book.slug;
+        const cur = nameExpJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        const count = Math.max(2, Math.min(10, Number(body.count) || 6));
+        nameExpJobs.set(slug, { status: 'running', msg: '开始…' });
+        const onLog = (e) => { const j = nameExpJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'nameexp' }); };
+        generateNameExperiment(book, { count, cfg, onLog })
+          .then((manifest) => { nameExpJobs.set(slug, { status: 'done', manifest, msg: `已生成 ${manifest.count} 个候选` }); pushLog(slug, { level: 'act', source: 'nameexp', msg: `✅ 书名实验：${manifest.count} 个候选书名+封面已生成` }); })
+          .catch((e) => { nameExpJobs.set(slug, { status: 'error', error: e.message, msg: e.message }); pushLog(slug, { level: 'error', source: 'nameexp', msg: '书名实验生成失败：' + e.message }); });
+        return json(res, 200, { ok: true, started: true, count });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/name-experiment-status') {   // 轮询进度；idle 时回读已存的清单
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const j = nameExpJobs.get(book.slug);
+        if (j) return json(res, 200, { ok: true, ...j });
+        const manifest = readNameExperiment(book);
+        return json(res, 200, { ok: true, status: manifest ? 'done' : 'idle', manifest });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/push-name-experiment') {   // 把书名实验候选(书名+封面)推到番茄「多书名实验·实验配置」(设置别名)
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const pc = book.publish || {};
+        if (!pc.profilePath || !pc.bookId) return json(res, 400, { error: '该书未配番茄账号/bookId（先在发布里配好账号并选中番茄书籍）' });
+        const manifest = readNameExperiment(book);
+        if (!manifest || !(manifest.items || []).length) return json(res, 400, { error: '还没有书名实验，请先点「🧪 书名实验」生成候选书名+封面' });
+        // 组装 items：书名 + 对应封面绝对路径（experiment/NN.png）。可只推指定序号(body.pick=[1,3,...])。
+        const pick = Array.isArray(body.pick) && body.pick.length ? new Set(body.pick.map(Number)) : null;
+        const items = (manifest.items || [])
+          .filter(it => it && it.title && (!pick || pick.has(it.i)))
+          .map(it => {
+            // 优先用【带书名】的封面(NN.titled.png，UI 推送前烤好的)，没有才退回无字底图(NN.png)
+            let cover = '';
+            if (it.bg) {
+              const titled = path.join(book.dir, 'experiment', it.bg.replace(/\.png$/i, '') + '.titled.png');
+              const bg = path.join(book.dir, 'experiment', it.bg);
+              cover = fs.existsSync(titled) ? titled : (fs.existsSync(bg) ? bg : '');
+            }
+            return { title: String(it.title).trim(), coverPath: cover };
+          });
+        if (!items.length) return json(res, 400, { error: '没有可推的候选书名' });
+        const autoSubmit = !!body.autoSubmit;   // 默认 false：填好停在实验配置，让用户核对后自己「开启实验」(不可逆)
+        const slug = book.slug;
+        const cur = nameExpPushJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        nameExpPushJobs.set(slug, { status: 'running', msg: '开始…' });
+        const onLog = (e) => { const j = nameExpPushJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'nameexp' }); };
+        pushNameExperiment({ bookId: pc.bookId, bookTitle: pc.bookName || book.title, items, profilePath: pc.profilePath, autoSubmit, onLog })
+          .then((r) => {
+            if (r.ok) {
+              nameExpPushJobs.set(slug, { status: 'done', submitted: !!r.submitted, semiManual: !!r.semiManual, filled: r.filled || 0, msg: r.msg });
+              pushLog(slug, { level: 'act', source: 'nameexp', msg: '✅ ' + r.msg });
+            } else { nameExpPushJobs.set(slug, { status: 'error', error: r.error, msg: r.error }); pushLog(slug, { level: 'error', source: 'nameexp', msg: '推到番茄失败：' + r.error }); }
+          })
+          .catch((e) => { nameExpPushJobs.set(slug, { status: 'error', error: e.message, msg: e.message }); pushLog(slug, { level: 'error', source: 'nameexp', msg: '推到番茄异常：' + e.message }); });
+        return json(res, 200, { ok: true, started: true, count: items.length, autoSubmit });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/push-name-experiment-status') {   // 轮询「推到番茄」进度
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const j = nameExpPushJobs.get(book.slug) || { status: 'idle' };
+        return json(res, 200, { ok: true, ...j });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/exp-cover-save') {   // 存 UI 合成好的【带书名】封面到 experiment/NN.titled.png（推番茄用）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { ok: false, error: '找不到书' });
+        const file = path.basename(String(body.file || ''));   // 只取文件名防穿越
+        if (!/^[\w.-]+\.titled\.png$/.test(file)) return json(res, 400, { ok: false, error: '文件名不合法（应为 NN.titled.png）' });
+        const m = String(body.dataUrl || '').match(/^data:image\/png;base64,(.+)$/);
+        if (!m) return json(res, 400, { ok: false, error: 'dataUrl 不是 png' });
+        const dir = path.join(book.dir, 'experiment'); fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, file), Buffer.from(m[1], 'base64'));
+        return json(res, 200, { ok: true, file });
+      } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+    }
+    if (p === '/api/config/update') {   // 保存设置（如 Gemini key / API 模型 key / 代理）
+      try {
+        const patch = stripMaskedKeys(body.patch || {});   // 去掉 UI 回传的 '***已设置***' 占位，避免把真 key 覆盖没
+        const next = updateConfig(patch);
+        return json(res, 200, { ok: true, config: maskConfig(next) });
+      } catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (p === '/api/book/set-style') {
       try { const b = setBookStyle(body.book, body.style); return json(res, 200, { ok: true, style: b.style }); }
@@ -329,12 +731,24 @@ async function api(p, req, res, u) {
         const every = mode === 'review' ? Math.max(1, Math.floor(Number(body.reviewEvery) || 1)) : 0;
         try { setBookWriteMode(book.slug, mode, every || 1); } catch {}
       }
-      const instruction = buildKickoffInstruction(book, body.theme || body.genre, body.words);
+      // 网页版模型不能跑 CLI 立项（建 bible+大纲需要 agentic 本地 CLI）→ 用一个可用的本地 CLI 跑【只规划】的立项，
+      // 正文之后由网页版引擎续写（book.model 仍是网页版模型，写作台点▶即走 web-write）。
+      const isWebModel = getModel(body.model)?.kind === 'web';
+      let launchModel = body.model || book.model || cfg.defaultModel;
+      if (isWebModel) {
+        launchModel = resolveGenModel(body.model);
+        if (!launchModel) {
+          pushLog(book.slug, { level: 'error', msg: '网页版模型不能跑 AI 立项，且未检测到可用的本地 CLI' });
+          return json(res, 400, { error: '网页版模型不能跑 AI 立项（建 设定+大纲 需要本地 CLI）。请先装一个 CLI（qwen/gemini/codex），或用「手动创建」建书后直接用网页版写作。' });
+        }
+        pushLog(book.slug, { level: 'act', msg: `网页版模型立项：用本地 ${launchModel} 只搭 设定+大纲（不写正文），正文随后用网页版续写` });
+      }
+      const instruction = buildKickoffInstruction(book, body.theme || body.genre, body.words, { planOnly: isWebModel });
       rtOf(book.slug).logs = [];
       try {
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
+        const session = await startWriting({ book, model: launchModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
         rtOf(book.slug).session = session;
-        return json(res, 200, { ok: true, book: { ...book, stats: { chapters: 0, kb: 0 }, tokens: 0 }, instance: session.instance.id, pane: session.paneId });
+        return json(res, 200, { ok: true, book: { ...book, stats: { chapters: 0, kb: 0 }, tokens: 0 }, instance: session.instance.id, pane: session.paneId, planOnly: isWebModel });
       } catch (e) { pushLog(book.slug, { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/review') {
@@ -551,6 +965,15 @@ async function api(p, req, res, u) {
         return json(res, r.ok ? 200 : 200, r);
       } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
     }
+    if (p === '/api/book/gen-vol-name') {   // 为某卷生成卷名(AI，从该卷正文/大纲/bible)，写回 bible 卷名清单
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { ok: false, error: '找不到书' });
+        const num = parseInt(body.num, 10);
+        if (!(num >= 1)) return json(res, 400, { ok: false, error: '卷号无效' });
+        const r = await generateVolumeName(book, num, { cfg, force: body.force !== false, onLog: (e) => pushLog(book.slug, { ...e, source: 'volname' }) });
+        return json(res, 200, r);
+      } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
+    }
     if (p === '/api/book/publish-config') {   // 保存番茄发布配置
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
@@ -588,7 +1011,7 @@ async function api(p, req, res, u) {
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
         const adapterId = body.adapterId || (book.model || '').replace(/^web-/, '') || 'qwen';
-        if (!getAdapter(adapterId)) return json(res, 400, { error: '未知网页适配器：' + adapterId + '（可选 qwen|chatgpt|claude）' });
+        if (!getAdapter(adapterId)) return json(res, 400, { error: '未知网页适配器：' + adapterId + '（可选 qwen|doubao|chatgpt|claude）' });
         const batches = Math.max(1, Number(body.batches) || 1);
         // profilePath 优先取 body，其次 book.publish.profilePath
         const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
@@ -597,6 +1020,44 @@ async function api(p, req, res, u) {
           .then(r => pushLog(book.slug, { level: 'act', source: 'web', msg: `网页版写作结束：共 ${r.batches || 0} 批、新增 ${r.totalWrote || 0} 章` }))
           .catch(e => pushLog(book.slug, { level: 'error', source: 'web', msg: '网页版写作异常：' + e.message }));
         return json(res, 200, { ok: true, started: true, adapterId, batches });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/api-write') {   // API 写作：直连智谱/DeepSeek/通义 API 写小说，日志推 SSE
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const provider = body.provider || (book.model || '').replace(/^api-/, '') || 'zhipu';
+        if (!isApiProvider(provider)) return json(res, 400, { error: '未知 API 提供方：' + provider + '（可选 zhipu|deepseek|dashscope）' });
+        if (!providerConfigured(provider, cfg)) {
+          const nm = API_PROVIDERS[provider]?.name || provider;
+          return json(res, 400, { error: `未配置 ${nm} 的 API Key。请在「设置 · API 模型」里填入后再写。` });
+        }
+        const batches = Math.max(1, Number(body.batches) || 1);
+        runApiWrite({ book, provider, batches, cfg, onLog: (e) => pushLog(book.slug, { ...e, source: 'api' }) })
+          .then(r => pushLog(book.slug, { level: 'act', source: 'api', msg: `API 写作结束：共 ${r.batches || 0} 批、新增 ${r.totalWrote || 0} 章` }))
+          .catch(e => pushLog(book.slug, { level: 'error', source: 'api', msg: 'API 写作异常：' + e.message }));
+        return json(res, 200, { ok: true, started: true, provider, batches });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/cowrite-idea') {   // 共创模式·出主意：AI 据作者的问题给建议（不落盘，直接返回）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const model = body.model || book.model || cfg.defaultModel;
+        if (!isCowriteModel(model)) return json(res, 400, { error: '共创模式请用 claude 或 codex（也可 gemini/qwen）。当前模型：' + model });
+        if (!String(body.ask || '').trim()) return json(res, 400, { error: '请先写你想问的 / 想让 AI 出主意的点' });
+        const r = await brainstorm({ book, model, ask: body.ask, cfg });
+        return json(res, 200, { ok: true, ...r });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/cowrite-chapter') {   // 共创模式·写这一章：AI 按作者要求写一章并落盘（直接返回正文）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const model = body.model || book.model || cfg.defaultModel;
+        if (!isCowriteModel(model)) return json(res, 400, { error: '共创模式请用 claude 或 codex（也可 gemini/qwen）。当前模型：' + model });
+        const r = await writeChapterInWindow({
+          book, model, intent: body.intent, useLastEnding: body.useLastEnding !== false, redoLast: !!body.redoLast, cfg,
+          onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
+        });
+        return json(res, 200, { ok: true, ...r });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/republish') {   // 重发修正：编辑替换 from..to 章（修发错内容）。limit 可只改前 N 章
@@ -647,7 +1108,9 @@ async function api(p, req, res, u) {
         if (!isRe && !String(body.range || '').trim()) return json(res, 400, { error: '请填重写范围（如 001-008 或 卷01）' });
         const hash = gitSnapshot(book.dir, isRe ? '整本重立项前存档' : ('重写' + (body.range || '') + '前存档'));
         const instruction = isRe ? buildReprojectInstruction(book, body.note) : buildRewriteInstruction(book, body.range, body.note);
-        if (sessionLive(book.slug)) {
+        // 只有【窗口在且 AI 真的在跑】才穿插指令；若 AI 已退出到命令行（只剩 shell 提示符），
+        // 绝不能把指令打进命令行——改为开新窗口重启 AI（治"没打开 ai 就给命令行发命令"）。
+        if (sessionLive(book.slug) && await sessionAgentAlive(book.slug, cfg)) {
           const r = await sendToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 指令已穿插' + (hash ? '（已存档 ' + hash + '）' : '') });
           await ensureAutopilot(book.slug, cfg);
@@ -697,18 +1160,8 @@ async function api(p, req, res, u) {
         if (body.model) { try { setBookModel(slug, body.model); } catch {} }
         const untilTarget = body.untilTarget === true || (book.targetChapters > 0 && body.batches == null);
         const batches = Math.max(1, parseInt(body.batches, 10) || 1);
-        const control = { stopped: false };
-        rtOf(slug).statelessRun = control;
-        rtOf(slug).logs = [];
-        pushLog(slug, { level: 'act', msg: `▶ 无状态省钱模式启动（模型 ${model}，${untilTarget ? '写到目标章数' : batches + ' 批'}）` });
-        runStateless({
-          book, model, cfg, batches, untilTarget, control,
-          onLog: (e) => pushLog(slug, { ...e, source: e.source || 'stateless' }),
-          onReachedTarget: () => { try { maybeAutoPublish(getBook(slug) || book, { cfg, onLog: (e) => pushLog(slug, { ...e }) }); } catch {} },
-        })
-          .catch(e => pushLog(slug, { level: 'error', source: 'stateless', msg: '无状态写作异常：' + e.message }))
-          .finally(() => { const st = rt.get(slug); if (st) st.statelessRun = null; broadcast(slug, 'stopped', { stateless: true }); pushLog(slug, { level: 'act', msg: '■ 无状态写作已结束' }); });
-        return json(res, 200, { ok: true, started: true, mode: 'stateless', untilTarget, batches });
+        const out = startStatelessRun(book, { model, batches, untilTarget, cfg });
+        return json(res, 200, out);
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/write') return await doWrite(body, cfg, res);
@@ -949,6 +1402,36 @@ function serveStatic(p, res) {
 }
 
 function slugOf(idOrSlug) { const b = getBook(idOrSlug); return b ? b.slug : idOrSlug; }
+// 对外返回配置时【隐藏 API Key 明文】，只暴露「是否已设置」。含 Gemini 与三家 API 模型的 key。
+function maskConfig(cfg) {
+  const api = cfg.api || {};
+  const maskApi = {};
+  for (const prov of ['zhipu', 'deepseek', 'dashscope']) {
+    const one = api[prov] || {};
+    maskApi[prov] = { ...one, apiKey: one.apiKey ? '***已设置***' : '', hasKey: !!one.apiKey };
+  }
+  return {
+    ...cfg,
+    gemini: { ...cfg.gemini, apiKey: cfg.gemini?.apiKey ? '***已设置***' : '', hasKey: !!cfg.gemini?.apiKey },
+    api: { ...api, ...maskApi },
+  };
+}
+
+// 去掉 patch 里等于掩码占位（'***已设置***'）的 apiKey——UI GET 拿到的是掩码，回传时不能用它覆盖真 key。
+function stripMaskedKeys(patch) {
+  const MASK = '***已设置***';
+  const out = JSON.parse(JSON.stringify(patch || {}));
+  if (out.gemini && out.gemini.apiKey === MASK) delete out.gemini.apiKey;
+  if (out.api) {
+    for (const prov of Object.keys(out.api)) {
+      if (out.api[prov] && typeof out.api[prov] === 'object' && out.api[prov].apiKey === MASK) delete out.api[prov].apiKey;
+      // 顺带去掉只读的 hasKey 别写进配置
+      if (out.api[prov] && typeof out.api[prov] === 'object') delete out.api[prov].hasKey;
+    }
+  }
+  return out;
+}
+
 function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); }
 function readJson(req) {
   return new Promise((resolve) => {

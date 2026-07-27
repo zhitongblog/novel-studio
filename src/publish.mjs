@@ -44,6 +44,61 @@ function volDisplayName(vol) {
   return `第${numToCn(num)}卷` + (sub ? `：${sub}` : '');
 }
 
+// 从书的 outlines/ 里取某卷的【卷名/副标题】。番茄要求分卷有名字，而作者常只把卷目录命名为"卷03"（无副标题），
+// 真正的卷名往往写在大纲文件名里（如 outlines/卷03静海旧火分章大纲.md → "静海旧火"）或大纲 H1 标题里。
+// 返回副标题字符串（无则 ''）。
+export function outlineVolSubtitle(book, volNum) {
+  if (!book?.dir || !volNum) return '';
+  const odir = path.join(book.dir, 'outlines');
+  let files = [];
+  try { files = fs.readdirSync(odir).filter(f => /\.md$/i.test(f)); } catch { return ''; }
+  const pad = String(volNum).padStart(2, '0');
+  // 找文件名以 卷NN / 卷N 开头的那个大纲
+  const hit = files.find(f => new RegExp(`^卷\\s*0*${volNum}(?!\\d)`).test(f));
+  if (!hit) return '';
+  // ① 从文件名抽：卷03静海旧火分章大纲.md → 去掉"卷03"前缀与"(分章)?大纲"后缀 → "静海旧火"
+  let sub = hit.replace(/\.md$/i, '')
+    .replace(new RegExp(`^卷\\s*0*${volNum}\\s*`), '')
+    .replace(/[_\-．.、:：]\s*/, '')
+    .replace(/(分章)?大纲$/, '')
+    .trim();
+  if (sub) return sub.slice(0, 16);   // 番茄副标题 maxlength 16
+  // ② 文件名没有 → 读 H1：# 《书名》卷03 静海旧火 分章大纲 → "静海旧火"
+  try {
+    const first = fs.readFileSync(path.join(odir, hit), 'utf8').split(/\r?\n/)[0] || '';
+    const m = first.match(new RegExp(`卷\\s*0*${volNum}\\s+(.+?)\\s*(分章)?大纲`));
+    if (m && m[1]) return m[1].trim().slice(0, 16);
+  } catch {}
+  return '';
+}
+
+// 从 novel_bible.md 取某卷卷名。立项常把卷名写在 bible 的"节奏与格局承诺"里，格式如
+// "卷01《煤山夺命》：…" 或 "卷01：煤山夺命"。这是卷名最常落的地方（比大纲文件名更常有）。
+export function bibleVolSubtitle(book, volNum) {
+  if (!book?.dir || !volNum) return '';
+  let bible = ''; try { bible = fs.readFileSync(path.join(book.dir, 'novel_bible.md'), 'utf8'); } catch { return ''; }
+  const cn = numToCn(volNum);   // 卷号中文形（4→四），兼容"第四卷：xxx"这种中文数字写法
+  // 覆盖常见几种卷名写法：卷01《xxx》 / 第一卷《xxx》 / 卷01：xxx / 第四卷：xxx / ### 第N卷：xxx
+  const pats = [
+    `卷\\s*0*${volNum}(?!\\d)\\s*《([^》]{1,16})》`,
+    `第\\s*(?:${volNum}|${cn})\\s*卷\\s*《([^》]{1,16})》`,
+    `卷\\s*0*${volNum}(?!\\d)\\s*[:：]\\s*([^\\n，,。；：#]{1,16})`,
+    `第\\s*(?:${volNum}|${cn})\\s*卷\\s*[:：]\\s*([^\\n，,。；：#]{1,16})`,
+  ];
+  for (const p of pats) { const m = bible.match(new RegExp(p)); if (m && m[1]) return m[1].trim().slice(0, 16); }
+  return '';
+}
+
+// 给某本地卷目录名生成【番茄用的完整卷名】：卷名来源优先级 = 目录名副标题 → 大纲文件名 → bible。
+// 都没有则退回"第N卷"（会在建卷时被安全拦下并提示起名，不再默默卡住）。
+function volDisplayNameForBook(book, vol) {
+  const base = volDisplayName(vol);                 // "第三卷" 或 "第三卷：xxx"
+  if (base.includes('：')) return base;             // 目录名已带副标题
+  const num = bookVolNum(vol);
+  const sub = outlineVolSubtitle(book, num) || bibleVolSubtitle(book, num);   // 大纲文件名 → bible
+  return sub ? `${base}：${sub}` : base;
+}
+
 // 把图书的卷(chapters/卷NN 目录名)按出现顺序去重 → [vol…]。
 function orderedBookVolumes(allChapters) {
   const seen = new Set(), out = [];
@@ -67,7 +122,7 @@ function cnNum(s) {
   return s.length === 1 && d[s] != null ? d[s] : null;
 }
 // 图书卷目录名 "卷01"/"卷01_常山雪" → 卷号 1
-function bookVolNum(vol) { const m = String(vol).match(/卷\s*0*(\d+)/) || String(vol).match(/0*(\d+)/); return m ? parseInt(m[1], 10) : null; }
+export function bookVolNum(vol) { const m = String(vol).match(/卷\s*0*(\d+)/) || String(vol).match(/0*(\d+)/); return m ? parseInt(m[1], 10) : null; }
 // 番茄卷名 "第十三卷：九州雷震"/"第1卷" → 卷号
 function fanqieVolNum(name) { const m = String(name).match(/第\s*([0-9一二三四五六七八九十两]+)\s*卷/); return m ? cnNum(m[1]) : null; }
 
@@ -149,6 +204,11 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
   }
   const fanqieMax = fm.maxChapter || 0;
   const all = loadPublishChapters(book);
+  // 🛡️兜底：这本以前发布过(lastPublishAt>0)，番茄却读到 0 章 → 几乎必是读取异常/页面没加载完，
+  // 绝不从第1章把已发章重发 → 阻断并提示重试。
+  if (fanqieMax === 0 && (pc.lastPublishAt || 0) > 0) {
+    return { ok: false, blocked: true, reason: '该书之前发布过，这次却读到番茄 0 章——疑似页面未加载完/读取异常，已中止以防从第1章重复发布，请重试', fanqieMax: 0, localMax: all.length ? all[all.length - 1].num : 0, newCount: 0 };
+  }
   const localMax = all.length ? all[all.length - 1].num : 0;
   const newCh = all.filter(c => c.num > fanqieMax);
   // 重写章：番茄已有(num≤fanqieMax)但本地正文在上次发布之后被改动 → 需 edit 同步
@@ -205,8 +265,13 @@ export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}
     return { ok: false, blocked: true, reason: fm.error || '番茄页面无效', published: 0 };
   }
   const fanqieMax = fm.maxChapter || 0;
-  onLog({ level: 'info', msg: `番茄已发到第 ${fanqieMax} 章${fm.approx ? '(近似)' : ''}` });
   const all = loadPublishChapters(book);
+  // 🛡️兜底：以前发布过却读到番茄 0 章 → 疑似读取异常，绝不从第1章重发，直接中止提示重试。
+  if (fanqieMax === 0 && (pc.lastPublishAt || 0) > 0) {
+    onLog({ level: 'error', msg: '⛔ 已中止发布：该书之前发布过，这次却读到番茄 0 章（疑似页面未加载完/读取异常）。请重试，避免从第1章重复发布。' });
+    return { ok: false, blocked: true, reason: '以前发布过却读到 0 章，已中止防重复发布，请重试', published: 0 };
+  }
+  onLog({ level: 'info', msg: `番茄已发到第 ${fanqieMax} 章${fm.approx ? '(近似)' : ''}` });
   let newCh = all.filter(c => c.num > fanqieMax).map(c => ({ ...c, mode: 'new' }));
   // 重写章同步(可选)：把上次发布后改动过的旧章，用 edit 模式找番茄对应章覆盖。
   const lastAt = pc.lastPublishAt || 0;
@@ -228,8 +293,24 @@ export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}
     } else {
       // 尝试自动新建【本批涉及且番茄缺】的卷（只建恰好缺的、绝不多建）。
       const neededVols = [...new Set([...editCh, ...newCh].map(c => c.vol))];
+      // 缺卷里【没卷名】的（目录名/大纲/bible 都取不到副标题）→ 先用 AI 自动起名并写回 bible，
+      // 免得番茄"分卷必须有名字"把整卷卡住（用户嫌不好可到卷管理手动改）。动态 import 避免与 volname 循环依赖。
+      const nameless = vm.missing.filter(v => neededVols.includes(v) && !volDisplayNameForBook(book, v).includes('：'));
+      if (nameless.length) {
+        onLog({ level: 'act', msg: `缺卷没卷名，自动起名：${nameless.join('、')}` });
+        try {
+          const { generateVolumeName } = await import('./volname.mjs');
+          const { loadConfig } = await import('./config.mjs');
+          const cfg = loadConfig();
+          for (const v of nameless) {
+            const n = bookVolNum(v); if (n == null) continue;
+            try { const gr = await generateVolumeName(book, n, { cfg, onLog }); if (!gr.ok) onLog({ level: 'warn', msg: `第${n}卷自动起名失败：${gr.error}` }); }
+            catch (e) { onLog({ level: 'warn', msg: `第${n}卷起名异常：${e.message || e}` }); }
+          }
+        } catch (e) { onLog({ level: 'warn', msg: '自动起卷名模块加载失败：' + (e.message || e) }); }
+      }
       const toCreate = vm.missing.filter(v => neededVols.includes(v))
-        .map(v => ({ num: bookVolNum(v), name: volDisplayName(v) }))
+        .map(v => ({ num: bookVolNum(v), name: volDisplayNameForBook(book, v) }))   // 卷名优先从大纲补/上面已自动生成，避免空副标题卡住
         .filter(x => x.num != null)
         .sort((a, b) => a.num - b.num);
       if (toCreate.length) {
@@ -279,6 +360,7 @@ export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}
     scheduledTime: pc.scheduledTime || '',
     intervalSeconds: pc.intervalSeconds || 3,
     matchVolumes: !!pc.matchVolumes,
+    useAI: !!pc.useAI,
     bookId: pc.bookId,
   };
   const r = await publishBook({ profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title, chapters, config, onLog });

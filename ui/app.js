@@ -19,6 +19,7 @@ const $ = (s) => document.querySelector(s);
 const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 const fmtTok = (n) => !n ? '0' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : '' + n;
+const fmtCost = (n) => (!n || n <= 0) ? '¥0' : n < 0.01 ? '<¥0.01' : n < 1 ? '¥' + n.toFixed(3).replace(/0$/, '') : '¥' + n.toFixed(2);
 
 async function api(p, method = 'GET', body) {
   const opt = { method, headers: { 'Content-Type': 'application/json' } };
@@ -112,10 +113,12 @@ function renderShelf() {
         <button class="card-btn" data-act="write">✍️ 写作</button>
         <button class="card-btn" data-act="read">📖 阅读</button>
         <button class="card-btn" data-act="review">🔍 复检</button>
+        <button class="card-btn" data-act="nameexp">🧪 书名实验</button>
       </div>`;
     card.querySelector('[data-act="write"]').addEventListener('click', (e) => { e.stopPropagation(); openWrite(b); });
     card.querySelector('[data-act="read"]').addEventListener('click', (e) => { e.stopPropagation(); openReader(b); });
     card.querySelector('[data-act="review"]').addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openReview(); });
+    card.querySelector('[data-act="nameexp"]').addEventListener('click', (e) => { e.stopPropagation(); openNameExp(b); });
     card.querySelector('[data-act="del"]').addEventListener('click', (e) => { e.stopPropagation(); openDelete(b); });
     const pubBadge = card.querySelector('[data-act="pubbadge"]');
     if (pubBadge) pubBadge.addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openPublish(b); });
@@ -133,6 +136,7 @@ function openWrite(book) {
   CUR = book; showWriteView();
   $('#writeTitle').textContent = '《' + book.title + '》';
   $('#writeModel').value = book.model || STATE.config.defaultModel;
+  syncWebProfileUI();   // 若默认/上次是网页版模型 → 显示并填充网页账号选择器
   $('#writeTask').value = `请阅读 AGENTS.md 写作规范与 novel_bible.md，续写下一批 ${book.standards?.batchSize || 3} 章，写完自检。`;
   $('#mirror').textContent = '（开始写作后，这里实时显示 AI 写作过程）';
   $('#logFeed').innerHTML = '';
@@ -157,24 +161,83 @@ function setWriting(on) {
   $('#writeStatus').classList.toggle('on', on);
   $('#mirrorDot').style.display = on ? '' : 'none';
 }
+
+// —— 网页版写作：账号选择器（只在选中「网页版」模型时出现）——
+// 网页版写作要驱动一个已登录该聊天站点（千问/豆包/ChatGPT/Claude）的 Unzoo 账号窗口。
+let WEB_PROFILES = null;   // 缓存 /api/unzoo/profiles 账号列表
+function isWebModel(id) { return (STATE.models || []).find(m => m.id === id)?.kind === 'web'; }
+function webProfileKey(slug) { return 'novelstudio:webProfile:' + slug; }
+async function syncWebProfileUI() {
+  const wrap = $('#webProfileWrap'); if (!wrap) return;
+  const web = isWebModel($('#writeModel').value);
+  wrap.classList.toggle('hidden', !web);
+  if (!web) return;
+  const sel = $('#webProfile');
+  if (!WEB_PROFILES) {
+    try { const r = await api('/api/unzoo/profiles', 'POST', {}); WEB_PROFILES = r.profiles || []; }
+    catch { WEB_PROFILES = []; }
+  }
+  const b = (STATE.books.find(x => x.slug === CUR?.slug)) || CUR || {};
+  const remembered = (CUR && localStorage.getItem(webProfileKey(CUR.slug)))
+    || b.webProfilePath || (b.publish || {}).profilePath || '';
+  if (!WEB_PROFILES.length) {
+    sel.innerHTML = '<option value="">（未发现 Unzoo 账号，请先在 Unzoo 里登录千问/豆包）</option>';
+    return;
+  }
+  sel.innerHTML = WEB_PROFILES.map(p => {
+    const label = p.dir && p.dir !== p.name ? `${p.name} · ${p.dir}` : p.name;
+    const tag = p.running ? '○运行中' : '·未启动';
+    return `<option value="${esc(p.path)}" ${p.path === remembered ? 'selected' : ''}>${esc(label)}（${tag}）</option>`;
+  }).join('');
+}
+$('#writeModel').addEventListener('change', syncWebProfileUI);
+$('#webProfile')?.addEventListener('change', () => {
+  if (CUR && $('#webProfile').value) localStorage.setItem(webProfileKey(CUR.slug), $('#webProfile').value);
+});
+
 $('#btnBack').addEventListener('click', () => { closeStream(); showView('shelf'); refresh(); });
 
-// 无状态模式开关：显示/隐藏批数输入
+// 无状态省钱模式：【默认开·已固化为标准写法】——每章全新进程+精准上下文包，成本恒定；
+// 关掉才回长驻会话模式(越写越贵)。记住选择；想关必须过一次警告确认。
+const NS_STATELESS_KEY = 'ns_stateless_default';
+(function initStateless() {
+  const saved = localStorage.getItem(NS_STATELESS_KEY);
+  const on = saved === null ? true : saved === '1';   // 默认开
+  $('#statelessMode').checked = on;
+  $('#slBatchWrap').classList.toggle('hidden', !on);
+})();
 $('#statelessMode').addEventListener('change', () => {
-  $('#slBatchWrap').classList.toggle('hidden', !$('#statelessMode').checked);
+  const on = $('#statelessMode').checked;
+  if (!on && !confirm('关掉「无状态省钱模式」= 回到长驻会话模式：会话越写越大、成本随书长度上涨，长篇会贵一个数量级、还更容易漂移。\n\n确定要关吗？（默认强烈建议保持开启）')) {
+    $('#statelessMode').checked = true; return;   // 取消关闭，保持开
+  }
+  localStorage.setItem(NS_STATELESS_KEY, on ? '1' : '0');
+  $('#slBatchWrap').classList.toggle('hidden', !on);
 });
 $('#btnStart').addEventListener('click', async () => {
   if (!CUR) return;
   $('#btnStart').disabled = true; $('#writeStatus').textContent = '启动中…';
   const model = $('#writeModel').value;
   const isWeb = (STATE.models || []).find(m => m.id === model)?.kind === 'web';
+  const isApi = (STATE.models || []).find(m => m.id === model)?.kind === 'api';
   const stateless = $('#statelessMode').checked;
   try {
-    if (isWeb) {
-      // 网页版写作：驱动 通义千问/ChatGPT/Claude 网页版，模型只吐文字→引擎抓正文自己落盘（批数复用无状态那个输入）。
+    if (isApi) {
+      // API 写作：直连智谱/DeepSeek/通义 API 写小说，模型直接返回整段→引擎解析落盘（批数复用无状态那个输入）。
       const batches = Math.max(1, parseInt($('#statelessBatches').value, 10) || 3);
       const nm = (STATE.models || []).find(m => m.id === model)?.name || model;
-      await api('/api/book/web-write', 'POST', { book: CUR.slug, adapterId: model.replace(/^web-/, ''), batches });
+      const r = await api('/api/book/api-write', 'POST', { book: CUR.slug, provider: model.replace(/^api-/, ''), batches });
+      $('#mirror').textContent = '🔌 API 写作运行中（直连大模型接口写作、解析落盘，无窗口镜像）。进度见下方日志。';
+      setWriting(true); openStream(CUR.slug);
+      toast(`API 写作启动：${nm}（${batches} 批）`);
+    } else if (isWeb) {
+      // 网页版写作：驱动 通义千问/豆包/ChatGPT/Claude 网页版，模型只吐文字→引擎抓正文自己落盘（批数复用无状态那个输入）。
+      const batches = Math.max(1, parseInt($('#statelessBatches').value, 10) || 3);
+      const nm = (STATE.models || []).find(m => m.id === model)?.name || model;
+      const webProfile = $('#webProfile')?.value || '';
+      if (!webProfile) { toast('请先选一个已登录该聊天站点的「网页账号（Unzoo）」'); setWriting(false); $('#btnStart').disabled = false; $('#writeStatus').textContent = '未开始'; return; }
+      localStorage.setItem(webProfileKey(CUR.slug), webProfile);
+      await api('/api/book/web-write', 'POST', { book: CUR.slug, adapterId: model.replace(/^web-/, ''), batches, profilePath: webProfile });
       $('#mirror').textContent = '🌐 网页版写作运行中（驱动网页聊天框写作、抓正文落盘，无窗口镜像）。进度见下方日志。';
       setWriting(true); openStream(CUR.slug);
       toast(`网页版写作启动：${nm}（${batches} 批）`);
@@ -260,10 +323,105 @@ function rvRange() {
   return pad($('#rvFrom').value) + '-' + pad($('#rvTo').value);
 }
 $('#btnReview').addEventListener('click', openReview);
+
+// ---------- 🤝 共创模式（你出主意 · AI 逐章）----------
+const CW_MODELS = ['claude', 'codex', 'gemini', 'qwen'];   // 只允许强 CLI
+function cwNextNum() {
+  const b = STATE.books.find(x => x.slug === CUR?.slug) || CUR || {};
+  const st = b.stats || {};
+  return (st.maxChapter || st.chapters || 0) + 1;
+}
+function openCowrite() {
+  if (!CUR) return;
+  // 模型下拉：只列可用的强 CLI（claude/codex/gemini/qwen）
+  const avail = (STATE.models || []).filter(m => CW_MODELS.includes(m.id) && m.available);
+  if (!avail.length) { toast('共创模式需要 claude 或 codex（也可 gemini/qwen）CLI，但一个都没装'); return; }
+  const prefer = CW_MODELS.find(id => avail.some(m => m.id === id));
+  $('#cwModel').innerHTML = avail.map(m => `<option value="${m.id}" ${m.id === prefer ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
+  $('#cwChapInfo').textContent = '下一章：第 ' + cwNextNum() + ' 章';
+  $('#cwAsk').value = ''; $('#cwIntent').value = '';
+  $('#cwIdeaBox').classList.add('hidden'); $('#cwIdeaBox').textContent = '';
+  $('#cwOut').classList.add('hidden'); $('#cwOut').textContent = '';
+  $('#cwSaved').textContent = ''; $('#cwErr').textContent = ''; $('#cwIdeaHint').textContent = '';
+  $('#cwRedoBtn').disabled = true; $('#cwReadBtn').disabled = true; CW_LAST_REL = '';
+  $('#cowriteModal').classList.remove('hidden');
+}
+$('#btnCowrite').addEventListener('click', openCowrite);
+$('#cwClose').addEventListener('click', () => $('#cowriteModal').classList.add('hidden'));
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#cowriteModal').addEventListener('click', (e) => { if (e.target === $('#cowriteModal')) $('#cowriteModal').classList.add('hidden'); });
+
+$('#cwIdeaBtn').addEventListener('click', async () => {
+  if (!CUR) return;
+  const ask = $('#cwAsk').value.trim();
+  if (!ask) { $('#cwIdeaHint').textContent = '先写你想问的点'; return; }
+  const btn = $('#cwIdeaBtn'); const old = btn.textContent; btn.disabled = true; btn.textContent = '思考中…（可能 1 分钟）';
+  $('#cwIdeaHint').textContent = ''; $('#cwErr').textContent = '';
+  try {
+    const r = await api('/api/book/cowrite-idea', 'POST', { book: CUR.slug, model: $('#cwModel').value, ask });
+    const ideas = (r.ideas || '').trim();
+    // 直接把主意填进【本章我的要求】这个可编辑框——你在这里删改成本章要求，再点"写这一章"。
+    const box = $('#cwIntent');
+    const cur = box.value.trim();
+    box.value = cur ? (cur + '\n\n—— AI 的主意（挑你要的、删掉不要的）——\n' + ideas) : ideas;
+    box.focus();
+    // 光标移到末尾，方便接着改
+    try { box.selectionStart = box.selectionEnd = box.value.length; box.scrollTop = box.scrollHeight; } catch {}
+    // 旧的只读建议框不再用（内容已进可编辑框，不再"藏"起来）
+    $('#cwIdeaBox').classList.add('hidden'); $('#cwIdeaBox').textContent = '';
+    $('#cwIdeaHint').textContent = '✅ 已填进下面「本章我的要求」——改成你要的走向，再点“写这一章”';
+  } catch (e) { $('#cwErr').textContent = '出主意失败：' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
+
+async function cwDoWrite(redoLast) {
+  if (!CUR) return;
+  const intent = $('#cwIntent').value.trim();
+  if (!intent) { $('#cwErr').textContent = '先写「本章我的要求」'; return; }
+  const wBtn = $('#cwWriteBtn'), rBtn = $('#cwRedoBtn');
+  const oldW = wBtn.textContent; wBtn.disabled = true; rBtn.disabled = true;
+  wBtn.textContent = redoLast ? '重写中…' : '写作中…';
+  $('#cwErr').textContent = '';
+  const slowModel = /claude|gemini/i.test($('#cwModel').value);
+  $('#cwSaved').textContent = (redoLast ? '🔄 正在重写这一章' : '⏳ AI 正在创作这一章')
+    + '——会弹出一个终端窗口，你可以【在窗口里实时看它写】。'
+    + (slowModel ? '（Claude/Gemini 较慢，可能 5–15 分钟；想更快可换 codex）' : '（约 1–5 分钟）')
+    + ' 写完这里会显示正文供你阅读。App 不会卡，可先干别的。';
+  try {
+    const r = await api('/api/book/cowrite-chapter', 'POST', {
+      book: CUR.slug, model: $('#cwModel').value, intent,
+      useLastEnding: $('#cwUseLast').checked, redoLast: !!redoLast,
+    });
+    // 把写好的正文完整显示出来【供你先阅读】——不催你写下一章。
+    $('#cwOut').textContent = r.body || '';
+    $('#cwOut').classList.remove('hidden');
+    $('#cwOut').scrollTop = 0;   // 从头开始读
+    $('#cwSaved').innerHTML = `✅ 第 ${r.num} 章《${esc(r.title)}》已写好并保存（约 ${r.words} 字）。<b>请先阅读上面的正文↑</b>。满意后——在下面「本章我的要求」写<b>下一章</b>的要求再点“写这一章”；不满意点“🔄 重写这一章”。`;
+    // 清空要求框：避免拿上一章的要求误写下一章（你读完再写新的要求）
+    $('#cwIntent').value = '';
+    // 记住这一章路径，允许"舒适阅读本章"
+    CW_LAST_REL = r.rel || '';
+    $('#cwReadBtn').disabled = !CW_LAST_REL;
+    // 刷新书的 stats（章号推进），更新“下一章”
+    await refresh();
+    $('#cwChapInfo').textContent = '下一章：第 ' + (r.num + 1) + ' 章（读完满意再写）';
+    rBtn.disabled = false;   // 可对刚写的这章重写
+    toast(`共创：第 ${r.num} 章已写好，请先阅读`);
+  } catch (e) { $('#cwErr').textContent = '写作失败：' + e.message; rBtn.disabled = false; }
+  finally { wBtn.disabled = false; wBtn.textContent = oldW; }
+}
+$('#cwWriteBtn').addEventListener('click', () => cwDoWrite(false));
+$('#cwRedoBtn').addEventListener('click', () => cwDoWrite(true));
+let CW_LAST_REL = '';   // 刚写好的这一章路径，供"舒适阅读本章"跳转
+$('#cwReadBtn').addEventListener('click', () => {
+  if (!CUR || !CW_LAST_REL) return;
+  $('#cowriteModal').classList.add('hidden');   // 关弹窗，进舒适阅读器并跳到这一章
+  openReaderAt(CUR, CW_LAST_REL);
+});
+
 $('#rvRangeType').addEventListener('change', rvSync);
 $('#rvClose').addEventListener('click', () => $('#reviewModal').classList.add('hidden'));
 $('#rvCancel').addEventListener('click', () => $('#reviewModal').classList.add('hidden'));
-$('#reviewModal').addEventListener('click', (e) => { if (e.target === $('#reviewModal')) $('#reviewModal').classList.add('hidden'); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#reviewModal').addEventListener('click', (e) => { if (e.target === $('#reviewModal')) $('#reviewModal').classList.add('hidden'); });
 $('#rvStart').addEventListener('click', async () => {
   if (!CUR) return;
   const dims = [];
@@ -326,7 +484,7 @@ $('#btnRewrite').addEventListener('click', () => {
 $('#rwMode').addEventListener('change', () => { $('#rwRangeWrap').classList.toggle('hidden', $('#rwMode').value !== 'range'); });
 $('#rwClose').addEventListener('click', () => $('#rewriteModal').classList.add('hidden'));
 $('#rwCancel').addEventListener('click', () => $('#rewriteModal').classList.add('hidden'));
-$('#rewriteModal').addEventListener('click', (e) => { if (e.target === $('#rewriteModal')) $('#rewriteModal').classList.add('hidden'); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#rewriteModal').addEventListener('click', (e) => { if (e.target === $('#rewriteModal')) $('#rewriteModal').classList.add('hidden'); });
 $('#rwGo').addEventListener('click', async () => {
   if (!CUR) return;
   const mode = $('#rwMode').value;
@@ -353,7 +511,7 @@ $('#btnRename').addEventListener('click', () => {
 });
 $('#rnClose').addEventListener('click', () => $('#renameModal').classList.add('hidden'));
 $('#rnCancel').addEventListener('click', () => $('#renameModal').classList.add('hidden'));
-$('#renameModal').addEventListener('click', (e) => { if (e.target === $('#renameModal')) $('#renameModal').classList.add('hidden'); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#renameModal').addEventListener('click', (e) => { if (e.target === $('#renameModal')) $('#renameModal').classList.add('hidden'); });
 $('#rnInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('#rnSave').click(); });
 $('#rnSave').addEventListener('click', async () => {
   if (!CUR) return;
@@ -409,6 +567,7 @@ function pbFill(book) {
   $('#pbMatchVol').checked = !!pc.matchVolumes;
   $('#pbSyncRw').checked = !!pc.syncRewrites;
   $('#pbAuto').checked = !!pc.autoPublish;
+  $('#pbUseAI').checked = !!pc.useAI;
 }
 function pbRenderProfiles(saved) {
   const sel = $('#pbProfile');
@@ -508,6 +667,7 @@ function pbCfg() {
     matchVolumes: $('#pbMatchVol').checked,
     syncRewrites: $('#pbSyncRw').checked,
     autoPublish: $('#pbAuto').checked,
+    useAI: $('#pbUseAI').checked,
   };
 }
 async function pbSave() {
@@ -523,6 +683,49 @@ $('#pbSaveCfg').addEventListener('click', async () => {
   $('#pbErr').textContent = '';
   try { if (await pbSave()) toast('番茄发布配置已保存'); } catch (e) { $('#pbErr').textContent = e.message; }
 });
+// —— 在番茄创建新作品（全自动：填表→立即创建→回填 bookId）——
+let cbPoll = null;
+$('#cbCreate')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const hint = $('#cbHint'); hint.style.color = '';
+  const profilePath = $('#pbProfile').value;
+  const synopsis = ($('#synText')?.value || '').trim();
+  const channel = $('#cbChannel').value;
+  const mainCategory = $('#cbCategory').value;
+  const hero = $('#cbHero').value.trim();
+  const hero2 = $('#cbHero2').value.trim();
+  if (!profilePath) { hint.textContent = '⚠️ 请先在上方选 Unzoo 账号'; hint.style.color = '#e57'; return; }
+  if (synopsis.length < 50) { hint.textContent = `⚠️ 简介只有 ${synopsis.length} 字，番茄要求 50–500 字。请先在「作品简介」写好（可点生成）`; hint.style.color = '#e57'; return; }
+  if (!confirm(`将在你番茄账号真实创建一本新书：\n《${CUR.title}》· ${channel} · ${mainCategory}\n简介 ${synopsis.length} 字${hero ? ' · 主角 ' + hero : ''}\n\n创建不可逆，确定？`)) return;
+  const btn = $('#cbCreate'); btn.disabled = true; const old = btn.textContent; btn.textContent = '📕 创建中…';
+  hint.style.color = ''; hint.textContent = '⏳ 正在番茄创建作品…（约 30 秒，勿动那个浏览器）';
+  try {
+    await api('/api/fanqie/create-book', 'POST', { book: CUR.slug, profilePath, title: CUR.title, synopsis, channel, mainCategory, hero, hero2, autoSubmit: true });
+    if (cbPoll) clearInterval(cbPoll);
+    cbPoll = setInterval(async () => {
+      try {
+        const s = await api('/api/fanqie/create-book-status', 'POST', { book: CUR.slug });
+        if (s.msg) hint.textContent = '⏳ ' + s.msg;
+        if (s.status === 'done') {
+          clearInterval(cbPoll); cbPoll = null; btn.disabled = false; btn.textContent = old;
+          if (s.bookId) {
+            $('#pbBookId').value = s.bookId;
+            $('#pbProfile').value = profilePath;
+            hint.style.color = '#3a7'; hint.innerHTML = `✅ 已创建，bookId=<b>${esc(s.bookId)}</b>，已回填发布配置。可直接「预览将发」。`;
+            toast('✅ 番茄已创建《' + CUR.title + '》#' + s.bookId);
+            try { await pbLoadBooks(profilePath, true); $('#pbBook').value = s.bookId; $('#pbBookId').value = s.bookId; } catch {}
+          } else if (s.semiManual) {
+            hint.style.color = '#c90'; hint.innerHTML = '⚠️ ' + esc(s.msg || '').replace(/\n/g, '<br>');
+            toast('已在番茄填好创建表单，请去浏览器点「立即创建」');
+          }
+        } else if (s.status === 'error') {
+          clearInterval(cbPoll); cbPoll = null; btn.disabled = false; btn.textContent = old;
+          hint.style.color = '#e57'; hint.textContent = '❌ 创建失败：' + (s.error || '未知');
+        }
+      } catch {}
+    }, 3500);
+  } catch (e) { hint.style.color = '#e57'; hint.textContent = '❌ ' + e.message; btn.disabled = false; btn.textContent = old; }
+});
 // —— 番茄卷管理：读取现有卷 + 逐卷改名（番茄序号"第N卷："自动加，只改副标题）——
 function pbRenderVols(r) {
   const box = $('#pbVolList');
@@ -531,9 +734,11 @@ function pbRenderVols(r) {
   if (!vols.length) { box.innerHTML = '<p class="modal-hint">该书番茄上暂无分卷（或为单卷书）。</p>'; return; }
   box.innerHTML = vols.map(name => {
     const sub = name.includes('：') ? name.split('：').slice(1).join('：') : '';
-    return `<div class="pb-vol-row" data-old="${esc(name)}">
+    const num = cnVolNum(name);
+    return `<div class="pb-vol-row" data-old="${esc(name)}" data-num="${num || ''}">
       <span class="pb-vol-cur" title="${esc(name)}">${esc(name)}</span>
       <input class="pb-vol-input" maxlength="16" value="${esc(sub)}" placeholder="新副标题(≤16)">
+      <button class="btn pb-vol-gen" title="AI 从该卷正文/大纲起个卷名，填进左边输入框${num ? '' : '（这卷读不出卷号）'}"${num ? '' : ' disabled'}>✨生成</button>
       <button class="btn pb-vol-rename">改名</button>
     </div>`;
   }).join('');
@@ -548,7 +753,31 @@ $('#pbVolLoad').addEventListener('click', async () => {
   } catch (e) { $('#pbErr').textContent = '读取番茄卷失败：' + e.message; }
   finally { btn.disabled = false; btn.textContent = old; }
 });
+// 番茄卷名"第十三卷：xxx"/"第1卷" → 卷号（中文/阿拉伯）
+function cnVolNum(name) {
+  const m = String(name).match(/第\s*([0-9]+|[一二三四五六七八九十两]+)\s*卷/);
+  if (!m) return 0;
+  const s = m[1];
+  if (/^[0-9]+$/.test(s)) return parseInt(s, 10);
+  const d = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (s.includes('十')) { const [a, b] = s.split('十'); return (a === '' ? 1 : d[a] || 0) * 10 + (b === '' ? 0 : d[b] || 0); }
+  return d[s] || 0;
+}
 $('#pbVolList').addEventListener('click', async (ev) => {
+  // ✨生成：AI 为该卷起卷名（写回 bible）并填进输入框，让用户核对后再点「改名」推番茄
+  const genBtn = ev.target.closest('.pb-vol-gen');
+  if (genBtn) {
+    const row = genBtn.closest('.pb-vol-row'); const num = parseInt(row.getAttribute('data-num'), 10);
+    if (!num) { $('#pbErr').textContent = '这卷读不出卷号，无法生成'; return; }
+    genBtn.disabled = true; const og = genBtn.textContent; genBtn.textContent = '生成中…'; $('#pbErr').textContent = '';
+    try {
+      const r = await api('/api/book/gen-vol-name', 'POST', { book: CUR.slug, num, force: true });
+      if (r.ok && r.name) { row.querySelector('.pb-vol-input').value = r.name; toast(`第${num}卷卷名：${r.name}（已写入 bible，点「改名」推番茄）`); }
+      else $('#pbErr').textContent = '生成卷名失败：' + (r.error || '未知');
+    } catch (e) { $('#pbErr').textContent = '生成卷名失败：' + e.message; }
+    finally { genBtn.disabled = false; genBtn.textContent = og; }
+    return;
+  }
   const btn = ev.target.closest('.pb-vol-rename'); if (!btn) return;
   const row = btn.closest('.pb-vol-row'); const oldName = row.getAttribute('data-old');
   const sub = row.querySelector('.pb-vol-input').value.trim();
@@ -572,7 +801,9 @@ $('#pbPreview').addEventListener('click', async () => {
   const btn = $('#pbPreview'); const old = btn.textContent; btn.disabled = true; btn.textContent = '读取番茄中…';
   try {
     if (!await pbSave()) return;
-    const r = await pbRace(api('/api/book/publish-preview', 'POST', { book: CUR.slug }), 60000, '预览番茄超时');
+    // 预览要驱动浏览器读番茄（多卷书还要逐卷扫最大章号），常需 60s+；给足 150s，别让"读得慢"被当超时、
+    // 导致预览其实成功了、发布按钮却没亮（用户看到"预览之后没有发布按钮"）。
+    const r = await pbRace(api('/api/book/publish-preview', 'POST', { book: CUR.slug }), 150000, '预览番茄超时（读取番茄太慢，请重试或检查网络/代理）');
     const out = $('#pbPreviewOut'); out.style.display = '';
     if (r.blocked) {
       out.textContent = `⛔ 无法确认番茄当前章号，已阻止发布：\n${r.reason}\n\n请确认该 Unzoo 账号的浏览器能正常打开番茄章节管理页（检查代理/网络/登录），再重新预览。`;
@@ -708,7 +939,7 @@ function pbCloseModal() {
 }
 $('#pbClose').addEventListener('click', pbCloseModal);
 $('#pbCancel').addEventListener('click', pbCloseModal);
-$('#publishModal').addEventListener('click', (e) => { if (e.target === $('#publishModal')) pbCloseModal(); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#publishModal').addEventListener('click', (e) => { if (e.target === $('#publishModal')) pbCloseModal(); });
 
 // ---------- 从番茄导入图书到本地 ----------
 let IF_PROFILES = [], IF_BOOKS = [], IF_STREAM = null;
@@ -800,7 +1031,7 @@ $('#ifTest').addEventListener('click', () => ifImport(3));
 function ifCloseModal() { ifCloseStream(); $('#importFanqieModal').classList.add('hidden'); }
 $('#ifClose').addEventListener('click', ifCloseModal);
 $('#ifCancel').addEventListener('click', ifCloseModal);
-$('#importFanqieModal').addEventListener('click', (e) => { if (e.target === $('#importFanqieModal')) ifCloseModal(); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#importFanqieModal').addEventListener('click', (e) => { if (e.target === $('#importFanqieModal')) ifCloseModal(); });
 
 // ---------- 完本 ----------
 function flSync() {
@@ -821,7 +1052,7 @@ function setStatusLocal(s) { if (CUR) CUR.status = s; const b = STATE.books.find
 $('#btnFinale').addEventListener('click', openFinale);
 function flCloseModal() { flCloseStream && flCloseStream(); $('#finaleModal').classList.add('hidden'); }
 $('#flClose').addEventListener('click', flCloseModal);
-$('#finaleModal').addEventListener('click', (e) => { if (e.target === $('#finaleModal')) flCloseModal(); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#finaleModal').addEventListener('click', (e) => { if (e.target === $('#finaleModal')) flCloseModal(); });
 $('#flEnter').addEventListener('click', async () => {
   if (!CUR) return;
   $('#flErr').textContent = ''; $('#flEnter').disabled = true;
@@ -980,7 +1211,7 @@ $('#olApply').addEventListener('click', async () => {
 });
 $('#olClose').addEventListener('click', () => $('#outlineModal').classList.add('hidden'));
 $('#olCancel').addEventListener('click', () => $('#outlineModal').classList.add('hidden'));
-$('#outlineModal').addEventListener('click', (e) => { if (e.target === $('#outlineModal')) $('#outlineModal').classList.add('hidden'); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#outlineModal').addEventListener('click', (e) => { if (e.target === $('#outlineModal')) $('#outlineModal').classList.add('hidden'); });
 $('#olStart').addEventListener('click', async () => {
   if (!CUR) return;
   const scope = $('#olScope').value;
@@ -1014,7 +1245,7 @@ function openStyle() {
 $('#btnStyle').addEventListener('click', openStyle);
 $('#stClose').addEventListener('click', () => $('#styleModal').classList.add('hidden'));
 $('#stCancel').addEventListener('click', () => $('#styleModal').classList.add('hidden'));
-$('#styleModal').addEventListener('click', (e) => { if (e.target === $('#styleModal')) $('#styleModal').classList.add('hidden'); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#styleModal').addEventListener('click', (e) => { if (e.target === $('#styleModal')) $('#styleModal').classList.add('hidden'); });
 $('#stAiRec').addEventListener('click', async () => {
   if (!CUR) return;
   const b = STATE.books.find(x => x.slug === CUR.slug) || CUR;
@@ -1062,6 +1293,14 @@ const COVER_THEMES = [
   { id: 'vermilion', name: '朱砂', tColor: '#f2e6c8', aColor: '#e7d2a4', bg(c, W, H) { c.fillStyle = '#6e1f17'; c.fillRect(0, 0, W, H); c.fillStyle = 'rgba(0,0,0,.18)'; c.fillRect(0, H * .56, W, H * .44); c.strokeStyle = 'rgba(242,230,200,.4)'; c.lineWidth = 2; c.strokeRect(26, 26, W - 52, H - 52); } },
   { id: 'bamboo', name: '青竹', tColor: '#e6f0e2', aColor: '#9fc0a8', bg(c, W, H) { const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#14241c'); g.addColorStop(1, '#0c1812'); c.fillStyle = g; c.fillRect(0, 0, W, H); c.strokeStyle = 'rgba(159,192,168,.4)'; c.lineWidth = 2; c.strokeRect(26, 26, W - 52, H - 52); } },
   { id: 'minimal', name: '简约', tColor: '#222', aColor: '#666', bg(c, W, H) { c.fillStyle = '#f5f3ee'; c.fillRect(0, 0, W, H); c.fillStyle = '#c9a26a'; c.fillRect(0, 0, W, 150); } },
+  { id: 'warfire', name: '烽火', tColor: '#ffe6c0', aColor: '#e0a060', bg(c, W, H) { const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#2a0c06'); g.addColorStop(.5, '#5a1a0a'); g.addColorStop(1, '#0e0603'); c.fillStyle = g; c.fillRect(0, 0, W, H); const r = c.createRadialGradient(W * .5, H * .72, 10, W * .5, H * .72, W * .7); r.addColorStop(0, 'rgba(255,120,40,.35)'); r.addColorStop(1, 'rgba(255,120,40,0)'); c.fillStyle = r; c.fillRect(0, 0, W, H); c.strokeStyle = 'rgba(255,200,140,.4)'; c.lineWidth = 2; c.strokeRect(24, 24, W - 48, H - 48); } },
+  { id: 'imperial', name: '帝阙', tColor: '#f5e2a8', aColor: '#c9a24a', bg(c, W, H) { const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#3a0e0e'); g.addColorStop(1, '#160505'); c.fillStyle = g; c.fillRect(0, 0, W, H); c.fillStyle = 'rgba(201,162,74,.10)'; for (let i = 1; i < 7; i++) c.fillRect(0, i * H / 7, W, 2); c.strokeStyle = '#c9a24a'; c.lineWidth = 3; c.strokeRect(24, 24, W - 48, H - 48); c.lineWidth = 1; c.strokeRect(34, 34, W - 68, H - 68); } },
+  { id: 'bloodmoon', name: '血月', tColor: '#f0e0d0', aColor: '#cc8888', bg(c, W, H) { const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#0a0810'); g.addColorStop(1, '#1a0a12'); c.fillStyle = g; c.fillRect(0, 0, W, H); const m = c.createRadialGradient(W * .5, H * .3, 30, W * .5, H * .3, 130); m.addColorStop(0, '#a83030'); m.addColorStop(1, 'rgba(168,48,48,0)'); c.fillStyle = m; c.beginPath(); c.arc(W * .5, H * .3, 95, 0, 7); c.fill(); c.fillStyle = 'rgba(255,255,255,.4)'; for (let i = 0; i < 40; i++) c.fillRect(Math.random() * W, Math.random() * H * .55, 1.4, 1.4); } },
+  { id: 'rivers', name: '山河', tColor: '#eef2f0', aColor: '#a8c0b0', bg(c, W, H) { const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#8fb0c8'); g.addColorStop(.5, '#5a7d92'); g.addColorStop(1, '#2a3d48'); c.fillStyle = g; c.fillRect(0, 0, W, H); for (let k = 0; k < 3; k++) { c.fillStyle = `rgba(20,40,50,${.35 + k * .18})`; c.beginPath(); const y = H * (.55 + k * .13); c.moveTo(0, y); for (let x = 0; x <= W; x += 40) c.lineTo(x, y - Math.sin(x / 60 + k) * 24 - k * 8); c.lineTo(W, H); c.lineTo(0, H); c.closePath(); c.fill(); } } },
+  { id: 'jianghu', name: '江湖', tColor: '#eae4d8', aColor: '#b0a890', bg(c, W, H) { const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#20242a'); g.addColorStop(1, '#0e1013'); c.fillStyle = g; c.fillRect(0, 0, W, H); const r = c.createRadialGradient(W * .5, H * .4, 20, W * .5, H * .4, W * .6); r.addColorStop(0, 'rgba(200,200,190,.14)'); r.addColorStop(1, 'rgba(200,200,190,0)'); c.fillStyle = r; c.fillRect(0, 0, W, H); c.strokeStyle = 'rgba(230,225,215,.35)'; c.lineWidth = 2; c.strokeRect(26, 26, W - 52, H - 52); } },
+  { id: 'starry', name: '星穹', tColor: '#eae6ff', aColor: '#b0a8e0', bg(c, W, H) { const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#160a2e'); g.addColorStop(.5, '#2a1650'); g.addColorStop(1, '#0a0618'); c.fillStyle = g; c.fillRect(0, 0, W, H); const r = c.createRadialGradient(W * .5, H * .35, 10, W * .5, H * .35, W * .7); r.addColorStop(0, 'rgba(150,110,255,.3)'); r.addColorStop(1, 'rgba(150,110,255,0)'); c.fillStyle = r; c.fillRect(0, 0, W, H); for (let i = 0; i < 70; i++) { c.globalAlpha = Math.random() * .8 + .2; c.fillStyle = '#fff'; c.fillRect(Math.random() * W, Math.random() * H, 1.6, 1.6); } c.globalAlpha = 1; } },
+  { id: 'urban', name: '都市', tColor: '#eafcff', aColor: '#7fd0e0', bg(c, W, H) { const g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#0a1826'); g.addColorStop(1, '#06304a'); c.fillStyle = g; c.fillRect(0, 0, W, H); for (let i = 0; i < 18; i++) { const bx = i * W / 18, bh = 40 + Math.random() * 220; c.fillStyle = 'rgba(20,60,80,.7)'; c.fillRect(bx, H - bh, W / 18 - 4, bh); } const r = c.createLinearGradient(0, H * .4, 0, H); r.addColorStop(0, 'rgba(0,200,255,0)'); r.addColorStop(1, 'rgba(0,200,255,.18)'); c.fillStyle = r; c.fillRect(0, 0, W, H); } },
+  { id: 'noir', name: '暗影', tColor: '#f0f0f0', aColor: '#999999', bg(c, W, H) { c.fillStyle = '#0a0a0c'; c.fillRect(0, 0, W, H); const g = c.createLinearGradient(W * .2, 0, W * .8, H); g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(.5, 'rgba(255,255,255,.12)'); g.addColorStop(1, 'rgba(255,255,255,0)'); c.fillStyle = g; c.fillRect(0, 0, W, H); c.strokeStyle = 'rgba(255,255,255,.25)'; c.lineWidth = 2; c.strokeRect(26, 26, W - 52, H - 52); } },
 ];
 function wrapCN(c, text, maxW) { const lines = []; let cur = ''; for (const ch of text) { if (c.measureText(cur + ch).width > maxW && cur) { lines.push(cur); cur = ch; } else cur += ch; } if (cur) lines.push(cur); return lines; }
 let coverBgImg = null;   // 已加载的 AI 底图（HTMLImageElement）
@@ -1115,6 +1354,7 @@ async function openCover() {
   $('#cvTheme').innerHTML = `<option value="ai">🎨 AI 插画</option>` + opts;
   $('#cvTheme').value = 'ink';
   $('#cvErr').textContent = ''; $('#coverModal').classList.remove('hidden');
+  cvLoadChatProfiles();   // 填充 ChatGPT 账号下拉
   // 若书里已有 AI 底图，预加载并默认用它
   if (CUR.stats?.coverBg) {
     try { await loadCoverBg(`${API}/api/book/cover-bg?book=${encodeURIComponent(CUR.slug)}&t=${CUR.stats.coverBgMtime || 0}`); $('#cvTheme').value = 'ai'; } catch {}
@@ -1136,8 +1376,127 @@ $('#cvGenAI').addEventListener('click', async () => {
   } catch (e) { $('#cvErr').textContent = '生成失败：' + e.message + '（需在设置里填 Gemini key，且代理可用）'; }
   finally { btn.disabled = false; btn.textContent = old; }
 });
-$('#cvClose').addEventListener('click', () => $('#coverModal').classList.add('hidden'));
-$('#coverModal').addEventListener('click', (e) => { if (e.target === $('#coverModal')) $('#coverModal').classList.add('hidden'); });
+// ===== ChatGPT 网页版生成封面（免费·慢：后台跑 + 轮询状态）=====
+async function cvLoadChatProfiles() {
+  const sel = $('#cvChatProfile'); if (!sel) return;
+  try {
+    if (!WEB_PROFILES) { const r = await api('/api/unzoo/profiles', 'POST', {}); WEB_PROFILES = r.profiles || []; }
+    const remembered = (CUR && localStorage.getItem(webProfileKey(CUR.slug))) || (CUR?.publish || {}).profilePath || '';
+    if (!WEB_PROFILES.length) { sel.innerHTML = '<option value="">（未检测到 Unzoo 账号，请先开浏览器并登录 ChatGPT）</option>'; return; }
+    sel.innerHTML = WEB_PROFILES.map(p => {
+      const tag = p.running ? '○运行中' : '·未启动';
+      const label = p.dir && p.dir !== p.name ? `${p.name} · ${p.dir}` : p.name;
+      return `<option value="${esc(p.path)}"${p.path === remembered ? ' selected' : ''}>${esc(label)}（${tag}）</option>`;
+    }).join('');
+  } catch (e) { sel.innerHTML = '<option value="">（取账号失败：' + esc(e.message) + '）</option>'; }
+}
+let cvChatPoll = null;
+$('#cvGenChatGPT').addEventListener('click', async () => {
+  if (!CUR) return;
+  const profilePath = $('#cvChatProfile').value;
+  if (!profilePath) { $('#cvErr').textContent = '请先选一个【已登录 ChatGPT】的浏览器账号'; return; }
+  localStorage.setItem(webProfileKey(CUR.slug), profilePath);
+  const btn = $('#cvGenChatGPT'); btn.disabled = true; const old = btn.textContent;
+  $('#cvErr').textContent = '';
+  const hint = $('#cvChatHint'); const hintOld = hint.textContent;
+  try {
+    await api('/api/book/gen-cover-chatgpt', 'POST', { book: CUR.slug, profilePath, prompt: $('#cvPrompt').value.trim() || undefined });
+    btn.textContent = '🖼️ ChatGPT 生成中…（2–4 分钟）';
+    if (cvChatPoll) clearInterval(cvChatPoll);
+    cvChatPoll = setInterval(async () => {
+      try {
+        const s = await api('/api/book/gen-cover-status', 'POST', { book: CUR.slug });
+        if (s.msg) hint.textContent = '⏳ ' + s.msg;
+        if (s.status === 'done') {
+          clearInterval(cvChatPoll); cvChatPoll = null;
+          await loadCoverBg(API + s.url + '&r=' + Date.now());
+          $('#cvTheme').value = 'ai'; drawCover();
+          if (s.prompt && !$('#cvPrompt').value.trim()) $('#cvPrompt').value = s.prompt;
+          hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+          toast('ChatGPT 封面已生成');
+        } else if (s.status === 'error') {
+          clearInterval(cvChatPoll); cvChatPoll = null;
+          $('#cvErr').textContent = 'ChatGPT 生成失败：' + (s.error || '未知');
+          hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+        }
+      } catch {}
+    }, 6000);
+  } catch (e) {
+    $('#cvErr').textContent = '启动失败：' + e.message;
+    hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+  }
+});
+// 📥 抓取封面：图已在 ChatGPT 页生成好、但自动流程超时/没拿到时，手动从当前页把图抓下来（快）。
+$('#cvGrabChatGPT')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const profilePath = $('#cvChatProfile').value;
+  if (!profilePath) { $('#cvErr').textContent = '请先选一个【已登录 ChatGPT】的浏览器账号'; return; }
+  localStorage.setItem(webProfileKey(CUR.slug), profilePath);
+  const btn = $('#cvGrabChatGPT'); btn.disabled = true; const old = btn.textContent;
+  $('#cvErr').textContent = '';
+  const hint = $('#cvChatHint'); const hintOld = hint.textContent;
+  try {
+    await api('/api/book/grab-cover-chatgpt', 'POST', { book: CUR.slug, profilePath });
+    btn.textContent = '📥 抓取中…';
+    if (cvChatPoll) clearInterval(cvChatPoll);
+    cvChatPoll = setInterval(async () => {
+      try {
+        const s = await api('/api/book/gen-cover-status', 'POST', { book: CUR.slug });
+        if (s.msg) hint.textContent = '⏳ ' + s.msg;
+        if (s.status === 'done') {
+          clearInterval(cvChatPoll); cvChatPoll = null;
+          await loadCoverBg(API + s.url + '&r=' + Date.now());
+          $('#cvTheme').value = 'ai'; drawCover();
+          hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+          toast('已抓取 ChatGPT 封面');
+        } else if (s.status === 'error') {
+          clearInterval(cvChatPoll); cvChatPoll = null;
+          $('#cvErr').textContent = '抓取失败：' + (s.error || '未知');
+          hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+        }
+      } catch {}
+    }, 2500);
+  } catch (e) {
+    $('#cvErr').textContent = '启动失败：' + e.message;
+    hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+  }
+});
+// ===== 更换番茄封面（把 cover.png 推到番茄；开关：全自动提交 / 停在待提交）=====
+let cvFqPoll = null;
+$('#cvPushFanqie')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const auto = $('#cvFqAuto').checked;
+  if (auto && !confirm('「全自动提交」会直接改你番茄线上的封面，确定？\n（前期建议先关掉，传好后自己在浏览器点"立即修改"确认）')) return;
+  const btn = $('#cvPushFanqie'); btn.disabled = true; const old = btn.textContent;
+  $('#cvErr').textContent = ''; const hint = $('#cvFqHint'); const hintOld = hint.innerHTML;
+  try {
+    await api('/api/book/push-fanqie-cover', 'POST', { book: CUR.slug, autoSubmit: auto });
+    btn.textContent = '⬆️ 推送中…';
+    if (cvFqPoll) clearInterval(cvFqPoll);
+    cvFqPoll = setInterval(async () => {
+      try {
+        const s = await api('/api/book/push-fanqie-cover-status', 'POST', { book: CUR.slug });
+        if (s.msg) hint.textContent = '⏳ ' + s.msg;
+        if (s.status === 'done') {
+          clearInterval(cvFqPoll); cvFqPoll = null; btn.disabled = false; btn.textContent = old;
+          if (s.semiManual) {
+            $('#cvErr').textContent = '';
+            hint.innerHTML = '⚠️ ' + esc(s.msg || '').replace(/\n/g, '<br>');
+            toast('已在番茄打开「本地上传」，请到那个浏览器手动选图完成换封面');
+          } else {
+            hint.innerHTML = hintOld;
+            toast(s.submitted ? '✅ 番茄封面已提交' : '封面已传到番茄「待提交」，请去浏览器点"立即修改"确认');
+          }
+        } else if (s.status === 'error') {
+          clearInterval(cvFqPoll); cvFqPoll = null; btn.disabled = false; btn.textContent = old; hint.innerHTML = hintOld;
+          $('#cvErr').textContent = '番茄换封面失败：' + (s.error || '未知');
+        }
+      } catch {}
+    }, 4000);
+  } catch (e) { $('#cvErr').textContent = e.message; toast('番茄换封面：' + e.message); btn.disabled = false; btn.textContent = old; }
+});
+$('#cvClose').addEventListener('click', () => { if (cvChatPoll) { clearInterval(cvChatPoll); cvChatPoll = null; } if (cvFqPoll) { clearInterval(cvFqPoll); cvFqPoll = null; } $('#coverModal').classList.add('hidden'); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#coverModal').addEventListener('click', (e) => { if (e.target === $('#coverModal')) $('#coverModal').classList.add('hidden'); });
 $('#cvDownload').addEventListener('click', async () => {
   try {
     const dataUrl = $('#cvCanvas').toDataURL('image/png');
@@ -1149,6 +1508,123 @@ $('#cvDownload').addEventListener('click', async () => {
     }
   } catch (e) { $('#cvErr').textContent = e.message; }
 });
+// ===== 书名实验生成器：批量出候选书名 + 每个一张不同画面封面 =====
+let neCurBook = null, nePoll = null, neManifest = null;
+function openNameExp(book) {
+  neCurBook = book;
+  $('#neBookTitle').textContent = book.title;
+  $('#neErr').textContent = ''; $('#neHint').textContent = ''; $('#neGrid').innerHTML = ''; $('#neGen').disabled = false;
+  $('#nameExpModal').classList.remove('hidden');
+  api('/api/book/name-experiment-status', 'POST', { book: book.slug }).then(s => {
+    if (s.manifest && s.manifest.items) neRender(s.manifest);
+    if (s.status === 'running') { $('#neHint').textContent = '⏳ 生成中…'; $('#neGen').disabled = true; neStartPoll(); }
+  }).catch(() => {});
+}
+function neRender(manifest) {
+  neManifest = manifest;
+  const items = (manifest && manifest.items) || [];
+  if (!items.length) { $('#neGrid').innerHTML = ''; return; }
+  // 底图是【无字画面】(Imagen 被要求 no text，AI 出的字会糊)，所以每张封面的书名跟主封面一样【客户端 canvas 叠上去】
+  $('#neGrid').innerHTML = items.map((it, i) => `
+    <div class="ne-card">
+      ${it.bg ? `<canvas class="ne-cover" width="600" height="800" data-i="${i}"></canvas>` : '<div class="ne-noimg">封面失败</div>'}
+      <div class="ne-title" title="点击复制">${esc(it.title)}</div>
+      <div class="ne-hook">${esc(it.hook || '')}</div>
+    </div>`).join('');
+  $('#neGrid').querySelectorAll('canvas.ne-cover').forEach(cv => {
+    const it = items[+cv.getAttribute('data-i')];
+    const url = `${API}/api/book/exp-image?book=${encodeURIComponent(neCurBook.slug)}&file=${encodeURIComponent(it.bg)}&t=${manifest.generatedAt || ''}`;
+    neDrawCover(cv, url, it.title).catch(() => {});
+  });
+  $('#neGrid').querySelectorAll('.ne-title').forEach((el, i) => el.addEventListener('click', () => { try { navigator.clipboard.writeText(items[i].title); toast('已复制书名：' + items[i].title); } catch {} }));
+}
+// 无字底图 + 书名 → 画布（同主封面 drawAiBg+drawCoverText：cover 填满 600×800 + 上下压暗 + 描边 + 居中标题）
+function neDrawCover(canvas, bgUrl, title) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(); img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const W = 600, H = 800, c = canvas.getContext('2d');
+      const iw = img.naturalWidth, ih = img.naturalHeight, s = Math.max(W / iw, H / ih), dw = iw * s, dh = ih * s;
+      c.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
+      const g = c.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, 'rgba(0,0,0,.55)'); g.addColorStop(.32, 'rgba(0,0,0,.15)'); g.addColorStop(.7, 'rgba(0,0,0,.15)'); g.addColorStop(1, 'rgba(0,0,0,.6)');
+      c.fillStyle = g; c.fillRect(0, 0, W, H);
+      c.strokeStyle = 'rgba(255,255,255,.35)'; c.lineWidth = 2; c.strokeRect(20, 20, W - 40, H - 40);
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.shadowColor = 'rgba(0,0,0,.85)'; c.shadowBlur = 14; c.shadowOffsetY = 3;
+      c.fillStyle = '#fff';
+      const t = (title || '未命名').trim();
+      const size = t.length <= 4 ? 100 : t.length <= 6 ? 80 : t.length <= 9 ? 62 : 50;
+      c.font = `700 ${size}px "Noto Serif SC","Songti SC","SimSun",serif`;
+      const lines = wrapCN(c, t, W - 120);
+      let y = H * 0.30 - (lines.length - 1) * size * 0.6;
+      for (const ln of lines) { c.fillText(ln, W / 2, y); y += size * 1.2; }
+      c.shadowColor = 'transparent'; c.shadowBlur = 0; c.shadowOffsetY = 0;
+      resolve(canvas);
+    };
+    img.onerror = () => reject(new Error('底图加载失败'));
+    img.src = bgUrl;
+  });
+}
+function neStartPoll() {
+  if (nePoll) clearInterval(nePoll);
+  nePoll = setInterval(async () => {
+    try {
+      const s = await api('/api/book/name-experiment-status', 'POST', { book: neCurBook.slug });
+      if (s.msg && s.status === 'running') $('#neHint').textContent = '⏳ ' + s.msg;
+      if (s.status === 'done') { clearInterval(nePoll); nePoll = null; $('#neHint').textContent = '✅ 生成完成，点书名可复制'; $('#neGen').disabled = false; if (s.manifest) neRender(s.manifest); }
+      else if (s.status === 'error') { clearInterval(nePoll); nePoll = null; $('#neHint').textContent = ''; $('#neErr').textContent = '生成失败：' + (s.error || ''); $('#neGen').disabled = false; }
+    } catch {}
+  }, 3000);
+}
+$('#neGen')?.addEventListener('click', async () => {
+  if (!neCurBook) return;
+  const count = Math.max(2, Math.min(10, Number($('#neCount').value) || 6));
+  $('#neErr').textContent = ''; $('#neGen').disabled = true;
+  $('#neHint').textContent = `⏳ 生成 ${count} 个书名+封面中（约 ${count * 15} 秒起，勿关弹窗）…`;
+  try { await api('/api/book/name-experiment', 'POST', { book: neCurBook.slug, count }); neStartPoll(); }
+  catch (e) { $('#neErr').textContent = e.message; $('#neGen').disabled = false; }
+});
+$('#neClose')?.addEventListener('click', () => { if (nePoll) { clearInterval(nePoll); nePoll = null; } if (nePushPoll) { clearInterval(nePushPoll); nePushPoll = null; } $('#nameExpModal').classList.add('hidden'); });
+// 🚀 推到番茄：把候选书名+封面推到番茄「多书名实验·实验配置」（设置别名）
+let nePushPoll = null;
+$('#nePush')?.addEventListener('click', async () => {
+  if (!neCurBook) return;
+  const autoSubmit = !!$('#nePushAuto')?.checked;
+  if (autoSubmit && !confirm('开启实验不可逆（会真的向番茄提交多书名实验）。确定自动开启？\n建议先不勾，填好后到浏览器核对再点「开启实验」。')) return;
+  $('#neErr').textContent = ''; $('#nePush').disabled = true;
+  try {
+    // 先把【叠好书名】的封面(画布)存成 titled 图，让推到番茄的封面带书名(不是无字底图)
+    $('#neHint').textContent = '⏳ 正在合成带书名的封面…';
+    await neBakeTitledCovers();
+    $('#neHint').textContent = '⏳ 正在推到番茄（打开多书名实验页、切书、逐个填书名+传封面）…';
+    const r = await api('/api/book/push-name-experiment', 'POST', { book: neCurBook.slug, autoSubmit });
+    if (r.already) { $('#neHint').textContent = '⏳ 已在推送中…'; }
+    nePushStartPoll();
+  } catch (e) { $('#neErr').textContent = e.message; $('#nePush').disabled = false; $('#neHint').textContent = ''; }
+});
+// 把网格里每张【已叠书名】的画布存回 experiment/NN.titled.png（推番茄时优先用它，封面才带书名）
+async function neBakeTitledCovers() {
+  const canvases = [...($('#neGrid').querySelectorAll('canvas.ne-cover') || [])];
+  const items = (neManifest && neManifest.items) || [];
+  for (const cv of canvases) {
+    const it = items[+cv.getAttribute('data-i')]; if (!it || !it.bg) continue;
+    let dataUrl; try { dataUrl = cv.toDataURL('image/png'); } catch { continue; }   // 画布被污染就跳过(退回无字底图)
+    const file = it.bg.replace(/\.png$/i, '') + '.titled.png';
+    try { await api('/api/book/exp-cover-save', 'POST', { book: neCurBook.slug, file, dataUrl }); } catch {}
+  }
+}
+function nePushStartPoll() {
+  if (nePushPoll) clearInterval(nePushPoll);
+  nePushPoll = setInterval(async () => {
+    try {
+      const s = await api('/api/book/push-name-experiment-status', 'POST', { book: neCurBook.slug });
+      if (s.msg && s.status === 'running') $('#neHint').textContent = '⏳ ' + s.msg;
+      if (s.status === 'done') { clearInterval(nePushPoll); nePushPoll = null; $('#nePush').disabled = false; $('#neHint').textContent = (s.submitted ? '✅ ' : '📝 ') + (s.msg || '完成'); if (s.msg) toast(s.msg.split('\n')[0]); }
+      else if (s.status === 'error') { clearInterval(nePushPoll); nePushPoll = null; $('#nePush').disabled = false; $('#neHint').textContent = ''; $('#neErr').textContent = '推到番茄失败：' + (s.error || ''); }
+    } catch {}
+  }, 2500);
+}
 $('#cvSave').addEventListener('click', async () => {
   if (!CUR) return; $('#cvSave').disabled = true; $('#cvErr').textContent = '保存中…';
   try { await api('/api/book/save-cover', 'POST', { book: CUR.slug, dataUrl: $('#cvCanvas').toDataURL('image/png') }); $('#coverModal').classList.add('hidden'); toast('封面已保存到书目录 cover.png'); }
@@ -1374,6 +1850,12 @@ $('#rdRenumber').addEventListener('click', async () => {
   finally { $('#rdRenumber').disabled = false; }
 });
 $('#btnReadFromWrite').addEventListener('click', () => { if (CUR) openReader(CUR); });
+$('#btnRead').addEventListener('click', () => { if (CUR) openReader(CUR); });
+// 打开阅读器并直接跳到某一章（rel）——共创/写作后"直接读刚写的这一章"用。
+async function openReaderAt(book, rel) {
+  await openReader(book);
+  if (rel) { try { await loadReaderFile(rel); } catch {} }
+}
 
 // ---------- 删除书 ----------
 let DEL_BOOK = null;
@@ -1385,7 +1867,7 @@ function openDelete(b) {
 }
 $('#dlClose').addEventListener('click', () => $('#delModal').classList.add('hidden'));
 $('#dlCancel').addEventListener('click', () => $('#delModal').classList.add('hidden'));
-$('#delModal').addEventListener('click', (e) => { if (e.target === $('#delModal')) $('#delModal').classList.add('hidden'); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#delModal').addEventListener('click', (e) => { if (e.target === $('#delModal')) $('#delModal').classList.add('hidden'); });
 $('#dlConfirm').addEventListener('click', async () => {
   if (!DEL_BOOK) return;
   $('#dlConfirm').disabled = true; $('#dlErr').textContent = '删除中…';
@@ -1419,7 +1901,7 @@ $('#btnImport').addEventListener('click', () => { openModal(); $('#nbImport').cl
 $('#nbCancel').addEventListener('click', closeModal);
 $('#modalClose').addEventListener('click', closeModal);
 // 点遮罩空白处关闭（点卡片内部不关）
-$('#modal').addEventListener('click', (e) => { if (e.target === $('#modal')) closeModal(); });
+// [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] 新建书弹窗同理，不再点背景关闭。
 // Esc 关闭
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
@@ -1544,13 +2026,27 @@ async function renderUsage() {
   const list = $('#usageList'); list.innerHTML = '';
   const entries = Object.entries(u.books || {});
   if (!entries.length) { list.innerHTML = '<div class="env-row"><span class="v">暂无用量记录。开始写作后自动统计。</span></div>'; return; }
-  const max = Math.max(...entries.map(([, b]) => b.total), 1);
-  for (const [slug, b] of entries.sort((a, c) => c[1].total - a[1].total)) {
+  const apiTok = (b) => b.api ? (b.api.promptTokens || 0) + (b.api.completionTokens || 0) : 0;
+  const score = (b) => (b.total || 0) + apiTok(b);
+  const max = Math.max(...entries.map(([, b]) => score(b)), 1);
+  // 顶部汇总：API 写作总成本（估算）—— 只要有任何一本用过 API 就显示
+  const totalCost = entries.reduce((s, [, b]) => s + (b.api?.cost || 0), 0);
+  const totalApiTok = entries.reduce((s, [, b]) => s + apiTok(b), 0);
+  if (entries.some(([, b]) => b.api)) {
+    const head = el('div', 'usage-row');
+    head.innerHTML = `<div class="top"><span class="title">💰 API 写作总成本（估算）</span><span class="num">${fmtCost(totalCost)}</span></div>
+      <div style="margin-top:5px;color:var(--muted);font-size:11.5px">共 ${fmtTok(totalApiTok)} tokens · 仅直连大模型接口（智谱/DeepSeek/通义）按量计费；免费模型（glm 系列 *flash）成本为 ¥0。codex/claude 走订阅、不计入金额。价格为估算，可在 config 覆盖。</div>`;
+    list.appendChild(head);
+  }
+  for (const [slug, b] of entries.sort((a, c) => score(c[1]) - score(a[1]))) {
     const title = (STATE.books.find(x => x.slug === slug) || {}).title || slug;
     const row = el('div', 'usage-row');
+    const apiLine = b.api
+      ? `<div style="margin-top:4px;color:var(--muted);font-size:11.5px">🔌 API：${fmtTok(apiTok(b))} tokens · ${b.api.calls || 0} 次调用 · 估算 <b>${fmtCost(b.api.cost || 0)}</b></div>`
+      : '';
     row.innerHTML = `<div class="top"><span class="title">《${esc(title)}》</span><span class="num">${fmtTok(b.total)} tokens</span></div>
-      <div class="bar"><i style="width:${(b.total / max * 100).toFixed(1)}%"></i></div>
-      <div style="margin-top:7px;color:var(--muted);font-size:11.5px">${b.total.toLocaleString()} · 写作会话 ${Object.keys(b.sessions || {}).length}</div>`;
+      <div class="bar"><i style="width:${(score(b) / max * 100).toFixed(1)}%"></i></div>
+      <div style="margin-top:7px;color:var(--muted);font-size:11.5px">${(b.total || 0).toLocaleString()} tokens（codex/claude 订阅）· 写作会话 ${Object.keys(b.sessions || {}).length}</div>${apiLine}`;
     list.appendChild(row);
   }
 }
@@ -1568,6 +2064,18 @@ async function renderSettings() {
       </div>
     </label>
     <label class="field"><span>默认模型</span><select id="setModel">${STATE.models.map(m => `<option value="${m.id}" ${m.id === c.defaultModel ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
+    <fieldset class="field" style="border:1px solid var(--border,#333);border-radius:8px;padding:10px 12px">
+      <legend style="padding:0 6px;font-size:13px;opacity:.8">🔌 API 模型（直连大模型接口写作 · 稳、能连续跑）</legend>
+      <div class="modal-hint" style="margin:0 0 8px">填了 Key 就能在写作台选对应「XX API」模型。<b>智谱 glm-4-flash 免费</b>（推荐给国内/省钱）。留空=不用。已设置的显示占位、留空不覆盖。</div>
+      <label class="field"><span>智谱 GLM Key（open.bigmodel.cn，形如 id.secret）</span>
+        <input id="setZhipuKey" type="password" autocomplete="off" placeholder="${c.api?.zhipu?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+      <label class="field"><span>智谱模型</span>
+        <input id="setZhipuModel" value="${esc(c.api?.zhipu?.model || 'glm-4-flash')}" placeholder="glm-4-flash / glm-4.5-flash（免费）"></label>
+      <label class="field"><span>DeepSeek Key（platform.deepseek.com）</span>
+        <input id="setDsKey" type="password" autocomplete="off" placeholder="${c.api?.deepseek?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+      <label class="field"><span>通义 DashScope Key（阿里云）</span>
+        <input id="setDashKey" type="password" autocomplete="off" placeholder="${c.api?.dashscope?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+    </fieldset>
     <label class="field"><span>代理</span><select id="setProxy">
       <option value="on" ${c.enableProxy ? 'selected' : ''}>开（用 unterm 当前代理）</option>
       <option value="off" ${!c.enableProxy ? 'selected' : ''}>关</option></select></label>
@@ -1590,6 +2098,13 @@ async function renderSettings() {
         freshContextLimit: Math.max(0, Number($('#setFreshCtx').value) || 0),
       },
     };
+    // API 模型 key/model：只把【填了的】发上去（空 key 不覆盖已存的）
+    const apiPatch = {};
+    const zk = $('#setZhipuKey').value.trim(); const zm = $('#setZhipuModel').value.trim();
+    if (zk || zm) { apiPatch.zhipu = {}; if (zk) apiPatch.zhipu.apiKey = zk; if (zm) apiPatch.zhipu.model = zm; }
+    const dk = $('#setDsKey').value.trim(); if (dk) apiPatch.deepseek = { apiKey: dk };
+    const ak = $('#setDashKey').value.trim(); if (ak) apiPatch.dashscope = { apiKey: ak };
+    if (Object.keys(apiPatch).length) patch.api = apiPatch;
     try { STATE.config = await api('/api/config', 'POST', { patch }); fillModels(); toast('设置已保存'); }
     catch (e) { toast(e.message); }
   });

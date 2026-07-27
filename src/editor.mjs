@@ -13,12 +13,23 @@ function safeName(s) { return String(s).replace(/[\\/:*?"<>|\r\n]+/g, '_').slice
 
 // 选“另一个模型”当主编：优先 cfg 指定 → 其次任一可用且与作者不同 → 实在没有就退回作者模型（仍是一次独立新上下文审稿）。
 export function pickEditorModel(authorModel, cfg) {
+  return reviewerCandidates(authorModel, cfg)[0];
+}
+
+// 审稿人候选（按优先级、去重、只取可用）：首选 cfg 指定；否则优先【与作者不同】的独立模型，快而稳的排前
+// （gemini/qwen），claude 因偶发无头慢/超时排后，作者同模型兜底最后。reviewOutline 逐个尝试，超时/失败自动换下一个。
+export function reviewerCandidates(authorModel, cfg) {
   const avail = detectAll().filter(m => m.available).map(m => m.id);
+  const out = [];
+  const push = (id) => { if (id && avail.includes(id) && !out.includes(id)) out.push(id); };
   const want = cfg?.editorReview?.model;
-  if (want && want !== 'auto' && avail.includes(want)) return want;
-  const order = ['claude', 'codex', 'gemini'];
-  const diff = order.find(id => id !== authorModel && avail.includes(id));
-  return diff || authorModel;
+  if (want && want !== 'auto') push(want);
+  // codex 的 headless(`exec`) 输出干净、真能非交互跑通 → 优先当审稿人（哪怕它=作者，"同模型独立审"也强过
+  // gemini 参数报错 / qwen 未登录 吐出来的噪音当审稿）。gemini/qwen/claude 只作兜底（本机实测多半跑不了）。
+  push('codex');
+  for (const id of ['gemini', 'qwen', 'claude']) if (id !== authorModel) push(id);
+  push(authorModel);   // 同模型独立审兜底
+  return out.length ? out : [authorModel];
 }
 
 // 非交互跑一次模型（异步 spawn，不阻塞事件循环 —— 与 planner 的同步版区分）。
@@ -94,16 +105,45 @@ export async function reviewOutline({ book, scope = '立项', cfg, authorModel, 
   const outline = ofiles.map(f => `### ${path.basename(f)}\n` + readSafe(f)).join('\n\n').trim();
   if (!outline) throw new Error('未找到可审的大纲文件（outlines/ 为空？）');
 
-  const editorModel = pickEditorModel(authorModel, cfg);
-  onLog({ level: 'act', msg: `主编（${editorModel}${editorModel === authorModel ? '·同模型独立审' : ''}）正在审【${scope}】大纲…` });
-
+  // 逐个审稿人尝试：超时/失败/空返回就自动换下一个（治"某个审稿模型无头卡死→审稿门永远过不去"）。
   const prompt = buildEditorPrompt(book, scope, bible, outline);
-  const raw = await runModelOnceAsync(editorModel, prompt, cfg, cfg?.editorReview?.timeoutMs || 180000);
-  const critique = (raw || '').trim() || '（审稿模型未返回内容）';
-
+  const timeout = cfg?.editorReview?.timeoutMs || 180000;
+  const candidates = reviewerCandidates(authorModel, cfg);
+  let raw = '', editorModel = candidates[0], lastErr = null;
+  // 清掉 node 噪音行（gemini/qwen headless 常在 stdout 前面吐 (node:...) 实验性警告）。
+  const strip = (s) => String(s || '').split('\n').filter(l => !/^\(node:\d+\)/.test(l) && !/ExperimentalWarning|EnvHttpProxyAgent|--trace-warnings/i.test(l)).join('\n').trim();
+  // 无效审稿识别：CLI 用法/报错、未登录/未配置（qwen 常吐 "No auth type is selected"）、过短——都不能当审稿收下。
+  const looksBad = (s) => {
+    const t = strip(s);
+    if (t.length < 120) return true;   // 正常审稿都几百字以上
+    const head = t.slice(0, 600);
+    if (/^(usage:|error\b|错误[:：]|unknown (option|argument|command)|invalid (option|argument|value)|missing required|参数错误|command not found|not recognized)/im.test(head)) return true;
+    if (/(no auth type|not authenticated|configure an auth|--auth-type|please (configure|log ?in|sign ?in)|未(登录|认证|配置)|请先(登录|配置|设置))/i.test(head)) return true;
+    return false;
+  };
+  for (const cand of candidates) {
+    editorModel = cand;
+    onLog({ level: 'act', msg: `主编（${cand}${cand === authorModel ? '·同模型独立审' : ''}）正在审【${scope}】大纲…` });
+    try {
+      const out = await runModelOnceAsync(cand, prompt, cfg, timeout);
+      const cleaned = strip(out);
+      if (cleaned && !looksBad(out)) { raw = cleaned; lastErr = null; break; }
+      lastErr = new Error(looksBad(out) ? '疑似 CLI 报错/未登录/无效审稿输出' : '审稿返回空');
+      onLog({ level: 'warn', msg: `主编 ${cand} 输出无效（${lastErr.message}）→ 换下一个审稿人` });
+    } catch (e) { lastErr = e; onLog({ level: 'warn', msg: `主编 ${cand} 审稿失败（${e.message}）→ 换下一个审稿人` }); }
+  }
   const reviewsDir = path.join(dir, 'reviews');
   try { fs.mkdirSync(reviewsDir, { recursive: true }); } catch {}
   const file = path.join(reviewsDir, `大纲审稿-${safeName(scope)}.md`);
+  if (!raw) {
+    // 所有审稿人都失败/无效 → 【自动放行】：写一份占位审稿让"审稿门"文件存在，作者据已有本卷大纲继续，绝不无限期卡死。
+    const note = `本卷未能获得有效的独立主编审稿：所有可用审稿模型均失败或输出无效（最后错误：${lastErr?.message || '未知'}）。\n为避免写作在卷边界无限期卡死，本门【自动放行】——请作者按已有的本卷分章大纲继续写作，写作中自行留意主线／伏笔／人物／节奏的一致性。`;
+    editorModel = '(自动放行·无有效独立审稿)';
+    fs.writeFileSync(file, `# 大纲审稿（${scope}）\n\n> 审稿人：${editorModel}｜${new Date().toISOString()}\n\n${note}\n`, 'utf8');
+    onLog({ level: 'warn', msg: `所有审稿人失败 → 自动放行（已写占位审稿 ${path.basename(file)}），作者继续写作` });
+    return { file, editorModel, critique: note, passthrough: true };
+  }
+  const critique = raw;
   const header = `# 大纲审稿（${scope}）\n\n> 审稿人：主编模型 ${editorModel}（作者：${authorModel}）\n> 时间：${new Date().toISOString()}\n\n`;
   fs.writeFileSync(file, header + critique + '\n', 'utf8');
   onLog({ level: 'info', msg: `审稿完成 → ${path.relative(dir, file)}` });

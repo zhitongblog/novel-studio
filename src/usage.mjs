@@ -243,3 +243,85 @@ export function fmtTokens(n) {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
   return String(n);
 }
+
+// ===== API 写作用量与成本（直连大模型接口，按 token 付费；免费模型成本=0）=====
+// 与上面 codex/claude 的“订阅制 token”分开记：API 是真金白银按量计费，单独统计到
+// usage.json 的 books[slug].api，UI 上并排显示“API tokens + 估算金额”。
+//
+// 价目：¥ / 1M tokens（输入价, 输出价）。⚠️均为【估算价】，各家常调价、按档位/缓存命中还不同，
+// 仅用于“心里有个数”。可用 config.api.pricing["<model>"] = { in, out } 覆盖成你实际的价。
+// 免费：智谱 flash 系列（glm-4-flash / glm-4.5-flash / glm-4-flashx）。
+export const MODEL_PRICING = {
+  'glm-4-flash':       { in: 0,   out: 0 },     // 免费
+  'glm-4-flashx':      { in: 0,   out: 0 },     // 免费
+  'glm-4.5-flash':     { in: 0,   out: 0 },     // 免费
+  'glm-4-air':         { in: 0.5, out: 0.5 },
+  'glm-4.5-air':       { in: 0.8, out: 2 },
+  'glm-4.5':           { in: 2,   out: 8 },
+  'glm-4-plus':        { in: 5,   out: 5 },
+  'deepseek-chat':     { in: 2,   out: 8 },
+  'deepseek-reasoner': { in: 4,   out: 16 },
+  'qwen-turbo':        { in: 0.3, out: 0.6 },
+  'qwen-plus':         { in: 0.8, out: 2 },
+  'qwen-max':          { in: 2.4, out: 9.6 },
+};
+
+// 查某模型的价：override(=config.api.pricing) 优先 → 内置表【最长前缀匹配】（兼容带日期后缀的
+// 模型名，如 glm-4.5-flash-250414）→ 含 "flash" 的智谱模型兜底免费 → 未知模型按 0（只记 token，不瞎报钱）。
+export function priceFor(model, override) {
+  const key = String(model || '').toLowerCase();
+  const ov = override || {};
+  for (const [k, v] of Object.entries(ov)) {
+    if (key === k.toLowerCase() && v && (v.in != null || v.out != null)) return { in: +v.in || 0, out: +v.out || 0, src: 'override' };
+  }
+  let best = null, bestLen = -1;
+  for (const [k, v] of Object.entries(MODEL_PRICING)) {
+    const kl = k.toLowerCase();
+    if ((key === kl || key.startsWith(kl)) && kl.length > bestLen) { best = v; bestLen = kl.length; }
+  }
+  if (best) return { ...best, src: 'table' };
+  if (/flash/.test(key)) return { in: 0, out: 0, src: 'flash-free' };
+  return { in: 0, out: 0, src: 'unknown' };
+}
+
+// 估算一次调用的 ¥ 成本。
+export function estimateCost(model, promptTokens, completionTokens, override) {
+  const p = priceFor(model, override);
+  const cost = (promptTokens / 1e6) * p.in + (completionTokens / 1e6) * p.out;
+  return { cost, price: p };
+}
+
+// 记录一次 API 调用的用量+成本，累计到 usage.json 的 books[slug].api（不动 codex/claude 的 total）。
+export function recordApiUsage(slug, model, usage, priceOverride) {
+  if (!slug || !usage) return null;
+  const pt = usage.prompt_tokens || usage.input_tokens || 0;
+  const ct = usage.completion_tokens || usage.output_tokens || 0;
+  if (pt <= 0 && ct <= 0) return null;
+  const { cost } = estimateCost(model, pt, ct, priceOverride);
+  const u = loadUsage();
+  const book = u.books[slug] || (u.books[slug] = { total: 0, sessions: {}, updatedAt: '' });
+  const api = book.api || (book.api = { calls: 0, promptTokens: 0, completionTokens: 0, cost: 0, byModel: {}, updatedAt: '' });
+  api.calls += 1;
+  api.promptTokens += pt;
+  api.completionTokens += ct;
+  api.cost += cost;
+  const mk = model || '(未知模型)';
+  const m = api.byModel[mk] || (api.byModel[mk] = { calls: 0, promptTokens: 0, completionTokens: 0, cost: 0 });
+  m.calls += 1; m.promptTokens += pt; m.completionTokens += ct; m.cost += cost;
+  api.updatedAt = new Date().toISOString();
+  saveUsage(u);
+  return api;
+}
+
+export function bookApiUsage(slug) {
+  const u = loadUsage();
+  return (u.books[slug] && u.books[slug].api) || null;
+}
+
+// ¥ 金额格式化。
+export function fmtCost(n) {
+  if (!n || n <= 0) return '¥0';
+  if (n < 0.01) return '<¥0.01';
+  if (n < 1) return '¥' + n.toFixed(3).replace(/0$/, '');
+  return '¥' + n.toFixed(2);
+}

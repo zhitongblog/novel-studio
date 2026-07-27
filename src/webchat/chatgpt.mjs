@@ -3,53 +3,38 @@
 // ⚠️ 选择器为「最合理猜测」，需对着真实页面校准（见 // TODO）。ChatGPT 有相对稳定的
 // data-* 属性（如 data-message-author-role），本文件尽量用它们，但仍以真实页面为准。
 
-import { pollUntil } from './adapter.mjs';
+import { pollUntil, grabLatestAnswerText } from './adapter.mjs';
 
 export const chatgptAdapter = {
   id: 'chatgpt',
   name: 'ChatGPT 网页版',
-  url: 'https://chatgpt.com/',                                     // TODO 需对着真实页面校准（或 https://chat.openai.com/）
+  url: 'https://chatgpt.com/',
+  host: 'chatgpt.com',
 
   selectors: {
     // 输入框：ChatGPT 用 ProseMirror contenteditable（历史上是 #prompt-textarea）。
-    input: '#prompt-textarea, div[contenteditable="true"].ProseMirror, textarea[data-id]', // TODO 需对着真实页面校准
+    input: '#prompt-textarea, div[contenteditable="true"].ProseMirror, div[contenteditable="true"]',
     // 发送按钮：data-testid="send-button"（较稳定）。
-    sendButton: 'button[data-testid="send-button"], button[aria-label*="Send"], button[class*="send"]', // TODO 需对着真实页面校准
+    sendButton: 'button[data-testid="send-button"], button[aria-label*="Send"], button[class*="send"]',
     // 回答容器：data-message-author-role="assistant"（较稳定）。取最后一个。
-    answer: '[data-message-author-role="assistant"]',              // TODO 需对着真实页面校准
+    answer: '[data-message-author-role="assistant"]',
     // 「生成中」标志：停止按钮 data-testid="stop-button"。存在 = 仍在生成。
-    generating: 'button[data-testid="stop-button"], button[aria-label*="Stop"]', // TODO 需对着真实页面校准
+    generating: 'button[data-testid="stop-button"], button[aria-label*="Stop"]',
   },
 
   async send(client, promptText) {
     const sel = this.selectors;
-    await client.focusElement(sel.input);
-    const jsIn = JSON.stringify(sel.input);
-    const jsTxt = JSON.stringify(String(promptText));
-    // ChatGPT 输入框是 ProseMirror（contenteditable）→ 用 paste 事件原子写入并保留换行。
-    await client.evaluate(`
-      (function(){
-        const el = document.querySelector(${jsIn});
-        if (!el) return false;
-        el.focus();
-        if (el.tagName === 'TEXTAREA') {
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-          setter.call(el, ${jsTxt});
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-        } else {
-          el.innerHTML = '';
-          const dt = new DataTransfer();
-          dt.setData('text/plain', ${jsTxt});
-          el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        return true;
-      })()
-    `);
+    // ProseMirror（contenteditable）→ 粘贴写入长文 + 可信键盘触发，确保发送按钮启用
+    await client.fillEditor(sel.input, promptText);
     await client.humanDelay(300, 600);
     const clicked = await client.clickByLocator(`
       const btns = document.querySelectorAll(${JSON.stringify(sel.sendButton)});
-      for (const b of btns) { if (b.offsetParent !== null && !b.disabled) return b; }
+      for (const b of btns) {
+        if (b.offsetParent === null) continue;
+        if (b.disabled) continue;
+        if (b.getAttribute('aria-disabled') === 'true') continue;
+        return b;
+      }
       return null;
     `);
     if (!clicked) {
@@ -63,34 +48,24 @@ export const chatgptAdapter = {
     const sel = this.selectors;
     let lastLen = -1, stableHits = 0;
     const done = await pollUntil(async () => {
-      const st = await client.evaluate(`
+      const generating = await client.evaluate(`
         (function(){
           const stop = document.querySelector(${JSON.stringify(sel.generating)});
-          const nodes = document.querySelectorAll(${JSON.stringify(sel.answer)});
-          const last = nodes.length ? nodes[nodes.length - 1] : null;
-          const len = last ? (last.innerText || '').length : 0;
-          return { generating: !!(stop && stop.offsetParent !== null), len };
+          return !!(stop && stop.offsetParent !== null);
         })()
       `);
-      if (!st) return false;
-      if (st.generating) { stableHits = 0; lastLen = st.len; return false; }
-      if (st.len > 0 && st.len === lastLen) { stableHits++; } else { stableHits = 0; }
-      lastLen = st.len;
+      const text = await grabLatestAnswerText(client, sel.answer);
+      const len = (text || '').length;
+      if (generating) { stableHits = 0; lastLen = len; return false; }
+      if (len > 0 && len === lastLen) { stableHits++; } else { stableHits = 0; }
+      lastLen = len;
       return stableHits >= 2;
     }, { timeoutMs, intervalMs: 1500, onLog });
     return !!done;
   },
 
   async readLatest(client) {
-    const sel = this.selectors;
-    return await client.evaluate(`
-      (function(){
-        const nodes = document.querySelectorAll(${JSON.stringify(sel.answer)});
-        if (!nodes.length) return '';
-        const last = nodes[nodes.length - 1];
-        return (last.innerText || last.textContent || '');
-      })()
-    `);
+    return await grabLatestAnswerText(client, this.selectors.answer);
   },
 };
 

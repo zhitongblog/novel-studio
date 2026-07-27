@@ -69,7 +69,13 @@ export class Autopilot {
     if (!pane) { this.stop('窗口/pane 已关闭'); return; }
     if (pane.is_dead) { this.stop('agent 进程已退出'); return; }
 
-    const screen = (await this.mcp.screenText(this.paneId).catch(() => '')) || '';
+    let screen = (await this.mcp.screenText(this.paneId).catch(() => '')) || '';
+    // ⚠️ 窗口被【卷上去】时(底部出现 "Jump to bottom / ctrl+End ↓" 提示)，真正的提问(审批 Yes/No、菜单)在视口
+    //    【下方】读不到 → 永远应答不了(圣女 csld 卡在 Yes/No 的直接原因之一)。故先跳到底部再读，且只在真卷屏时才跳、
+    //    不打扰正常写作。用 Ctrl+End(xterm \x1b[1;5F)。
+    if (/jump to bottom|ctrl\+end|按住.*到底部|↓\s*$/i.test(screen)) {
+      try { await this.mcp.input(this.paneId, '\x1b[1;5F'); await sleep(300); screen = (await this.mcp.screenText(this.paneId).catch(() => '')) || screen; } catch {}
+    }
     // 用"非空行"的尾部：codex/claude 的 TUI 常把提问渲染在顶部、下面大片空行，
     // 若取最后 N 个原始行会全是空行 → 漏判提问。故过滤空行后再取尾部。
     const tail = screen.split(/\r?\n/).filter(l => l.trim()).slice(-40).join('\n');
@@ -161,6 +167,11 @@ export class Autopilot {
     }
     this._lastPromptKind = null; this._promptStreak = 0;
 
+    // 【仅确认模式】confirmOnly：只自动应答提问（y/n、菜单、信任目录），【绝不自动续写下一批/下一章】。
+    // 用于共创窗口模式——作者主导每一章，AI 写完这一章就停在那，等作者读完再给下一章要求。
+    // （上面的提问应答已处理；这里没有提问=空闲，直接返回，不走下面的续写/完本/审稿逻辑。）
+    if (this.opt.confirmOnly) { this.prevScreen = screen; return; }
+
     // 读 busy 标志（字段名做兼容）
     let busy = false;
     try {
@@ -180,12 +191,23 @@ export class Autopilot {
     else this.stableCount++;
 
     const idleConfirms = this.opt.idleConfirms || 2;
-    if (this.stableCount < idleConfirms) return;   // 还在变化或刚停，再等一拍
+    // 显式「门信号」(【大纲待审】【大纲已修订】【完本待审】或大白话"缺卷N大纲审稿/不能动笔")是作者主动停下发出的信号，
+    // 见到即处理、不必等屏幕稳定 N 拍——治"idle 占位符/光标微动导致屏幕永不'稳定'、审稿门永远触发不了"（霍元甲卡死那类）。
+    const hasGateSentinel = /【大纲待审[:：]|【大纲已修订[:：]|【完本待审】/.test(tail)
+      || (/大纲审稿[-－]?\s*卷/.test(tail) && /(需要等|缺|没有|尚未|还没|不能[动开]笔|无法继续|才能(继续|写))/.test(tail));
+    if (this.stableCount < idleConfirms && !hasGateSentinel) return;   // 还在变化或刚停，再等一拍（但显式门信号不等）
 
     // —— 大纲审稿门：作者输出「【大纲待审：xxx】」并停下 → 调主编无头审稿，把修订指令注回（每个 scope 只触发一次）——
+    // sentinel 优先；作者没喊 sentinel、改用大白话说"要等某卷大纲审稿门 / 缺 reviews/大纲审稿-卷N.md"停下时也兜底识别，自动触发审稿。
+    let reviewScope = null;
     const sm = tail.match(/【大纲待审[:：]\s*([^】\n]+)】/);
-    if (sm && typeof this.opt.onOutlineReady === 'function') {
-      const scope = sm[1].trim();
+    if (sm) reviewScope = sm[1].trim();
+    else {
+      const pm = tail.match(/大纲审稿[-－]?\s*(卷\s*[0-9零一二三四五六七八九十百]+)/);
+      if (pm && /(需要等|缺|没有|尚未|还没|等待|审稿门|不能[动开]笔|无法继续|不准|才能(继续|写)|待.{0,4}审)/.test(tail)) reviewScope = pm[1].replace(/\s+/g, '');
+    }
+    if (reviewScope && typeof this.opt.onOutlineReady === 'function') {
+      const scope = reviewScope;
       this.handledReviews = this.handledReviews || new Set();
       if (!this.handledReviews.has(scope)) {
         this.handledReviews.add(scope);
@@ -341,6 +363,10 @@ export class Autopilot {
     else if (paceCheck) { this.stats.paceChecks = (this.stats.paceChecks || 0) + 1; this.log(`检测到空闲 → 触发【节奏/格局体检】（第 ${this.continueCount} 次续写）`, 'act'); }
     else if (styleCheck) { this.stats.styleChecks = (this.stats.styleChecks || 0) + 1; this.log(`检测到空闲 → 触发【阅读性/反AI味润色扫描】（第 ${this.continueCount} 次续写）`, 'act'); }
     else this.log(`检测到空闲 → 自动发送"继续"（第 ${this.continueCount} 次）`, 'act');
+    // 写完一批的干净时机：给"写够章却没卷名"的卷自动起名(写回 bible)。后台跑、不 await、不阻塞写作循环。
+    if (typeof this.opt.onBatchDone === 'function') {
+      Promise.resolve().then(() => this.opt.onBatchDone(this.continueCount)).catch(() => {});
+    }
   }
 
   // 把屏幕尾部分类成应答动作
@@ -353,7 +379,12 @@ export class Autopilot {
       if (p && low.includes(String(p).toLowerCase())) return { kind: 'stop', reason: '命中完成短语：' + p };
     }
 
+    // y/n 型提问：既认英文 (y/n) 记号，也认中文「是否…/要不要…/需要我…吗/继续吗/写下一批(章)吗…？」，
+    // 中文一律【锚定在屏幕末尾】(问句结尾)判定，避免误伤正文里出现的“是否”。
+    // 必须以「吗？」或「？」结尾（真提问），避免误伤正文里出现的“是否/继续”等（正文多以。！结尾）。
+    const ynTailRe = /(是否|要不要|需不需要|需要我|可否|可以|行不行|好不好|继续|接着写|写下一[批章]|再写|确认|对)[^\n。！!]{0,10}(吗[?？]?|[?？])\s*$/;
     const ynRe = /\((y\/n|yes\/no|y\/N|是\/否)\)|\[y\/n\]|\[y\/N\]|\(y\/N\)|是否继续|是否执行|确认执行[?？]?\s*$/i;
+    const isYn = (s) => ynRe.test(s) || ynTailRe.test(String(s).trimEnd());
     const approveKw = /(approve|allow this|allow command|do you want to proceed|proceed\?|confirm|apply this change|run this command|授权|允许执行|是否允许|要继续吗)/i;
     // 信任目录类提示（codex/claude 首次进入新目录）
     const trusty = /(do you trust|trust the contents of this directory|信任(该|这个)?目录)/i.test(t);
@@ -373,7 +404,7 @@ export class Autopilot {
     const endsQuestion = /[?？]\s*$/.test(t.trimEnd()) || /[:：]\s*$/.test(t.trimEnd());
     const selectionHint = /(press enter|enter to (continue|select|confirm|apply)|use arrows|↑|↓|请选择)/i.test(t);
 
-    if (ynRe.test(t)) return { kind: 'yn', reason: 'y/n 模式' };
+    if (isYn(t)) return { kind: 'yn', reason: 'y/n 模式' };
     if ((approveKw.test(t) || trusty) && hasMenu) return { kind: 'menu', reason: trusty ? '信任目录提示' : '审批选择菜单' };
     if (approveKw.test(t) || trusty) return { kind: 'yn', reason: trusty ? '信任目录(y)' : '审批关键词' };
     // 仅当光标停在编号选项上（真菜单）才按菜单处理

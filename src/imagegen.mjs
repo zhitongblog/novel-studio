@@ -8,6 +8,23 @@ import { loadConfig } from './config.mjs';
 import { getModel } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 
+// 出图硬约束（所有封面/书名实验封面共用）：强制中国人/东亚面孔/该时代中国场景/国风 +【画面内绝不出现任何文字】。
+// ⚠️ 关键坑：Imagen 会照着【版式词】画文字——"poster"→电影海报(带标题+片尾字幕)、"book cover"→画成一本带书名的实体书，
+//    都是糊成乱码的假字。书名是我们后期 canvas 叠上去的，底图必须【干净无字】。故【绝不用 poster/book cover 这类版式词】，
+//    只描述"单人特写插画·纯净背景"。文字提示用温和的 no text/no letters(说太多反而诱发文字)。配合 sanitizeArtPrompt 兜底剥词。
+export const ART_ENFORCE = ', the main character is a Chinese person with East Asian facial features (NOT western or caucasian), authentic Chinese historical setting and costume true to the era, Chinese guofeng aesthetic, cinematic dramatic lighting, highly detailed digital painting, vertical 3:4 full-frame single character portrait, plain clean uncluttered background, no text, no letters, no watermark, no signature';
+
+// 兜底剥掉会诱发文字的【版式词】(poster/book cover/movie poster/typography/title/credits…)，换成"人物特写插画"或删掉。
+// 不管 cover_prompt 或模型输出里混进这些词，送进 Imagen 前都清一遍——避免画成带乱码假字的海报/实体书。
+export function sanitizeArtPrompt(s) {
+  return String(s || '')
+    .replace(/\b(movie|film)\s+posters?\b/gi, 'cinematic character portrait')
+    .replace(/\b(book\s*covers?|cover\s*art)\b/gi, 'character portrait')
+    .replace(/\bposters?\b/gi, 'character portrait')
+    .replace(/\b(title\s*bar|title\s*text|typography|captions?|credits?|text overlay|lettering|logos?)\b/gi, '')
+    .replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').trim();
+}
+
 // 去掉 ANSI 转义序列与不可见控制字符（codex/claude CLI 输出常带，漏进文本会显示成乱码）。
 export function stripCtrl(s) {
   return String(s || '')
@@ -108,7 +125,7 @@ export function buildArtPrompt(book) {
     book.style?.name && ('文风：' + book.style.name),
   ].filter(Boolean).join('；');
   // 无论模型输出什么，都追加这段——强制中国人/东亚面孔/该时代中国场景/国风，避免画成西方人。
-  const ENFORCE = ', the main character is a Chinese person with East Asian facial features (NOT western or caucasian), authentic Chinese historical setting and costume true to the era, Chinese guofeng aesthetic, cinematic dramatic lighting, highly detailed, vertical poster composition, no text, no letters, no calligraphy, no watermark, no signature';
+  const ENFORCE = ART_ENFORCE;
   const fallback = ('Chinese webnovel cover illustration of ' + (hero ? hero.replace(/[，。；,].*$/, '') : 'a determined Chinese hero') + (era ? ', set in ' + era.replace(/[，。；,].*$/, '') : ', historical China')).slice(0, 220);
   const instruction =
     '你是顶级插画指导。为一本中文网络小说写一句【英文出图提示词】，用于 AI 出封面插画。要求：' +
@@ -144,17 +161,17 @@ export function buildArtPrompt(book) {
   return fallback + ENFORCE;
 }
 
-// 生成封面底图：Imagen 出 3:4 竖图，存到 book.dir/cover_bg.png，返回 {file, prompt, w, h}。
-export function generateCoverBg(book, { prompt } = {}) {
+// 生成封面底图：Imagen 出 3:4 竖图，默认存到 book.dir/cover_bg.png（可用 outFile 另存，供多封面实验用），返回 {file, prompt, w, h}。
+export function generateCoverBg(book, { prompt, outFile } = {}) {
   const g = gcfg();
-  const artPrompt = (prompt && prompt.trim()) || buildArtPrompt(book);
+  const artPrompt = sanitizeArtPrompt((prompt && prompt.trim()) || buildArtPrompt(book));   // 剥掉 poster/book cover 等诱发文字的版式词
   const body = { instances: [{ prompt: artPrompt }], parameters: { sampleCount: 1, aspectRatio: '3:4' } };
   const j = curlJson(`${HOST}/models/${g.imageModel}:predict?key=${g.apiKey}`, body, 120);
   const b64 = j.predictions?.[0]?.bytesBase64Encoded || j.predictions?.[0]?.image?.bytesBase64Encoded;
   if (!b64) throw new Error('未返回图片（可能被安全策略拦截，换个题材描述再试）');
   const buf = Buffer.from(b64, 'base64');
-  const file = path.join(book.dir, 'cover_bg.png');
-  fs.mkdirSync(book.dir, { recursive: true });
+  const file = outFile || path.join(book.dir, 'cover_bg.png');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, buf);
   let w = 0, h = 0;
   try { w = buf.readUInt32BE(16); h = buf.readUInt32BE(20); } catch {}

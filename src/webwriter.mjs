@@ -23,12 +23,14 @@ import { chatOnce } from './webchat/adapter.mjs';
 import { qwenAdapter } from './webchat/qwen.mjs';
 import { chatgptAdapter } from './webchat/chatgpt.mjs';
 import { claudeAdapter } from './webchat/claude.mjs';
+import { doubaoAdapter } from './webchat/doubao.mjs';
 
 // 适配器注册表：adapterId → 适配器对象。
 export const WEB_ADAPTERS = {
   qwen: qwenAdapter,
   chatgpt: chatgptAdapter,
   claude: claudeAdapter,
+  doubao: doubaoAdapter,
 };
 export function getAdapter(id) {
   return WEB_ADAPTERS[id] || WEB_ADAPTERS[String(id || '').toLowerCase()] || null;
@@ -38,8 +40,8 @@ export function getAdapter(id) {
 // 每章：<<<CHAPTER 章号=N 标题=章名>>>\n正文\n<<<END>>>
 const CH_OPEN_RE = /<<<\s*CHAPTER\s+章号\s*=\s*(\d{1,5})\s+标题\s*=\s*([^\n>]+?)\s*>>>/g;
 
-// 生成【严格输出格式指令】：追加在上下文包 prompt 末尾。
-function buildFormatInstruction(numList) {
+// 生成【严格输出格式指令】：追加在上下文包 prompt 末尾。（导出供 apiwriter 复用）
+export function buildFormatInstruction(numList) {
   const first = numList[0], last = numList[numList.length - 1];
   return [
     `## ⚠️ 输出格式（本次是网页对话，你【不能写文件】，必须把正文直接输出在回复里，由程序解析落盘）`,
@@ -102,9 +104,10 @@ function cleanTitle(t) {
     .trim();
 }
 
-// 清洗正文：去掉可能残留的格式标记/提示语，绝不把分隔符或提示写进文件。
+// 清洗正文：去掉可能残留的格式标记/提示语；并【去除弱模型的重复段落循环】（如 glm-4-flash 为凑字数
+// 把同一段/同一组对话重复几十遍）——保留首次出现，删掉后续重复，避免把复读机文本落盘。
 function sanitizeBody(s) {
-  return String(s || '')
+  let t = String(s || '')
     .replace(/<<<\s*CHAPTER[^>]*>>>/g, '')
     .replace(/<<<\s*END\s*>>>/g, '')
     .replace(/^```[a-z]*\n?|\n?```$/g, '')
@@ -112,15 +115,40 @@ function sanitizeBody(s) {
     .replace(/^#+\s*第?\s*\d+\s*章.*$/gm, '')        // 去掉误加的“# 第N章…”标题行
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+  return dedupeParagraphs(t);
+}
+
+// 去重复段落：把正文按段切开，去掉与「已出现过的某一段」几乎相同的段（弱模型复读）。
+// 规则：一段（去空白后 ≥8 字）若与前面任一保留段落的归一化文本相同，则丢弃；一旦开始连续重复，
+// 说明模型进入了复读循环，直接截断到此为止（后面基本都是循环，保留也是垃圾）。
+function dedupeParagraphs(text) {
+  const paras = String(text).split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+  const seen = new Set();
+  const out = [];
+  let consecutiveDup = 0;
+  const norm = p => p.replace(/[\s　，。！？、：；“”‘’…—·]/g, '');
+  for (const p of paras) {
+    const key = norm(p);
+    if (key.length >= 8 && seen.has(key)) {
+      consecutiveDup++;
+      // 连续 2 段以上都是重复 → 判定进入复读循环，截断
+      if (consecutiveDup >= 2) break;
+      continue;   // 单段偶发重复：跳过这一段，继续看后面
+    }
+    consecutiveDup = 0;
+    if (key.length >= 8) seen.add(key);
+    out.push(p);
+  }
+  return out.join('\n\n').trim();
 }
 
 // —— 落盘工具（本引擎自己写文件；模型不写文件）——
 
-// 汉字计数（用于日志展示字数）。
-function hanziCount(s) { return (String(s).match(/[一-鿿]/g) || []).length; }
+// 汉字计数（用于日志展示字数）。（导出供 apiwriter 复用）
+export function hanziCount(s) { return (String(s).match(/[一-鿿]/g) || []).length; }
 
-// 落盘一章：写 chapters/卷NN/NNN章名.txt（正文仅正文）；返回相对路径。重名加 _dup。
-function saveChapter(book, volDir, num, title, body) {
+// 落盘一章：写 chapters/卷NN/NNN章名.txt（正文仅正文）；返回相对路径。重名加 _dup。（导出供 apiwriter 复用）
+export function saveChapter(book, volDir, num, title, body) {
   const dir = path.join(book.dir, 'chapters', volDir);
   fs.mkdirSync(dir, { recursive: true });
   const num3 = String(num).padStart(3, '0');
@@ -131,8 +159,8 @@ function saveChapter(book, volDir, num, title, body) {
   return path.join('chapters', volDir, name).replace(/\\/g, '/');
 }
 
-// 追加登记到 chapter_index.md（表格行：| 全局章号 | 章名 | 卷 | 路径 | 状态 |）。
-function appendIndex(book, rows) {
+// 追加登记到 chapter_index.md（表格行：| 全局章号 | 章名 | 卷 | 路径 | 状态 |）。（导出供 apiwriter 复用）
+export function appendIndex(book, rows) {
   const fp = path.join(book.dir, 'chapter_index.md');
   let cur = '';
   try { cur = fs.readFileSync(fp, 'utf8'); } catch {}
@@ -144,8 +172,8 @@ function appendIndex(book, rows) {
   fs.writeFileSync(fp, next, 'utf8');
 }
 
-// 在 continuity_ledger.md 追一条批次锚点（网页版模型不能改台账 → 由引擎记最小锚点，供后续批次/自检参考）。
-function appendLedgerAnchor(book, rows) {
+// 在 continuity_ledger.md 追一条批次锚点（模型只吐文字不改台账 → 由引擎记最小锚点）。（导出供 apiwriter 复用）
+export function appendLedgerAnchor(book, rows) {
   const fp = path.join(book.dir, 'continuity_ledger.md');
   let cur = '';
   try { cur = fs.readFileSync(fp, 'utf8'); } catch {}
@@ -209,12 +237,13 @@ export async function runWebWrite({
   book, adapterId, batches = 1, profilePath = null, onLog = () => {}, cfg = null, control = null,
 } = {}) {
   const adapter = getAdapter(adapterId);
-  if (!adapter) throw new Error('未知网页适配器：' + adapterId + '（可选 qwen|chatgpt|claude）');
+  if (!adapter) throw new Error('未知网页适配器：' + adapterId + '（可选 qwen|doubao|chatgpt|claude）');
   if (!profilePath) throw new Error('网页版写作需要 profilePath（绑定已登录该聊天站点的 Unzoo 账号）');
 
   const count = book?.standards?.batchSize || 3;
   const timeoutMs = cfg?.web?.batchTimeoutMs || cfg?.stateless?.batchTimeoutMs || 600000;
-  const client = new UnzooClient(profilePath, onLog);
+  // 站点感知：让 UnzooClient 按该聊天站点的 host 锁定标签页（而非默认的 fanqienovel.com）
+  const client = new UnzooClient(profilePath, onLog, adapter.host || '', adapter.name);
 
   // 写前 git 存档（best-effort）
   try { const h = gitSnapshot(book.dir, '网页版写作前自动存档'); if (h) onLog({ level: 'info', msg: `已 git 存档：${h}（不满意可回退）` }); } catch {}

@@ -44,6 +44,20 @@ const DEFAULTS = {
   stateless: {
     checkEvery: 5,                   // 每 N 批插一次"全文逻辑自检"（0=关）；对齐长驻模式 autopilot.fullCheckEvery
     batchTimeoutMs: 900000,          // 单批无头调用超时（写多章 + 自检可能数分钟）
+    outlineReview: true,             // 卷边界【大纲审稿门】：开新卷补大纲后，先让主编审该卷分章大纲、按意见改再写正文（对齐长驻的审稿门，只在卷边界触发、不拖速度）。false=关，退回"补大纲直接写"的自愈。
+  },
+  // API 写作引擎：直连中文大模型的 OpenAI 兼容接口写小说（比驱动网页框稳一个数量级、能写文件）。
+  // 给「国内、用不了 Claude、要省钱」的场景：智谱 GLM-4-Flash 免费；DeepSeek 极便宜；通义 DashScope 有免费额度。
+  // API Key 存用户配置文件、不写进源码。模型选「XX API」即走本引擎（apiwriter.mjs）。
+  api: {
+    // 各家配置：apiKey 填自己的；baseUrl/model 已给默认值（都 OpenAI 兼容：/chat/completions）。
+    zhipu:     { apiKey: '', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.5-flash' },    // 智谱：glm-4.5-flash 免费且明显更强（glm-4-flash 会复读凑字，弃用）
+    deepseek:  { apiKey: '', baseUrl: 'https://api.deepseek.com',            model: 'deepseek-chat' },     // DeepSeek：极便宜、写作强
+    dashscope: { apiKey: '', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' }, // 通义千问 API（有免费额度）
+    temperature: 0.85,               // 网文写作略高一点更有文采
+    maxTokens: 8192,                 // 一批多章，给足输出上限
+    timeoutMs: 300000,               // 单批 API 调用超时
+    proxy: '',                       // 需要走代理才能访问时填（国内直连智谱/DeepSeek/通义都不用代理，留空）
   },
   autopilot: {
     enabled: true,                   // 是否自动监控应答

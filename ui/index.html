@@ -70,18 +70,24 @@
                 <option value="review">✋ 逐批审核 · 每批写完停下等我审核</option>
               </select>
             </label>
-            <label class="field stateless-toggle" title="每章用全新无头进程写作、写完即弃会话，靠精准上下文包重喂前文。对长篇可省一个数量级 token、更快、不漂移。无窗口镜像，进度看下方日志。">
-              <span>♻️ 无状态省钱模式</span>
+            <label class="field stateless-toggle" title="【默认·推荐】每章用全新无头进程写作、写完即弃会话，靠精准上下文包重喂前文。对长篇可省一个数量级 token、更快、不漂移。无窗口镜像，进度看下方日志。关掉才回到长驻会话模式（越写越贵，不推荐）。">
+              <span>♻️ 无状态省钱模式 <span style="color:#58c1a6;font-size:11px">（默认·长篇必开）</span></span>
               <span class="sl-controls">
-                <input type="checkbox" id="statelessMode" />
-                <span class="sl-batch hidden" id="slBatchWrap">批数 <input id="statelessBatches" type="number" min="1" value="3" style="width:54px" /></span>
+                <input type="checkbox" id="statelessMode" checked />
+                <span class="sl-batch" id="slBatchWrap">批数 <input id="statelessBatches" type="number" min="1" value="3" style="width:54px" /></span>
               </span>
+            </label>
+            <label class="field hidden" id="webProfileWrap" title="网页版写作需驱动一个已登录该聊天站点（千问/豆包/ChatGPT/Claude）的 Unzoo 账号窗口。选一个已登录的账号，引擎会把上下文包送进它的聊天框、抓正文落盘。">
+              <span>🌐 网页账号（Unzoo）</span>
+              <select id="webProfile"><option value="">（加载账号列表…）</option></select>
             </label>
             <div class="btn-row">
               <button class="btn primary" id="btnStart">▶ 开始写作</button>
               <button class="btn danger" id="btnStop" disabled>■ 停止</button>
+              <button class="btn" id="btnCowrite" title="你出主意·AI 逐章：以你的想法为主，一次只写一章，AI 帮你出主意/搭大纲并按你的要求写，你审完再写下一章——从根上治“越写越变形”。需 claude 或 codex。">🤝 共创模式</button>
             </div>
             <div class="btn-row">
+              <button class="btn" id="btnRead" title="阅读全书已写章节：左边选章、右边舒适阅读。共创/写作后可随时在这里读当前创作的章节。">📖 阅读</button>
               <button class="btn" id="btnReview">🔍 复检</button>
               <button class="btn" id="btnRebuildOutline" title="据已写正文逆向重建 设定圣经 + 各卷分章大纲（不写新正文）。导入的番茄书/半成品书第一次用它补齐规划。">🧭 重建设定+大纲</button>
               <button class="btn" id="btnOutline">📋 大纲审稿</button>
@@ -245,6 +251,44 @@
   </div>
 
   <!-- 复检弹窗 -->
+  <div class="modal hidden" id="cowriteModal">
+    <div class="modal-card" style="max-width:820px">
+      <button class="modal-close" id="cwClose" title="关闭 (Esc)">✕</button>
+      <h2>🤝 共创模式 · 你出主意，AI 逐章</h2>
+      <p class="modal-hint">以<b>你的想法为主</b>：一次只写一章，AI 帮你出主意、按你的要求写，你审完满意再写下一章——AI 不自作主张改方向，从根上治“越写越变形”。人物关系与逻辑由你把控，AI 不需要额外记忆。<b>需 claude 或 codex。</b></p>
+      <div class="cw-head" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label class="field" style="margin:0"><span>模型</span><select id="cwModel"></select></label>
+        <span class="badge" id="cwChapInfo">下一章：第 ? 章</span>
+      </div>
+
+      <div class="field">
+        <span>💡 想让 AI 出什么主意？（可选：这一章怎么走 / 某场景怎么写 / 人物怎么反应 / 帮我搭接下来几章）</span>
+        <textarea id="cwAsk" rows="2" placeholder="例如：第5章我想让崇祯试探骆养性的忠诚，给我三种写法；或：接下来三章怎么安排突围节奏？"></textarea>
+      </div>
+      <div class="btn-row" style="margin:-4px 0 8px">
+        <button class="btn" id="cwIdeaBtn">💡 出主意</button>
+        <span class="dim-note" id="cwIdeaHint" style="align-self:center"></span>
+      </div>
+      <div id="cwIdeaBox" class="cw-box hidden" style="max-height:180px;overflow:auto;white-space:pre-wrap;background:rgba(127,127,127,.08);border-radius:8px;padding:10px;font-size:13px;line-height:1.6;margin-bottom:10px"></div>
+
+      <div class="field">
+        <span>✍️ 本章我的要求（人物、情节、走向、结尾——你说了算，写得越具体 AI 越不跑偏）</span>
+        <textarea id="cwIntent" rows="5" placeholder="例如：本章崇祯回到乾清宫，先稳住溃散的太监；用只有崇祯知道的旧事让王承恩彻底信他；结尾骆养性来报——李自成开始追赃助饷，京中大乱。基调冷静、克制，别喊忠烈。"></textarea>
+      </div>
+      <label class="cw-check" style="display:flex;gap:6px;align-items:center;font-size:13px;margin:-2px 0 8px">
+        <input type="checkbox" id="cwUseLast" checked /> 带上一章结尾衔接（保持文笔连续）
+      </label>
+      <div class="btn-row">
+        <button class="btn primary" id="cwWriteBtn">✍️ 让 AI 写这一章</button>
+        <button class="btn" id="cwRedoBtn" disabled title="删掉刚写的这章，按你（可能改过的）要求重写同一章">🔄 重写这一章</button>
+        <button class="btn" id="cwReadBtn" disabled title="在舒适的阅读器里读刚写好的这一章（大字号、好读）">📖 舒适阅读本章</button>
+        <span class="dim-note" id="cwErr" style="align-self:center;color:#e57"></span>
+      </div>
+      <div id="cwOut" class="cw-box hidden" style="max-height:340px;overflow:auto;white-space:pre-wrap;background:rgba(127,127,127,.06);border-radius:8px;padding:12px;font-size:14px;line-height:1.75;margin-top:10px"></div>
+      <div class="dim-note" id="cwSaved" style="margin-top:6px"></div>
+    </div>
+  </div>
+
   <div class="modal hidden" id="reviewModal">
     <div class="modal-card">
       <button class="modal-close" id="rvClose" title="关闭 (Esc)">✕</button>
@@ -320,10 +364,38 @@
       <label class="check"><input type="checkbox" id="pbMatchVol"> 按图书分卷建卷（默认关：忽略卷、只追加发，最安全。开启需番茄卷结构与图书一致）</label>
       <label class="check"><input type="checkbox" id="pbSyncRw"> 同步重写章（默认关：上次发布后被改写的旧章，去番茄找对应章覆盖编辑。仅在已发布过的书生效）</label>
       <label class="check"><input type="checkbox" id="pbAuto"> 🤖 自动发布（写满「目标章节数」且节奏+逻辑质检通过后，自动发番茄。需先配好账号+书籍。质检不过会暂缓并提示）</label>
+      <label class="check"><input type="checkbox" id="pbUseAI"> 🧠 内容含 AI 生成（发布时番茄「是否AI创作」声明选「是」；不勾=「否」。请如实勾选——AI 生成/AI 辅助建议勾）</label>
       <div class="btn-row" style="margin-top:8px">
         <button class="btn" id="pbSaveCfg">💾 保存配置</button>
         <button class="btn" id="pbPreview">🔍 预览将发</button>
       </div>
+      <details class="pb-volmgr" style="margin-top:10px">
+        <summary style="cursor:pointer;font-weight:500">📕 在番茄创建新作品（本地书还没上番茄时用）</summary>
+        <p class="modal-hint" style="margin-top:6px">本地书还没在番茄建过时用。自动带入：<b>书名</b>=本书名、<b>简介</b>=下方「作品简介」（需 50–500 字）。你选频道+主分类、可填主角名，点创建——<b>会在你番茄账号真实建一本新书（不可逆）</b>，成功后自动回填上方「番茄书籍」的 bookId。主分类<b>签约后不可改</b>，男/女频分类不同。</p>
+        <div class="pb-grid" style="margin-top:6px">
+          <label class="field"><span>频道</span><select id="cbChannel"><option value="男频">男频</option><option value="女频">女频</option></select></label>
+          <label class="field"><span>主分类（签约后不可改）</span><select id="cbCategory">
+            <option value="历史脑洞">历史脑洞（脑洞向历史·一般有金手指）</option>
+            <option value="历史古代">历史古代（种田·朝堂·智谋·争霸·科举）</option>
+            <option value="都市高武">都市高武</option>
+            <option value="都市脑洞">都市脑洞</option>
+            <option value="都市种田">都市种田</option>
+            <option value="都市日常">都市日常</option>
+            <option value="悬疑脑洞">悬疑脑洞</option>
+            <option value="悬疑灵异">悬疑灵异</option>
+            <option value="抗战谍战">抗战谍战</option>
+            <option value="玄幻脑洞">玄幻脑洞</option>
+            <option value="东方仙侠">东方仙侠</option>
+            <option value="西方奇幻">西方奇幻</option>
+            <option value="科幻末世">科幻末世</option>
+            <option value="男频衍生">男频衍生</option>
+          </select></label>
+          <label class="field"><span>主角名1（≤5字，可空）</span><input id="cbHero" type="text" maxlength="5" placeholder="如 朱由检"></label>
+          <label class="field"><span>主角名2（≤5字，可空）</span><input id="cbHero2" type="text" maxlength="5" placeholder="可空"></label>
+        </div>
+        <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="cbCreate">📕 在番茄创建作品 ▶</button></div>
+        <div id="cbHint" class="modal-hint" style="margin-top:6px"></div>
+      </details>
       <details class="pb-volmgr" style="margin-top:10px">
         <summary style="cursor:pointer;font-weight:500">📚 番茄卷管理（改卷名）</summary>
         <p class="modal-hint" style="margin-top:6px">番茄「第N卷：」序号自动生成、卷不可删——这里只改<b>副标题</b>（≤16字）。改名走已登录浏览器，约 10 秒/次。</p>
@@ -460,11 +532,24 @@
           <label class="field"><span>作者名</span><input id="cvAuthor" placeholder="如：佚名" /></label>
           <label class="field"><span>主题</span><select id="cvTheme"></select></label>
           <div class="ai-cover-box">
-            <button class="btn" id="cvGenAI" style="width:100%">🎨 AI 生成封面插画（Imagen）</button>
-            <textarea id="cvPrompt" class="ai-prompt" rows="3" placeholder="可留空（自动按题材/文风生成英文画面提示词），或自己写一句英文画面描述…"></textarea>
-            <div class="modal-hint">用 Google Imagen 出竖版插画做底图，再叠加书名/作者。生成约需 10–20 秒。</div>
+            <button class="btn" id="cvGenAI" style="width:100%">🎨 Imagen 生成插画</button>
+            <textarea id="cvPrompt" class="ai-prompt" rows="2" placeholder="可留空（自动按题材/文风生成画面提示词），或自己写一句画面描述…"></textarea>
+            <div class="modal-hint">Google Imagen 出竖版底图，约 10–20 秒（需 Gemini key + 代理）。</div>
           </div>
-          <div class="modal-hint">封面 600×800，保存为书目录下 cover.png。</div>
+          <div class="ai-cover-box" style="margin-top:8px">
+            <select id="cvChatProfile"><option value="">（选已登录 ChatGPT 的账号）</option></select>
+            <button class="btn" id="cvGenChatGPT" style="width:100%">🖼️ ChatGPT 生成（免费·慢）</button>
+            <button class="btn" id="cvGrabChatGPT" style="width:100%;margin-top:6px">📥 抓取封面（图已生成、只是没自动拿到时用）</button>
+            <div class="modal-hint" id="cvChatHint">复用已登录的 ChatGPT（Pro）网页生图，免费但慢（约 2–4 分钟）。提示词同上。若生成超时/没自动拿到，但你在浏览器里已看到图成了 → 点「📥 抓取封面」直接从当前页把图抓下来。</div>
+          </div>
+          <div class="modal-hint">封面 600×800 → 书目录 cover.png。</div>
+          <div class="ai-cover-box" style="margin-top:8px">
+            <div class="btn-row" style="gap:10px;align-items:center">
+              <button class="btn" id="cvPushFanqie" style="flex:1">⬆️ 更换番茄封面</button>
+              <label class="check" style="margin:0;white-space:nowrap"><input type="checkbox" id="cvFqAuto"> 全自动提交</label>
+            </div>
+            <div class="modal-hint" id="cvFqHint">把已保存的 cover.png 推到番茄「作品信息」。默认<b>停在"待提交"</b>让你去浏览器点"立即修改"确认；勾「全自动提交」则一步到位。需先在<b>发布</b>里配好该书的番茄账号+书籍。</div>
+          </div>
           <div class="btn-row">
             <button class="btn" id="cvDownload">⬇️ 下载</button>
             <button class="btn primary" id="cvSave">保存到书</button>
@@ -489,6 +574,24 @@
         <button class="btn danger" id="dlConfirm">删除</button>
       </div>
       <div class="modal-err" id="dlErr"></div>
+    </div>
+  </div>
+
+  <!-- 书名实验生成器 -->
+  <div class="modal hidden" id="nameExpModal">
+    <div class="modal-card" style="width: 860px; max-width: 92vw;">
+      <button class="modal-close" id="neClose" title="关闭 (Esc)">✕</button>
+      <h2>🧪 书名实验生成器</h2>
+      <p class="modal-hint">为 <b id="neBookTitle"></b> 批量生成【多个候选书名】+ 每个配一张<b>不同画面</b>的封面底图，供番茄「多书名实验 / 多封面推荐」配实验用。<br>书名由 AI 按设定出（各打不同读者钩子），封面由 Imagen 逐张出（约 15 秒/张）。生成后可<b>「🚀 推到番茄」</b>：自动切到该书、逐个填书名(别名)+上传封面（<b>封面上传已全自动</b>）。<br><span style="color:#a06a00">⚠️ 番茄多书名实验门槛：20万字+ / 已签约 / 未完结，且该里程碑实验未跑过。不满足时会把页面打开、候选列出来，让你手动配。</span></p>
+      <div class="btn-row" style="align-items:center;gap:10px">
+        <label class="field" style="max-width:150px"><span>候选数量</span><input id="neCount" type="number" min="2" max="10" value="6"></label>
+        <button class="btn primary" id="neGen">✨ 生成候选书名+封面</button>
+        <button class="btn" id="nePush" title="把候选书名+封面推到番茄多书名实验">🚀 推到番茄</button>
+        <label class="chk" title="填好后自动点「开启实验」(不可逆)；关=停在实验配置让你核对"><input type="checkbox" id="nePushAuto"> 开启实验(不可逆)</label>
+        <span id="neHint" class="modal-hint" style="margin:0"></span>
+      </div>
+      <div id="neGrid" class="ne-grid" style="margin-top:12px"></div>
+      <div class="modal-err" id="neErr"></div>
     </div>
   </div>
 

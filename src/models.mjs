@@ -69,7 +69,14 @@ export const MODELS = {
     name: '通义千问 网页版',
     kind: 'web',
     adapterId: 'qwen',
-    note: '驱动 chat.qwen.ai 网页版写作。需先在 Unzoo 里用一个已登录通义千问的账号（profilePath），选择器待对真实页面校准。',
+    note: '驱动 qianwen.com（千问）网页版写作，白嫖免费额度。需先在 Unzoo 里用一个已登录通义千问的账号（profilePath）。选择器已对真实登录页校准。',
+  },
+  'web-doubao': {
+    id: 'web-doubao',
+    name: '豆包 网页版',
+    kind: 'web',
+    adapterId: 'doubao',
+    note: '驱动 doubao.com 网页版写作，白嫖免费额度。需先在 Unzoo 里用一个已登录豆包的账号（profilePath）。回答抓取以哨兵兜底、选择器无关，较稳。',
   },
   'web-chatgpt': {
     id: 'web-chatgpt',
@@ -85,6 +92,31 @@ export const MODELS = {
     adapterId: 'claude',
     note: '驱动 claude.ai 网页版写作。需先在 Unzoo 里用一个已登录 Claude 的账号（profilePath），选择器待对真实页面校准。',
   },
+  // —— API 写作模型（kind:'api'）——
+  // 直连中文大模型的 OpenAI 兼容接口写小说（apiwriter.mjs）：稳、能写文件、连续跑，不碰浏览器。
+  // 「可用性」= 是否配了该家 API Key（detectModel 里对 kind:'api' 直接返回 available:true，真正校验在写作端/设置里）。
+  // 给「国内、用不了 Claude、要省钱」的场景：智谱 glm-4-flash 免费；DeepSeek 极便宜；通义 API 有免费额度。
+  'api-zhipu': {
+    id: 'api-zhipu',
+    name: '智谱 GLM（API·免费）',
+    kind: 'api',
+    provider: 'zhipu',
+    note: '智谱 GLM API（open.bigmodel.cn）。推荐 glm-4.5-flash（免费且强，能写连贯长章）；glm-4-flash 会复读凑字勿用。在「设置 · API 模型」填 API Key 即用。',
+  },
+  'api-deepseek': {
+    id: 'api-deepseek',
+    name: 'DeepSeek（API·便宜）',
+    kind: 'api',
+    provider: 'deepseek',
+    note: 'DeepSeek API（platform.deepseek.com）。写作强、价格极低。在「设置 · API 模型」填 API Key 即用。',
+  },
+  'api-dashscope': {
+    id: 'api-dashscope',
+    name: '通义千问（API·免费额度）',
+    kind: 'api',
+    provider: 'dashscope',
+    note: '通义 DashScope API（阿里云）。qwen-plus/qwen-max，有免费额度。在「设置 · API 模型」填 API Key 即用。',
+  },
 };
 
 export function getModel(id) {
@@ -99,6 +131,10 @@ export function detectModel(id) {
   // 这里直接判为 available，避免 where/which 把它误判为不可用。
   if (m.kind === 'web') {
     return { id: m.id, name: m.name, kind: 'web', adapterId: m.adapterId, bin: null, available: true, path: '', note: m.note };
+  }
+  // API 模型：可用性取决于是否配了该家 API Key（真正校验在写作端/设置里）。这里直接判 available，避免误判不可用。
+  if (m.kind === 'api') {
+    return { id: m.id, name: m.name, kind: 'api', provider: m.provider, bin: null, available: true, path: '', note: m.note };
   }
   const isWin = process.platform === 'win32';
   const probe = isWin
