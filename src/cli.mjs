@@ -125,7 +125,8 @@ async function writeCmd(f, cfg) {
     const { writeLaunchScript } = await import('./writer.mjs');
     const p = writeLaunchScript(book, model, instruction, cfg);
     console.log(c.yellow('\n[dry-run] 已生成 launch.ps1，但不启动窗口：') + '\n' + p);
-    console.log(c.gray('\n将会执行：') + `\n  unterm.exe --profile ${book.profile} start --always-new-process --cwd "${book.dir}" -e pwsh -NoExit -File "${p}"`);
+    const { winShell } = await import('./unterm.mjs');
+    console.log(c.gray('\n将会执行：') + `\n  unterm.exe --profile ${book.profile} start --always-new-process --cwd "${book.dir}" -e ${winShell()} -NoExit -File "${p}"`);
     console.log(c.gray('  模型：') + getModel(model).name + c.gray('  指令：') + instruction + '\n');
     return;
   }
