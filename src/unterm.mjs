@@ -168,7 +168,7 @@ export function spawnInstance({ profile, cwd, launchScript }) {
   if (profile) args.push('--profile', profile);
   args.push('start', '--always-new-process', '--cwd', cwd, '-e');
   if (IS_WIN) {
-    args.push('pwsh', '-NoLogo', '-NoExit', '-File', launchScript);
+    args.push(winShell(), '-NoLogo', '-NoExit', '-File', launchScript);
   } else {
     const shell = process.env.SHELL || '/bin/zsh';
     const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
