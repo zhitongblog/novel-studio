@@ -143,9 +143,23 @@ export function instancePids() {
   return new Set(listInstances().map(i => i.pid));
 }
 
+// 选 Windows 上跑 launch.ps1 的 PowerShell：优先 PowerShell 7(pwsh)，未安装则回退系统自带的
+// Windows PowerShell(powershell.exe)。之前硬编码 pwsh，没装 PS7 的机器上 `-e pwsh` 直接退码1，
+// 导致模型窗口永远起不来（立项/开写/重建大纲全失败）。launch.ps1 语法两者兼容。
+export function winShell() {
+  const cands = [
+    process.env.NOVEL_PWSH,
+    'C:/Program Files/PowerShell/7/pwsh.exe',
+    'C:/Program Files/PowerShell/7-preview/pwsh.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Microsoft/PowerShell/7/pwsh.exe'),
+  ].filter(Boolean);
+  for (const c of cands) { try { if (fs.existsSync(c)) return c; } catch {} }
+  return 'powershell';   // 系统自带、必在 PATH（System32），最稳的回退
+}
+
 // spawn 一个绑定 profile 的新 Unterm 实例，运行启动脚本。detached，不阻塞。
 // 返回 child pid。随后用 waitForNewInstance() 定位它的 mcp_port/token。
-// Windows：pwsh -NoExit -File launch.ps1；macOS/Linux：登录 shell source launch.sh 后保持交互
+// Windows：pwsh/powershell -NoExit -File launch.ps1；macOS/Linux：登录 shell source launch.sh 后保持交互
 //（mirror -NoExit，让 agent 退出后窗口停在 shell 提示符，autopilot 据此判定停止）。
 export function spawnInstance({ profile, cwd, launchScript }) {
   const exe = findUntermExe();

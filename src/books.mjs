@@ -167,7 +167,7 @@ export function detectTitleFromDir(dir) {
 // 非正文的元文件名（归档时排除，不当作章节）
 const META_FILES = new Set([
   'novel_bible.md', 'chapter_index.md', 'continuity_ledger.md',
-  'agents.md', 'claude.md', 'gemini.md', 'readme.md', '主线伏笔表.md',
+  'agents.md', 'claude.md', 'gemini.md', 'qwen.md', 'readme.md', '主线伏笔表.md',
 ]);
 // 检测"已分章但平铺在目录根下、不在 chapters/ 里"的导入布局：
 // 根目录有 ≥2 个非元文件的 .txt/.md，且 chapters/ 下还没有正文 → 需要先归档。
