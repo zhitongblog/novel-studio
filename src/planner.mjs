@@ -156,6 +156,32 @@ export async function recommendStyle({ theme, model }, cfg) {
   return { id, name: s.name, short: s.short, reason, tweak };
 }
 
+// 对标书风格学习：给一段对标作品的正文样本，让强模型分析出一份「照着这个腔写」的文风指南。
+// 返回 { name, rules } —— 直接可存进 book.style（styleVoice 接受 {name,rules}），经 refreshContext
+// 注入每个 AGENTS/CLAUDE/GEMINI/QWEN.md 的「本书文风」段，写作时 agent 自动遵守。
+export async function analyzeStyleSample({ sample, model }, cfg) {
+  const s = String(sample || '').replace(/\r/g, '').trim();
+  if (s.length < 40) throw new Error('样本太短，请贴几百字以上的对标正文');
+  const prompt =
+    `你是资深网文主编与文风分析师。下面是一段【对标作品的正文样本】。请分析它的写作风格，产出一份能让另一个 AI「照着这个腔写」的【文风指南】。\n` +
+    `要抓住并写清（用"硬性照做"的祈使句、具体可执行，别写空泛形容词）：段落形态（长短、一句一段还是长段、换行密度）、语言基调（平白还是文学、口语程度、高频口头禅与句式）、叙事节奏与信息密度、感官细节多寡、叙述口吻（吐槽/爽/克制）、对话风格、爽点与钩子节奏、以及【明确的禁忌】（这种风格绝不做什么）。\n` +
+    `末尾附 2 段最能代表该风格的【原文摘录】（从样本里选，各 2-4 句），当校准锚。\n\n` +
+    `严格按下面格式输出（第一行必须是"风格名="，之后是指南正文；不要代码块、不要多余话）：\n` +
+    `风格名=<一句话风格名，如：番茄爽文·快平短口语>\n` +
+    `<从这里开始是文风指南正文……>\n\n` +
+    `对标样本如下：\n----\n${s.slice(0, 12000)}\n----`;
+  const raw = runModelOnce(model, prompt, cfg, 240000) || '';
+  // 去 ANSI/控制符（CLI 输出常带），再从"风格名="处开始截（丢掉前面的横幅日志）
+  const clean = raw.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  const m = clean.match(/风格名\s*[=＝：:]\s*([^\n]+)\n([\s\S]+)/);
+  let name, rules;
+  if (m) { name = m[1].trim(); rules = m[2].trim(); }
+  else { name = '对标文风'; rules = clean.trim(); }
+  rules = rules.replace(/\n{3,}/g, '\n\n').trim();
+  if (rules.length < 40) { const e = new Error('AI 分析结果异常（太短），请重试或换模型'); e.raw = raw.slice(-500); throw e; }
+  return { name: name.slice(0, 40), rules };
+}
+
 // 用户主动发起的「复检」：指定范围 + 维度（逻辑/文风/故事合理性）。单行。
 const REVIEW_DIMS = {
   logic: '【逻辑】时间线先后、伏笔的铺设与回收、事实/关系/伤势/物件/欠债的前后矛盾、人物已知信息一致性、情节漏洞',

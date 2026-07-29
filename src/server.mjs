@@ -23,7 +23,7 @@ import { brainstorm, writeChapterInWindow, isCowriteModel, COWRITE_MODELS } from
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
-import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, resolveGenModel } from './planner.mjs';
+import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, resolveGenModel, analyzeStyleSample } from './planner.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildEndingRenudgeInstruction } from './editor.mjs';
 import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
@@ -709,6 +709,13 @@ async function api(p, req, res, u) {
     if (p === '/api/book/set-style') {
       try { const b = setBookStyle(body.book, body.style); return json(res, 200, { ok: true, style: b.style }); }
       catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/analyze-style') {
+      // 对标书风格学习：贴一段对标正文样本 → 强模型分析出 {name, rules} 文风指南（不落库，前端展示/可编辑后再用 set-style 保存）。
+      try {
+        const prof = await analyzeStyleSample({ sample: body.sample, model: body.model }, cfg);
+        return json(res, 200, { ok: true, name: prof.name, rules: prof.rules });
+      } catch (e) { return json(res, 400, { error: e.message, raw: e.raw || '' }); }
     }
     if (p === '/api/book/propose-titles') {
       try { const titles = await proposeTitles(body, cfg); return json(res, 200, { ok: true, titles }); }

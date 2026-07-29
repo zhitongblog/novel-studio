@@ -1273,6 +1273,48 @@ $('#stApply').addEventListener('click', async () => {
   finally { $('#stApply').disabled = false; }
 });
 
+// ---------- 📚 对标风格学习 ----------
+function openRefStyle() {
+  if (!CUR) return;
+  $('#rsModel').innerHTML = STATE.models.map(m => `<option value="${m.id}" ${m.available ? '' : 'disabled'}>${esc(m.name)}${m.available ? '' : '（未装）'}</option>`).join('');
+  $('#rsModel').value = CUR.model || STATE.config.defaultModel;
+  $('#rsSample').value = ''; $('#rsName').value = ''; $('#rsRules').value = '';
+  $('#rsResultWrap').classList.add('hidden'); $('#rsSave').classList.add('hidden');
+  $('#rsErr').textContent = '';
+  $('#refStyleModal').classList.remove('hidden');
+}
+$('#btnRefStyle').addEventListener('click', openRefStyle);
+$('#rsClose').addEventListener('click', () => $('#refStyleModal').classList.add('hidden'));
+$('#rsCancel').addEventListener('click', () => $('#refStyleModal').classList.add('hidden'));
+$('#rsAnalyze').addEventListener('click', async () => {
+  const sample = $('#rsSample').value.trim();
+  if (sample.length < 40) { $('#rsErr').textContent = '样本太短，请贴几百字以上的对标正文'; return; }
+  $('#rsAnalyze').disabled = true; $('#rsErr').textContent = 'AI 分析文风中…（codex/claude 约 1–3 分钟，别关窗）';
+  try {
+    const r = await api('/api/book/analyze-style', 'POST', { sample, model: $('#rsModel').value });
+    $('#rsName').value = r.name || '对标文风';
+    $('#rsRules').value = r.rules || '';
+    $('#rsResultWrap').classList.remove('hidden');
+    $('#rsSave').classList.remove('hidden');
+    $('#rsErr').textContent = '✅ 分析完成，可手改文风指南后点保存';
+  } catch (e) { $('#rsErr').textContent = '分析失败：' + e.message; }
+  finally { $('#rsAnalyze').disabled = false; }
+});
+$('#rsSave').addEventListener('click', async () => {
+  if (!CUR) return;
+  const name = $('#rsName').value.trim() || '对标文风';
+  const rules = $('#rsRules').value.trim();
+  if (!rules) { $('#rsErr').textContent = '文风指南不能为空'; return; }
+  $('#rsSave').disabled = true; $('#rsErr').textContent = '保存中…';
+  try {
+    await api('/api/book/set-style', 'POST', { book: CUR.slug, style: { name, rules } });
+    await refresh();
+    const nb = STATE.books.find(x => x.slug === CUR.slug); if (nb) CUR = nb;
+    $('#refStyleModal').classList.add('hidden'); toast('已设为本书风格：' + name + '（下次写作自动照这个腔写）');
+  } catch (e) { $('#rsErr').textContent = '保存失败：' + e.message; }
+  finally { $('#rsSave').disabled = false; }
+});
+
 // ---------- 目标章节数上限 ----------
 $('#wbTarget').addEventListener('change', async () => {
   if (!CUR) return;
@@ -1908,6 +1950,7 @@ document.addEventListener('keydown', (e) => {
   if (!$('#modal').classList.contains('hidden')) closeModal();
   if (!$('#reviewModal').classList.contains('hidden')) $('#reviewModal').classList.add('hidden');
   if (!$('#styleModal').classList.contains('hidden')) $('#styleModal').classList.add('hidden');
+  if (!$('#refStyleModal').classList.contains('hidden')) $('#refStyleModal').classList.add('hidden');
   if (!$('#delModal').classList.contains('hidden')) $('#delModal').classList.add('hidden');
   if (!$('#coverModal').classList.contains('hidden')) $('#coverModal').classList.add('hidden');
 });

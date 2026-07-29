@@ -94,6 +94,7 @@
               <button class="btn" id="btnFinale">🏁 完本</button>
               <button class="btn" id="btnRewrite">♻️ 重写</button>
               <button class="btn" id="btnStyle">🎨 文风</button>
+              <button class="btn" id="btnRefStyle" title="对标书风格学习：贴一段对标作品正文，AI 分析出文风指南，保存后写作自动照这个腔写。只学腔、不抄内容。">📚 对标风格</button>
               <button class="btn" id="btnCover">🖼️ 封面</button>
               <button class="btn" id="btnPublish">📤 发布番茄</button>
             </div>
@@ -518,6 +519,32 @@
         <button class="btn primary" id="stApply">应用</button>
       </div>
       <div class="modal-err" id="stErr"></div>
+    </div>
+  </div>
+
+  <!-- 对标风格弹窗 -->
+  <div class="modal hidden" id="refStyleModal">
+    <div class="modal-card" style="width: 720px;">
+      <button class="modal-close" id="rsClose" title="关闭 (Esc)">✕</button>
+      <h2>📚 对标风格学习</h2>
+      <p class="modal-hint">贴一段对标作品的正文（你自己的书 / 想学的爆款，几百字以上），AI 分析出「文风指南」→ 保存后写作自动照这个腔写（改的是本书写作规范，下次写作生效，已写章节不变）。只学腔、不抄内容。</p>
+      <label class="field"><span>对标正文样本</span>
+        <textarea id="rsSample" class="ai-prompt" rows="6" placeholder="把对标书的一两段正文贴这里…越贴近目标风格越好，几百到一两千字最佳。"></textarea>
+      </label>
+      <label class="field"><span>分析用模型（codex / claude 更准）</span><select id="rsModel"></select></label>
+      <div class="btn-row end">
+        <button class="btn primary" id="rsAnalyze">🔍 分析风格</button>
+      </div>
+      <div class="field hidden" id="rsResultWrap">
+        <span>文风指南（AI 生成，可手改后再保存）</span>
+        <input id="rsName" placeholder="风格名" style="margin:6px 0" />
+        <textarea id="rsRules" class="ai-prompt" rows="10"></textarea>
+      </div>
+      <div class="btn-row end">
+        <button class="btn ghost" id="rsCancel">取消</button>
+        <button class="btn primary hidden" id="rsSave">💾 保存为本书风格</button>
+      </div>
+      <div class="modal-err" id="rsErr"></div>
     </div>
   </div>
 
