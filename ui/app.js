@@ -1278,20 +1278,39 @@ function openRefStyle() {
   if (!CUR) return;
   $('#rsModel').innerHTML = STATE.models.map(m => `<option value="${m.id}" ${m.available ? '' : 'disabled'}>${esc(m.name)}${m.available ? '' : '（未装）'}</option>`).join('');
   $('#rsModel').value = CUR.model || STATE.config.defaultModel;
-  $('#rsSample').value = ''; $('#rsName').value = ''; $('#rsRules').value = '';
+  $('#rsSample').value = ''; $('#rsUrl').value = ''; $('#rsName').value = ''; $('#rsRules').value = '';
+  if ($('#rsFile')) $('#rsFile').value = '';
   $('#rsResultWrap').classList.add('hidden'); $('#rsSave').classList.add('hidden');
   $('#rsErr').textContent = '';
   $('#refStyleModal').classList.remove('hidden');
+  // 异步加载 Unzoo 账号(供番茄链接选 profile)
+  api('/api/unzoo/profiles', 'POST', {}).then(r => {
+    const ps = (r.profiles || r.data?.profiles || (Array.isArray(r) ? r : [])) || [];
+    $('#rsProfile').innerHTML = '<option value="">（选 Unzoo 账号）</option>' +
+      ps.map(p => `<option value="${esc(p.path || p.profile_path || '')}">${esc(p.name || p.label || p.path)}</option>`).join('');
+  }).catch(() => { $('#rsProfile').innerHTML = '<option value="">（未连上 Unzoo）</option>'; });
 }
 $('#btnRefStyle').addEventListener('click', openRefStyle);
+// 上传 txt → 读进样本框
+$('#rsFile') && $('#rsFile').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0]; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { $('#rsSample').value = String(rd.result || '').slice(0, 20000); $('#rsErr').textContent = '已读入文件，可点分析'; };
+  rd.readAsText(f, 'utf-8');
+});
 $('#rsClose').addEventListener('click', () => $('#refStyleModal').classList.add('hidden'));
 $('#rsCancel').addEventListener('click', () => $('#refStyleModal').classList.add('hidden'));
 $('#rsAnalyze').addEventListener('click', async () => {
+  const url = $('#rsUrl').value.trim();
   const sample = $('#rsSample').value.trim();
-  if (sample.length < 40) { $('#rsErr').textContent = '样本太短，请贴几百字以上的对标正文'; return; }
-  $('#rsAnalyze').disabled = true; $('#rsErr').textContent = 'AI 分析文风中…（codex/claude 约 1–3 分钟，别关窗）';
+  let body;
+  if (url) { body = { book: CUR.slug, bookUrl: url, profilePath: $('#rsProfile').value, model: $('#rsModel').value }; }
+  else if (sample.length >= 40) { body = { sample, model: $('#rsModel').value }; }
+  else { $('#rsErr').textContent = '填个番茄链接，或贴/传几百字对标正文'; return; }
+  $('#rsAnalyze').disabled = true;
+  $('#rsErr').textContent = url ? 'Unzoo 打开番茄→截图→claude 视觉分析中…（约 1–3 分钟，别关窗）' : 'AI 分析文风中…（约 1–3 分钟，别关窗）';
   try {
-    const r = await api('/api/book/analyze-style', 'POST', { sample, model: $('#rsModel').value });
+    const r = await api('/api/book/analyze-style', 'POST', body);
     $('#rsName').value = r.name || '对标文风';
     $('#rsRules').value = r.rules || '';
     $('#rsResultWrap').classList.remove('hidden');

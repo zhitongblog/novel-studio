@@ -527,11 +527,19 @@
     <div class="modal-card" style="width: 720px;">
       <button class="modal-close" id="rsClose" title="关闭 (Esc)">✕</button>
       <h2>📚 对标风格学习</h2>
-      <p class="modal-hint">贴一段对标作品的正文（你自己的书 / 想学的爆款，几百字以上），AI 分析出「文风指南」→ 保存后写作自动照这个腔写（改的是本书写作规范，下次写作生效，已写章节不变）。只学腔、不抄内容。</p>
-      <label class="field"><span>对标正文样本</span>
-        <textarea id="rsSample" class="ai-prompt" rows="6" placeholder="把对标书的一两段正文贴这里…越贴近目标风格越好，几百到一两千字最佳。"></textarea>
+      <p class="modal-hint">三种来源任选一个：① 番茄链接（读别人的爆款，Unzoo 截图 + claude 视觉分析）② 上传 txt ③ 直接贴正文。AI 分析出「文风指南」→ 保存后写作自动照这个腔写（改本书写作规范，下次写作生效，已写章节不变）。**只学"怎么写"、不复制原文**。</p>
+      <div class="field">
+        <span>① 番茄链接（读别人的书）</span>
+        <div class="pick-row">
+          <select id="rsProfile" style="flex:0 0 190px"><option value="">Unzoo 账号（加载中…）</option></select>
+          <input id="rsUrl" placeholder="番茄图书/章节链接 https://fanqienovel.com/page/… 或 /reader/…" />
+        </div>
+      </div>
+      <label class="field"><span>② 上传 txt / ③ 贴正文样本（填了链接可留空）</span>
+        <input type="file" id="rsFile" accept=".txt,.md" style="margin-bottom:6px" />
+        <textarea id="rsSample" class="ai-prompt" rows="5" placeholder="贴一段对标正文…（若上面填了番茄链接，这里留空）"></textarea>
       </label>
-      <label class="field"><span>分析用模型（codex / claude 更准）</span><select id="rsModel"></select></label>
+      <label class="field"><span>分析用模型（番茄链接走 claude 视觉；贴文本 codex/claude 均可）</span><select id="rsModel"></select></label>
       <div class="btn-row end">
         <button class="btn primary" id="rsAnalyze">🔍 分析风格</button>
       </div>

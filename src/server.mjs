@@ -24,6 +24,7 @@ import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, resolveGenModel, analyzeStyleSample } from './planner.mjs';
+import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildEndingRenudgeInstruction } from './editor.mjs';
 import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
@@ -711,9 +712,16 @@ async function api(p, req, res, u) {
       catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (p === '/api/book/analyze-style') {
-      // 对标书风格学习：贴一段对标正文样本 → 强模型分析出 {name, rules} 文风指南（不落库，前端展示/可编辑后再用 set-style 保存）。
+      // 对标书风格学习 → {name, rules} 文风指南（不落库，前端展示/可编辑后再 set-style 保存）。
+      // 三种来源：body.sample=贴的文本；body.bookUrl=番茄链接(Unzoo截图+claude视觉，别人的书)。
       try {
-        const prof = await analyzeStyleSample({ sample: body.sample, model: body.model }, cfg);
+        let prof;
+        if (body.bookUrl) {
+          const slug = slugOf(body.book || '');
+          prof = await styleFromFanqieUrl({ profilePath: body.profilePath, bookUrl: body.bookUrl, model: body.model, onLog: (e) => { try { pushLog(slug, { source: 'refstyle', ...e }); } catch {} } }, cfg);
+        } else {
+          prof = await analyzeStyleSample({ sample: body.sample, model: body.model }, cfg);
+        }
         return json(res, 200, { ok: true, name: prof.name, rules: prof.rules });
       } catch (e) { return json(res, 400, { error: e.message, raw: e.raw || '' }); }
     }
