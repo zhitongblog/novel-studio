@@ -2581,9 +2581,14 @@ export async function createFanqieVolumes({ profilePath, bookId, volumes, onLog 
       if (exists) { log(`卷已存在，跳过：${v.name}`); continue; }
 
       // 新建分卷
-      const addOk = await client.clickByLocator(`return document.querySelector('.chapter-volume-footer-add-volume')||(function(){for(const b of document.querySelectorAll('button,[class*="btn"]')){if(b.offsetParent!==null&&(b.textContent||'').trim()==='新建分卷')return b;}return null;})();`);
-      if (!addOk) { return { ok: false, created, error: '未找到"新建分卷"按钮' }; }
-      await client.sleep(800);
+      // "新建分卷"按钮随卷列表异步渲染，多卷/慢网时单次点常太早 → 轮询重试至多 ~5s，别一次点不到就报错停手。
+      let addOk = false;
+      for (let ai = 0; ai < 6 && !addOk; ai++) {
+        addOk = await client.clickByLocator(`return document.querySelector('.chapter-volume-footer-add-volume')||document.querySelector('i.tomato-circle-add')||(function(){for(const b of document.querySelectorAll('button,[class*="btn"]')){if(b.offsetParent!==null&&(b.textContent||'').trim()==='新建分卷')return b;}return null;})();`);
+        if (!addOk) await client.sleep(850);
+      }
+      if (!addOk) { return { ok: false, created, error: '未找到"新建分卷"按钮（番茄页面未就绪/改版，可刷新番茄页重试）' }; }
+      await client.sleep(1000);
       // 番茄新版分卷 UI（2026 改版）：点"新建分卷"生成一行待命名项——
       //   · 序号"第N卷："由番茄【自动加】，输入框只填【副标题】(maxlength 16)；
       //   · 确认/取消是行内图标 <i class="tomato-confirm green"> / <i class="tomato-cancel red">，
@@ -2621,10 +2626,24 @@ export async function createFanqieVolumes({ profilePath, bookId, volumes, onLog 
         try { await client.clickByLocator(cancelRow); } catch {}
         return { ok: false, created, error: '未找到行内"确认(绿勾)"图标，已取消未提交（番茄改版？请人工核对）' };
       }
-      await client.sleep(2000);
-      // 验证新卷已提交为正常项（番茄按位置自动编号"第N卷"前缀）
-      const nowExists = await client.evaluate(`(function(){const items=document.querySelectorAll('.chapter-volume-list-item-normal');const want=${JSON.stringify('第' + numToCn(v.num) + '卷')};for(const it of items){const sp=it.querySelector('span');const t=((sp&&sp.textContent)||'').trim();if(t.indexOf(want)===0)return true;}return false;})()`);
-      if (nowExists) { log(`✅ 已新建卷：第${numToCn(v.num)}卷${sub ? '：' + sub : ''}`, 'success'); created.push(v.name); }
+      // 验证新卷已提交为正常项。番茄"第N卷"前缀按【位置】异步重渲染，连续建多卷时列表刷新更慢，
+      // 单次查太早会误判"确认不到"→停手。故【轮询最多 ~8s】，且同时按【副标题】匹配（副标题即时出现，
+      // 不像"第N卷"前缀会延迟）——只要新行带着我们填的副标题出现，就算建成。
+      const wantPfx = '第' + numToCn(v.num) + '卷';
+      let nowExists = false;
+      for (let vi = 0; vi < 9 && !nowExists; vi++) {
+        await client.sleep(vi === 0 ? 1600 : 750);
+        nowExists = await client.evaluate(`(function(){
+          const items=document.querySelectorAll('.chapter-volume-list-item-normal');
+          const want=${JSON.stringify(wantPfx)}; const subw=${JSON.stringify(sub)};
+          for(const it of items){ const sp=it.querySelector('span'); const t=((sp&&sp.textContent)||'').trim();
+            if(t.indexOf(want)===0) return true;
+            if(subw && t.indexOf(subw)>=0) return true;
+          }
+          return false;
+        })()`);
+      }
+      if (nowExists) { log(`✅ 已新建卷：第${numToCn(v.num)}卷${sub ? '：' + sub : ''}`, 'success'); created.push(v.name); await client.sleep(700); }
       else {
         try { await client.clickByLocator(cancelRow); } catch {}
         return { ok: false, created, error: `新建卷"${v.name}"未在列表确认到，已停手（若番茄要求非空副标题，请给该卷设个名字再试）` };
