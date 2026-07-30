@@ -590,6 +590,19 @@ async function openPublish(book) {
   pbFill(b);
   pbSyncStopBtn();   // 若这本正在发布，展示「停止发布」并接回进度
   $('#publishModal').classList.remove('hidden');
+  // 从设定圣经自动带入主角名/配角名到「创建新书」的主角框（空框才填，不覆盖手改）
+  (async () => {
+    try {
+      const bf = await api('/api/book/read?book=' + encodeURIComponent(book.slug) + '&rel=' + encodeURIComponent('novel_bible.md'));
+      const bible = bf.content || '';
+      const cn = s => ((String(s || '').match(/[一-鿿]{2,6}/) || [])[0] || '');
+      const heroM = bible.match(/##\s*主角[\s\S]{0,60}?\*\*\s*([一-鿿]{2,6})/) || bible.match(/##\s*主角[\s\S]{0,140}?姓名[：:]\s*([^。\n；;（(·]+)/) || bible.match(/(?:^|\n)[-\s]*主角[：:]\s*([^。\n，,；;（(]+)/);
+      const roleM = bible.match(/长线人物[\s\S]{0,300}?[-*•]\s*\*\*\s*([一-鿿]{2,6})/) || bible.match(/##\s*关键(?:人物|配角)[\s\S]{0,400}?[|\-*•]\s*\*\*\s*([一-鿿]{2,6})/);
+      const hero = cn(heroM && heroM[1]); const hero2 = cn(roleM && roleM[1]);
+      if (hero && $('#cbHero') && !$('#cbHero').value.trim()) $('#cbHero').value = hero.slice(0, 5);
+      if (hero2 && $('#cbHero2') && !$('#cbHero2').value.trim()) $('#cbHero2').value = hero2.slice(0, 5);
+    } catch {}
+  })();
   $('#pbProfile').innerHTML = '<option value="">（加载账号…）</option>';
   $('#pbBook').innerHTML = '<option value="">（选账号后自动加载…）</option>';
   try {
@@ -648,12 +661,15 @@ function pbRenderBooks() {
   const saved = (CUR.publish || {}).bookId || '';
   const norm = s => String(s || '').replace(/[\s：:，,。.、！!？?]/g, '');
   const myTitle = norm(CUR.title);
+  // 只在【已存 bookId】或【书名完全一致】时自动关联；不再做"包含/沾边"松匹配（会张冠李戴关联错书）。
   const pick = PB_BOOKS.find(b => b.id === saved)
-    || PB_BOOKS.find(b => norm(b.title) === myTitle)
-    || PB_BOOKS.find(b => myTitle && (norm(b.title).includes(myTitle) || myTitle.includes(norm(b.title))));
-  sel.innerHTML = PB_BOOKS.map(b => `<option value="${esc(b.id)}"${pick && b.id === pick.id ? ' selected' : ''}>${esc(b.title || '(无名)')} · #${esc(b.id)}</option>`).join('');
+    || PB_BOOKS.find(b => norm(b.title) === myTitle);
+  const opts = PB_BOOKS.map(b => `<option value="${esc(b.id)}"${pick && b.id === pick.id ? ' selected' : ''}>${esc(b.title || '(无名)')} · #${esc(b.id)}</option>`).join('');
+  // 没匹配到同名书 → 顶部放一个已选中的"未匹配"占位，谁都不自动关联，引导去下面「创建新书」
+  sel.innerHTML = (pick ? '' : `<option value="" selected>— 未找到同名书《${esc(CUR.title)}》，请手动选 或 用下方「创建新书」 —</option>`) + opts;
   $('#pbBookId').value = pick ? pick.id : '';
   if (pick) $('#pbErr').textContent = '';
+  else $('#pbErr').textContent = '⚠️ 番茄里没有同名书《' + CUR.title + '》。别关联错书——请手动选对，或用下方「番茄没有？→ 创建新书」新建。';
 }
 function pbCfg() {
   return {
