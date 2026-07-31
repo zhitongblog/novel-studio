@@ -199,6 +199,17 @@
           <label class="field"><span>模型</span><select id="nbModel"></select></label>
         </div>
         <label class="field"><span>文风</span><select id="nbStyle"></select></label>
+        <div class="adv-toggle" id="nbRefToggle">📚 对标别人的书（学文风，立项前就定调，可多本）</div>
+        <div class="adv hidden" id="nbRefPanel">
+          <div class="modal-hint">先给 1~3 本对标爆款，AI 分析出文风 → <b>立项前就设为本书文风</b>，之后 设定/大纲/正文全程照这个腔写。只学"怎么写"、不复制原文。</div>
+          <div class="field"><span>Unzoo 账号 + 番茄链接（多本各占一行）</span>
+            <div class="pick-row"><select id="nbrsProfile" style="flex:0 0 170px"><option value="">账号</option></select><textarea id="nbrsUrl" rows="2" placeholder="番茄图书/章节链接，多本各占一行；或勾下面直接读已打开的页"></textarea></div>
+            <label class="mini-check" style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;color:var(--muted)"><input type="checkbox" id="nbrsMulti" /> 直接读我在 Unzoo 里【已打开的所有番茄章节页】（多本融合，最稳）</label>
+          </div>
+          <label class="field"><span>或 贴一段对标正文（几百字即可，与链接二选一）</span><textarea id="nbrsSample" class="ai-prompt" rows="3" placeholder="贴对标正文…"></textarea></label>
+          <div class="btn-row end"><button class="btn" id="nbrsAnalyze">🔍 分析并采用为本书文风</button></div>
+          <div id="nbrsStatus" class="modal-hint"></div>
+        </div>
         <div class="btn-row end">
           <button class="btn ghost" id="nbCancel">取消</button>
           <button class="btn primary" id="nbPropose">AI 立项 →</button>
@@ -527,13 +538,16 @@
     <div class="modal-card" style="width: 720px;">
       <button class="modal-close" id="rsClose" title="关闭 (Esc)">✕</button>
       <h2>📚 对标风格学习</h2>
-      <p class="modal-hint">三种来源任选一个：① 番茄链接（读别人的爆款，Unzoo 截图 + claude 视觉分析）② 上传 txt ③ 直接贴正文。AI 分析出「文风指南」→ 保存后写作自动照这个腔写（改本书写作规范，下次写作生效，已写章节不变）。**只学"怎么写"、不复制原文**。</p>
+      <p class="modal-hint">三种来源任选一个：① 番茄链接（读别人的爆款，Unzoo 截图 + claude 视觉分析，**可多本融合**）② 上传 txt ③ 直接贴正文。AI 分析出「文风指南」→ 保存后写作自动照这个腔写（改本书写作规范，下次写作生效，已写章节不变）。**只学"怎么写"、不复制原文**。</p>
       <div class="field">
-        <span>① 番茄链接（读别人的书）</span>
+        <span>① 番茄链接（读别人的书，可多本 —— 一行一个链接）</span>
         <div class="pick-row">
           <select id="rsProfile" style="flex:0 0 190px"><option value="">Unzoo 账号（加载中…）</option></select>
-          <input id="rsUrl" placeholder="番茄图书/章节链接 https://fanqienovel.com/page/… 或 /reader/…" />
+          <textarea id="rsUrl" rows="2" placeholder="番茄图书/章节链接，多本各占一行&#10;https://fanqienovel.com/page/…&#10;https://fanqienovel.com/page/…"></textarea>
         </div>
+        <label class="mini-check" style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;color:var(--muted)">
+          <input type="checkbox" id="rsMulti" /> 直接读我在 Unzoo 里【已打开的所有番茄章节页】（多本融合，最稳，可不填链接）
+        </label>
       </div>
       <label class="field"><span>② 上传 txt / ③ 贴正文样本（填了链接可留空）</span>
         <input type="file" id="rsFile" accept=".txt,.md" style="margin-bottom:6px" />

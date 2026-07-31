@@ -713,12 +713,13 @@ async function api(p, req, res, u) {
     }
     if (p === '/api/book/analyze-style') {
       // 对标书风格学习 → {name, rules} 文风指南（不落库，前端展示/可编辑后再 set-style 保存）。
-      // 三种来源：body.sample=贴的文本；body.bookUrl=番茄链接(Unzoo截图+claude视觉，别人的书)。
+      // 来源：body.sample=贴的文本；body.bookUrl / body.bookUrls[] / body.multi=番茄链接(Unzoo截图+claude视觉，可多本融合)。
       try {
         let prof;
-        if (body.bookUrl) {
+        const urls = Array.isArray(body.bookUrls) ? body.bookUrls.map(u => String(u || '').trim()).filter(Boolean) : [];
+        if (body.multi || urls.length || body.bookUrl) {
           const slug = slugOf(body.book || '');
-          prof = await styleFromFanqieUrl({ profilePath: body.profilePath, bookUrl: body.bookUrl, model: body.model, onLog: (e) => { try { pushLog(slug, { source: 'refstyle', ...e }); } catch {} } }, cfg);
+          prof = await styleFromFanqieUrl({ profilePath: body.profilePath, bookUrl: body.bookUrl, bookUrls: urls, multi: !!body.multi, model: body.model, onLog: (e) => { try { pushLog(slug, { source: 'refstyle', ...e }); } catch {} } }, cfg);
         } else {
           prof = await analyzeStyleSample({ sample: body.sample, model: body.model }, cfg);
         }

@@ -1295,6 +1295,7 @@ function openRefStyle() {
   $('#rsModel').innerHTML = STATE.models.map(m => `<option value="${m.id}" ${m.available ? '' : 'disabled'}>${esc(m.name)}${m.available ? '' : '（未装）'}</option>`).join('');
   $('#rsModel').value = CUR.model || STATE.config.defaultModel;
   $('#rsSample').value = ''; $('#rsUrl').value = ''; $('#rsName').value = ''; $('#rsRules').value = '';
+  if ($('#rsMulti')) $('#rsMulti').checked = false;
   if ($('#rsFile')) $('#rsFile').value = '';
   $('#rsResultWrap').classList.add('hidden'); $('#rsSave').classList.add('hidden');
   $('#rsErr').textContent = '';
@@ -1317,14 +1318,16 @@ $('#rsFile') && $('#rsFile').addEventListener('change', (e) => {
 $('#rsClose').addEventListener('click', () => $('#refStyleModal').classList.add('hidden'));
 $('#rsCancel').addEventListener('click', () => $('#refStyleModal').classList.add('hidden'));
 $('#rsAnalyze').addEventListener('click', async () => {
-  const url = $('#rsUrl').value.trim();
+  const urls = $('#rsUrl').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const multi = $('#rsMulti') && $('#rsMulti').checked;
   const sample = $('#rsSample').value.trim();
+  const fanqie = multi || urls.length > 0;
   let body;
-  if (url) { body = { book: CUR.slug, bookUrl: url, profilePath: $('#rsProfile').value, model: $('#rsModel').value }; }
+  if (fanqie) { body = { book: CUR.slug, bookUrls: urls, multi: !!multi, profilePath: $('#rsProfile').value, model: $('#rsModel').value }; }
   else if (sample.length >= 40) { body = { sample, model: $('#rsModel').value }; }
-  else { $('#rsErr').textContent = '填个番茄链接，或贴/传几百字对标正文'; return; }
+  else { $('#rsErr').textContent = '填番茄链接(可多本)/勾选"读已打开的页"，或贴/传几百字对标正文'; return; }
   $('#rsAnalyze').disabled = true;
-  $('#rsErr').textContent = url ? 'Unzoo 打开番茄→截图→claude 视觉分析中…（约 1–3 分钟，别关窗）' : 'AI 分析文风中…（约 1–3 分钟，别关窗）';
+  $('#rsErr').textContent = fanqie ? 'Unzoo 打开番茄→截图→claude 视觉分析中…（多本更久，约 1–4 分钟，别关窗）' : 'AI 分析文风中…（约 1–3 分钟，别关窗）';
   try {
     const r = await api('/api/book/analyze-style', 'POST', body);
     $('#rsName').value = r.name || '对标文风';
@@ -1965,6 +1968,7 @@ $('#dlConfirm').addEventListener('click', async () => {
 
 // ---------- 新建书 · AI 立项 ----------
 let NB_TITLES = [], NB_SEL = -1;
+let NB_REF_STYLE = null;   // 对标分析出的 {name,rules}；有则立项前设为本书文风
 // 目标字数：框里只填数字，单位固定"万字" → 拼成 "200万字"
 function getWords() {
   const v = ($('#nbWords').value || '').replace(/[^0-9.]/g, '');
@@ -1975,6 +1979,13 @@ function openModal() {
   $('#nbStep1').classList.remove('hidden'); $('#nbStep2').classList.add('hidden');
   $('#nbAdv').classList.add('hidden'); if ($('#nbImport')) $('#nbImport').classList.add('hidden');
   $('#nbErr').textContent = ''; $('#nbFinalTitle').value = ''; $('#nbLaunch').disabled = true;
+  // 重置对标状态
+  NB_REF_STYLE = null;
+  if ($('#nbRefPanel')) $('#nbRefPanel').classList.add('hidden');
+  if ($('#nbrsUrl')) $('#nbrsUrl').value = '';
+  if ($('#nbrsSample')) $('#nbrsSample').value = '';
+  if ($('#nbrsMulti')) $('#nbrsMulti').checked = false;
+  if ($('#nbrsStatus')) $('#nbrsStatus').textContent = '';
   $('#nbTheme').focus();
 }
 function closeModal() { $('#modal').classList.add('hidden'); }
@@ -1996,6 +2007,34 @@ document.addEventListener('keydown', (e) => {
 });
 $('#nbAdvToggle').addEventListener('click', () => $('#nbAdv').classList.toggle('hidden'));
 $('#nbImportToggle').addEventListener('click', () => $('#nbImport').classList.toggle('hidden'));
+// 对标别人的书（立项前定文风，可多本）
+$('#nbRefToggle') && $('#nbRefToggle').addEventListener('click', () => {
+  const panel = $('#nbRefPanel'); panel.classList.toggle('hidden');
+  if (!panel.classList.contains('hidden') && $('#nbrsProfile') && $('#nbrsProfile').options.length <= 1) {
+    api('/api/unzoo/profiles', 'POST', {}).then(r => {
+      $('#nbrsProfile').innerHTML = '<option value="">（选 Unzoo 账号）</option>' +
+        (r.profiles || []).map(p => `<option value="${p.path}">${p.name}</option>`).join('');
+    }).catch(() => { $('#nbrsProfile').innerHTML = '<option value="">（未连上 Unzoo）</option>'; });
+  }
+});
+$('#nbrsAnalyze') && $('#nbrsAnalyze').addEventListener('click', async () => {
+  const urls = $('#nbrsUrl').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const multi = $('#nbrsMulti').checked;
+  const sample = $('#nbrsSample').value.trim();
+  const fanqie = multi || urls.length > 0;
+  let body;
+  if (fanqie) { body = { bookUrls: urls, multi: !!multi, profilePath: $('#nbrsProfile').value, model: $('#nbModel').value }; }
+  else if (sample.length >= 40) { body = { sample, model: $('#nbModel').value }; }
+  else { $('#nbrsStatus').textContent = '填番茄链接(可多本)/勾"读已打开的页"，或贴几百字对标正文'; return; }
+  $('#nbrsAnalyze').disabled = true;
+  $('#nbrsStatus').textContent = fanqie ? 'Unzoo 打开番茄→截图→claude 视觉分析中…（多本更久，约 1–4 分钟）' : 'AI 分析文风中…（约 1–3 分钟）';
+  try {
+    const r = await api('/api/book/analyze-style', 'POST', body);
+    NB_REF_STYLE = { name: r.name || '对标文风', rules: r.rules || '' };
+    $('#nbrsStatus').innerHTML = '✅ 已采用对标文风：<b>' + NB_REF_STYLE.name + '</b>（立项将全程照这个腔写；重新分析可覆盖）';
+  } catch (e) { NB_REF_STYLE = null; $('#nbrsStatus').textContent = '分析失败：' + e.message; }
+  finally { $('#nbrsAnalyze').disabled = false; }
+});
 // 原生选择文件夹（仅 Tauri 桌面端有；浏览器里提示手动粘贴）
 $('#nbImpBrowse').addEventListener('click', async () => {
   const inv = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
@@ -2075,7 +2114,8 @@ $('#nbLaunch').addEventListener('click', async () => {
   try {
     const r = await api('/api/book/launch', 'POST', {
       title, theme: $('#nbTheme').value.trim(),
-      words: getWords(), model: $('#nbModel').value, style: $('#nbStyle').value,
+      words: getWords(), model: $('#nbModel').value,
+      style: NB_REF_STYLE || $('#nbStyle').value,   // 对标分析过 → 用对标文风；否则用下拉预设
       writeMode: $('#nbWriteMode').value === 'review' ? 'review' : 'auto',
     });
     $('#modal').classList.add('hidden');

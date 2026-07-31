@@ -122,7 +122,8 @@ textarea { resize: vertical; line-height: 1.5; }
 .ai-cover-box { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; background: rgba(255,255,255,.02); }
 .ai-prompt { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 12px; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
 .pick-row { display: flex; gap: 8px; }
-.pick-row input { flex: 1; }
+.pick-row input, .pick-row textarea { flex: 1; }
+.pick-row textarea { resize: vertical; min-height: 34px; font-family: inherit; }
 .pick-row .btn { flex: 0 0 auto; }
 .range-inputs { display: flex; align-items: center; gap: 10px; }
 .range-inputs input { flex: 1; }
