@@ -4,6 +4,11 @@
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+// 让子进程不弹黑色控制台窗口（藏起「机器」）——node 引擎、powershell 清端口都用。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
@@ -63,9 +68,10 @@ fn kill_stale_engine() {
             "Get-NetTCPConnection -LocalPort {} -State Listen -ErrorAction SilentlyContinue | ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}",
             ENGINE_PORT
         );
-        let _ = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-            .status();
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps]);
+        cmd.creation_flags(CREATE_NO_WINDOW);   // 清端口时也别闪窗
+        let _ = cmd.status();
         std::thread::sleep(std::time::Duration::from_millis(1200));
     }
     #[cfg(not(target_os = "windows"))]
@@ -82,12 +88,11 @@ fn start_engine(resource_dir: Option<PathBuf>) -> Option<Child> {
     kill_stale_engine();   // 先清残留旧引擎，确保新引擎能绑上 8787（加载最新代码）
     let engine = engine_path(resource_dir);
     eprintln!("[novel-studio] starting engine: node {} serve --port {}", engine, ENGINE_PORT);
-    match Command::new("node")
-        .arg(&engine)
-        .arg("serve")
-        .arg("--port")
-        .arg(ENGINE_PORT)
-        .spawn()
+    let mut cmd = Command::new("node");
+    cmd.arg(&engine).arg("serve").arg("--port").arg(ENGINE_PORT);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);   // 引擎在后台跑，不弹黑色终端
+    match cmd.spawn()
     {
         Ok(child) => Some(child),
         Err(e) => {
