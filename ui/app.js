@@ -1762,10 +1762,14 @@ async function showReviewBar() {
       $('#rbActionsOutline').classList.add('hidden');
       $('#rbActionsBatch').classList.remove('hidden');
     } else {
-      // 大纲审稿确认门
-      $('#rbTitle').textContent = `审稿意见待确认（${p.scope || ''}）`;
+      // 大纲审稿确认门 —— 逐条勾选
+      const items = Array.isArray(p.items) ? p.items : [];
+      $('#rbTitle').textContent = items.length ? `主编审稿：${items.length} 条意见，你来挑（${p.scope || ''}）` : `审稿意见待确认（${p.scope || ''}）`;
       $('#rbFile').textContent = p.file ? ' · reviews/' + p.file : '';
-      $('#rbCritique').textContent = p.critique || '（详见 reviews 文件）';
+      renderReviewItems(items);
+      // 有分条 → 显示勾选列表、隐藏整段原文；没有分条 → 退回显示整段
+      if (items.length) { $('#rbItems').classList.remove('hidden'); $('#rbCritique').classList.add('hidden'); }
+      else { $('#rbItems').classList.add('hidden'); $('#rbCritique').classList.remove('hidden'); $('#rbCritique').textContent = p.critique || '（详见 reviews 文件）'; }
       $('#rbReq').classList.add('hidden');
       $('#rbActionsBatch').classList.add('hidden');
       $('#rbActionsOutline').classList.remove('hidden');
@@ -1773,13 +1777,47 @@ async function showReviewBar() {
     $('#reviewBar').classList.remove('hidden');
   } catch {}
 }
+// 渲染可勾选的审稿意见（硬伤/隐患默认勾、建议默认不勾；文本可手改）
+function renderReviewItems(items) {
+  const box = $('#rbItems'); box.innerHTML = '';
+  const badge = { 硬伤: 'crit', 隐患: 'warn', 建议: 'tip' };
+  items.forEach((it, i) => {
+    const on = it.severity !== '建议';   // 硬伤/隐患默认采纳
+    const row = el('div', 'rb-item');
+    row.innerHTML =
+      `<label class="rb-chk"><input type="checkbox" ${on ? 'checked' : ''} data-i="${i}"/>` +
+      `<span class="rb-sev ${badge[it.severity] || 'tip'}">${esc(it.severity || '建议')}</span></label>` +
+      `<textarea class="rb-item-text" rows="2" data-i="${i}">${esc(it.text || '')}</textarea>`;
+    box.appendChild(row);
+  });
+}
+function collectSelectedItems() {
+  const picked = [];
+  $('#rbItems').querySelectorAll('.rb-item').forEach(row => {
+    const cb = row.querySelector('input[type=checkbox]');
+    const ta = row.querySelector('.rb-item-text');
+    if (cb && cb.checked && ta && ta.value.trim()) picked.push({ text: ta.value.trim() });
+  });
+  return picked;
+}
 async function reviewDecision(apply) {
   if (!CUR) return;
   $('#rbApply').disabled = $('#rbSkip').disabled = true;
   try {
-    await api('/api/book/review-decision', 'POST', { book: CUR.slug, apply });
-    hideReviewBar();
-    toast(apply ? '已采纳 → 作者据意见修订大纲' : '已跳过 → 不改大纲，继续');
+    const hasItems = !$('#rbItems').classList.contains('hidden');
+    if (apply && hasItems) {
+      const items = collectSelectedItems();
+      if (!items.length) { toast('至少勾一条，或点「全部跳过」'); return; }
+      await api('/api/book/review-decision', 'POST', { book: CUR.slug, items });
+      hideReviewBar(); toast(`已挑定 ${items.length} 条 → 作者只按这几条修订`);
+    } else if (apply) {
+      await api('/api/book/review-decision', 'POST', { book: CUR.slug, apply: true });
+      hideReviewBar(); toast('已采纳全部 → 作者据意见修订大纲');
+    } else {
+      // 跳过：有分条时明确传空 items，避免后端误判
+      await api('/api/book/review-decision', 'POST', hasItems ? { book: CUR.slug, items: [] } : { book: CUR.slug, apply: false });
+      hideReviewBar(); toast('已跳过 → 不改大纲，继续');
+    }
   } catch (e) { toast(e.message); }
   finally { $('#rbApply').disabled = $('#rbSkip').disabled = false; }
 }

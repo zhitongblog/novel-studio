@@ -91,9 +91,13 @@ function buildEditorPrompt(book, scope, bible, outline) {
     `5. 题材契合与卖点：大纲是否对得起"一句话卖点"和目标读者要的爽感？有没有跑偏成另一个题材？`,
     `6. 规模合理性：卷数 × 每卷章数 × 单章字数 与目标总字数是否匹配？按这个大纲，能在规模内把故事讲完、还是会烂尾或注水？`,
     ``,
-    `# 输出格式（中文，markdown，直接给结论，不要复述大纲）`,
-    `按【硬伤】（会写崩，必须改）/【隐患】（有风险，建议改）/【建议】（锦上添花）三档列出。每条写清：问题是什么 → 具体怎么改（给到卷/章号或具体手法）。`,
-    `最后一行给【总评】：可直接开写 / 需修订后开写，并一句话说明最关键的那个改动。`,
+    `# 输出格式（中文，直接给结论，不要复述大纲）——【严格逐条，每条一行】`,
+    `把每一条意见【单独成行】，行首用严重度标签，格式必须是：`,
+    `- [硬伤] 一句话写清：问题是什么 → 具体怎么改（给到卷/章号或具体手法）`,
+    `- [隐患] …（同上，一行写完）`,
+    `- [建议] …（同上，一行写完）`,
+    `严重度只用【硬伤】(会写崩，必须改) /【隐患】(有风险，建议改) /【建议】(锦上添花) 三选一。一条意见就一行，不要在条目下再分点、不要空行拆断一条。控制在 3–12 条，先列硬伤。`,
+    `全部条目之后，另起一行给：【总评】可直接开写 / 需修订后开写 —— 一句话说明最关键的那个改动。`,
   ].join('\n');
 }
 
@@ -155,6 +159,31 @@ export async function reviewOutline({ book, scope = '立项', cfg, authorModel, 
 export function buildReviseInstruction(book, scope, file) {
   const rel = path.relative(book.dir, file).replace(/[\r\n]+/g, ' ');
   return (`主编已对【${scope}】大纲完成审稿，意见写在 ${rel}。请先通读这份审稿，按其中【硬伤】逐条修订对应的 novel_bible.md 与 outlines/ 大纲（重点：节奏/格局升级、压缩事务流水、补爽点、伏笔回收、规模匹配），【隐患/建议】酌情采纳；改完在大纲或 continuity_ledger.md 里留一句修订说明。若某条意见你不认同，可在大纲里简注理由后保留。修订完成后【先不要写正文】，在窗口单独输出一行「【大纲已修订：${scope}】」然后停下——系统会核对你是否确实改了大纲文件，核对通过后再开始写正文。`).replace(/[\r\n]+/g, ' ');
+}
+
+// 把主编审稿正文拆成【可逐条勾选】的意见项：[{id, severity, text}]。
+// 认 `- [硬伤] …` / `* 【隐患】…` / `1. [建议] …` 这类行；【总评】行不算意见项。
+export function parseReviewItems(critique) {
+  const out = [];
+  const lines = String(critique || '').split(/\r?\n/);
+  const re = /^\s*(?:[-*·•]|\d+[.)、])?\s*[\[【]\s*(硬伤|隐患|建议)\s*[\]】]\s*(.+?)\s*$/;
+  for (const ln of lines) {
+    if (/^\s*[\[【]?\s*总评/.test(ln)) continue;
+    const m = ln.match(re);
+    if (m && m[2] && m[2].trim().length >= 4) out.push({ id: 'r' + out.length, severity: m[1], text: m[2].trim() });
+  }
+  return out;
+}
+
+// 用户【逐条挑】后：只按选中的意见项生成一条修订指令（内联意见，作者无需回读整份审稿）。
+// items: [{severity?, text}]，text 可能被用户手改过。
+export function buildReviseFromItems(book, scope, items) {
+  const picked = (items || []).map(i => (i && (i.text || '')).trim()).filter(Boolean);
+  if (!picked.length) return `本次不采纳任何审稿意见、不改大纲，请按既有大纲继续写【${scope}】范围的正文。`;
+  const list = picked.map((t, i) => `${i + 1}) ${t}`).join('；');
+  return (`用户已从主编审稿里【挑定】以下 ${picked.length} 条意见要你采纳（仅此几条，其余一律不用管）：${list}。` +
+    `请逐条打开 outlines/ 下【${scope}】对应的分章大纲（必要时 novel_bible.md），只按这几条修改并保存；改动尽量小而准，不要顺手重写没被点到的部分。` +
+    `改完【先不要写正文】，在窗口单独输出一行「【大纲已修订：${scope}】」然后停下——系统会核对你确实改了文件，通过后再开写。`).replace(/[\r\n]+/g, ' ');
 }
 
 // 放行指令：核对通过，可以开写正文。

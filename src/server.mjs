@@ -26,7 +26,7 @@ import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './u
 import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, resolveGenModel, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
-import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildEndingRenudgeInstruction } from './editor.mjs';
+import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction } from './editor.mjs';
 import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
@@ -310,6 +310,7 @@ async function api(p, req, res, u) {
       return json(res, 200, {
         pending: true, kind: pend.kind || 'outline', scope: pend.scope,
         file: path.basename(pend.file || ''), critique: pend.critique || '',
+        items: pend.items || [],
         chapters: pend.chapters, n: pend.n, ...base,
       });
     }
@@ -865,10 +866,21 @@ async function api(p, req, res, u) {
         const pend = getPending(book.slug);
         if (!pend) return json(res, 200, { ok: true, none: true });
         let instr;
-        if (body.apply) {
+        if (Array.isArray(body.items)) {
+          // 逐条挑：只按用户选中的（可能手改过的）意见修订
+          const picked = body.items.map(i => ({ text: String((i && (i.text ?? i)) || '').trim() })).filter(i => i.text);
+          if (picked.length) {
+            try { snapshotOutline(book, pend.scope); } catch {}
+            instr = buildReviseFromItems(book, pend.scope, picked);
+            pushLog(book.slug, { level: 'act', msg: `已挑定 ${picked.length} 条审稿意见（${pend.scope}）→ 作者只按这几条修订大纲` });
+          } else {
+            instr = `本次不采纳任何审稿意见、不修改大纲，请按既有大纲继续写【${pend.scope}】范围的正文。`;
+            pushLog(book.slug, { level: 'act', msg: `未选任何意见（${pend.scope}）→ 不改大纲，继续` });
+          }
+        } else if (body.apply) {
           try { snapshotOutline(book, pend.scope); } catch {}
           instr = buildReviseInstruction(book, pend.scope, pend.file);
-          pushLog(book.slug, { level: 'act', msg: `已采纳审稿意见（${pend.scope}）→ 作者据此修订大纲` });
+          pushLog(book.slug, { level: 'act', msg: `已采纳全部审稿意见（${pend.scope}）→ 作者据此修订大纲` });
         } else {
           instr = `本次不采纳主编审稿意见、不修改大纲，请按既有大纲继续写【${pend.scope}】范围的正文。`;
           pushLog(book.slug, { level: 'act', msg: `已跳过审稿意见（${pend.scope}）→ 不改大纲，继续` });

@@ -116,11 +116,12 @@
             </div>
             <div class="review-bar hidden" id="reviewBar">
               <div class="rb-head">⏸ <b id="rbTitle">审稿意见待确认</b><span class="rb-file" id="rbFile"></span></div>
+              <div class="rb-items hidden" id="rbItems"></div>
               <pre class="rb-critique" id="rbCritique"></pre>
               <textarea id="rbReq" class="rb-req hidden" rows="3" placeholder="（可选）对下一批的要求：剧情走向、谁出场、节奏快慢、要避免什么…留空＝直接批准继续"></textarea>
               <div class="rb-actions" id="rbActionsOutline">
-                <button class="btn primary" id="rbApply">✅ 应用修订</button>
-                <button class="btn ghost" id="rbSkip">⏭ 跳过（不改大纲）</button>
+                <button class="btn primary" id="rbApply">✅ 按选中项修订</button>
+                <button class="btn ghost" id="rbSkip">⏭ 全部跳过（不改大纲）</button>
               </div>
               <div class="rb-actions hidden" id="rbActionsBatch">
                 <button class="btn primary" id="rbContinue">✅ 批准并继续</button>

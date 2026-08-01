@@ -2,7 +2,7 @@
 // 抽出来共享：startWriting(writer.mjs) 和 attachAutopilot(attach.mjs) 都用同一套 —— 否则【重挂/重启后的
 // autopilot 会缺这些 handler，跨卷时卡在大纲审稿门不动】（历史 bug：attachAutopilot 只建了 onBatchReview）。
 import path from 'node:path';
-import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision, reviewEnding, buildEndingRenudgeInstruction } from './editor.mjs';
+import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision, reviewEnding, buildEndingRenudgeInstruction, parseReviewItems } from './editor.mjs';
 import { buildFinaleInstruction, buildAfterwordInstruction } from './planner.mjs';
 import { setPending, setReviewDefault } from './pending.mjs';
 import { bookStats, getBook, setBookStatus, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
@@ -13,19 +13,23 @@ import { runFinaleClosure } from './finale.mjs';
 export function buildGateHandlers({ slug, book = null, model, cfg, onLog = () => {} }) {
   const bk = () => getBook(slug) || book;
   const editorOff = cfg.editorReview?.enabled === false;
-  // 确认门：仅【逐批审核 review 模式】要人工确认；【全自动 auto 模式】审稿后直接自动采纳修订、不停手（这才叫自动处理）。
-  const gateOn = (bk()?.writeMode !== 'auto') && cfg.editorReview?.requireApproval !== false;
+  // 大纲审稿【确认门】：默认总是暂停等用户逐条挑（用户选择「每次暂停我逐条挑」）。
+  // 与「逐批审核」的 writeMode 无关——即使全自动写作，也在【卷边界大纲审稿】这一步停下让人拍板。
+  // 可用 cfg.editorReview.outlineApproval=false 关掉退回旧的"自动采纳"。
+  const outlineApprove = cfg.editorReview?.outlineApproval !== false && cfg.editorReview?.requireApproval !== false;
   const renudge = new Map();
 
-  // —— 大纲审稿门：换主编无头审稿；auto 模式自动采纳→注入修订指令；review 模式挂起等确认。每 scope 只触发一次（去重在 autopilot 侧）——
+  // —— 大纲审稿门：换主编无头审稿 → 拆成分条 → 挂起等用户逐条挑（无有效分条/审稿放行时不卡死，自动走原修订流程）。每 scope 只触发一次——
   const onOutlineReady = editorOff ? undefined : async (scope) => {
     try {
       const r = await reviewOutline({ book: bk(), scope, cfg, authorModel: model, onLog: (e) => onLog({ ...e, source: 'editor' }) });
-      if (gateOn) {
-        setPending(slug, { kind: 'outline', scope, file: r.file, critique: (r.critique || '').slice(0, 6000) });
-        onLog({ level: 'act', source: 'editor', kind: 'pending-review', scope, file: path.basename(r.file), msg: `⏸ 主编审稿意见已生成（${scope}），待你确认：应用修订 / 跳过` });
-        return '主编审稿意见已生成，请先暂停：不要改大纲、也不要写正文，等待用户确认是否采纳后再继续。';
+      const items = r.passthrough ? [] : parseReviewItems(r.critique);
+      if (outlineApprove && items.length) {
+        setPending(slug, { kind: 'outline', scope, file: r.file, critique: (r.critique || '').slice(0, 6000), items });
+        onLog({ level: 'act', source: 'editor', kind: 'pending-review', scope, file: path.basename(r.file), msg: `⏸ 主编审稿：${items.length} 条意见待你逐条挑（${scope}）——采纳哪些由你定，选完才继续` });
+        return '主编审稿意见已生成，请先暂停：不要改大纲、也不要写正文，等用户逐条确认要采纳哪些意见后再继续。';
       }
+      // 关了确认门 / 审稿放行 / 没解析出分条 → 回退：自动按整份审稿修订（不卡死）。
       try { snapshotOutline(bk(), scope); } catch {}
       return buildReviseInstruction(bk(), scope, r.file);
     } catch (e) { onLog({ level: 'warn', msg: '大纲审稿失败：' + e.message, source: 'editor' }); return null; }
