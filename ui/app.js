@@ -141,7 +141,7 @@ function openWrite(book) {
   $('#mirror').textContent = '（开始写作后，这里实时显示 AI 写作过程）';
   $('#logFeed').innerHTML = '';
   $('#wbTarget').value = book.targetChapters || 0;
-  $('#writeMode').value = book.writeMode === 'review' ? 'review' : 'auto';
+  $('#writeMode').value = book.participation || (book.writeMode === 'review' ? 'chapter' : 'volume');
   $('#synText').value = book.synopsis || '';
   const running = STATE.sessions.find(s => s.slug === book.slug && s.running !== false);
   setWriting(!!running);
@@ -191,6 +191,16 @@ async function syncWebProfileUI() {
   }).join('');
 }
 $('#writeModel').addEventListener('change', syncWebProfileUI);
+// 参与度实时切换（写作前/中均可，立即生效）
+$('#writeMode') && $('#writeMode').addEventListener('change', async () => {
+  if (!CUR) return;
+  const level = $('#writeMode').value;   // auto | volume | chapter
+  if (CUR) CUR.participation = level;
+  try {
+    await api('/api/book/participation', 'POST', { book: CUR.slug, level });
+    toast(level === 'chapter' ? '参与度 → 盯着写（每批我先过）' : level === 'volume' ? '参与度 → 卷口把关（开新卷停下让我定大纲）' : '参与度 → 放手写（全自动）');
+  } catch (e) { toast('切换失败：' + e.message); }
+});
 $('#webProfile')?.addEventListener('change', () => {
   if (CUR && $('#webProfile').value) localStorage.setItem(webProfileKey(CUR.slug), $('#webProfile').value);
 });
@@ -243,16 +253,16 @@ $('#btnStart').addEventListener('click', async () => {
       toast(`网页版写作启动：${nm}（${batches} 批）`);
     } else if (stateless) {
       const batches = Math.max(1, parseInt($('#statelessBatches').value, 10) || 3);
-      const r = await api('/api/book/stateless-start', 'POST', { book: CUR.slug, model: $('#writeModel').value, batches });
+      const r = await api('/api/book/stateless-start', 'POST', { book: CUR.slug, model: $('#writeModel').value, batches, participation: $('#writeMode').value });
       $('#mirror').textContent = '♻️ 无状态省钱模式运行中（无窗口镜像）。进度见下方日志：每批全新进程写作，写完即弃会话。';
       setWriting(true); openStream(CUR.slug);
       toast(r.untilTarget ? '无状态模式：写到目标章数（可随时停）' : `无状态模式：写 ${batches} 批`);
     } else {
-      const writeMode = $('#writeMode').value === 'review' ? 'review' : 'auto';
-      await api('/api/write', 'POST', { book: CUR.slug, model: $('#writeModel').value, task: $('#writeTask').value, writeMode });
-      if (CUR) CUR.writeMode = writeMode;
+      const participation = $('#writeMode').value;   // auto | volume | chapter
+      await api('/api/write', 'POST', { book: CUR.slug, model: $('#writeModel').value, task: $('#writeTask').value, participation });
+      if (CUR) CUR.participation = participation;
       setWriting(true); openStream(CUR.slug);
-      toast(writeMode === 'review' ? '已开窗 · 逐批审核模式（每批写完会停下等你）' : '已开窗，autopilot 全自动运行中');
+      toast(participation === 'chapter' ? '已开写 · 盯着写（每批写完停下等你）' : participation === 'volume' ? '已开写 · 卷口把关（开新卷时停下让你定大纲）' : '已开写 · 放手写（全自动）');
     }
   } catch (e) { toast('启动失败：' + e.message); setWriting(false); }
 });
@@ -2154,7 +2164,7 @@ $('#nbLaunch').addEventListener('click', async () => {
       title, theme: $('#nbTheme').value.trim(),
       words: getWords(), model: $('#nbModel').value,
       style: NB_REF_STYLE || $('#nbStyle').value,   // 对标分析过 → 用对标文风；否则用下拉预设
-      writeMode: $('#nbWriteMode').value === 'review' ? 'review' : 'auto',
+      participation: $('#nbWriteMode').value,   // auto | volume | chapter
     });
     $('#modal').classList.add('hidden');
     await refresh();

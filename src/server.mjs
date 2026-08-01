@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, setBookPublish, setBookFanqieStatus, setBookWriteMode, bookStats } from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats } from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll, getModel } from './models.mjs';
@@ -742,8 +742,10 @@ async function api(p, req, res, u) {
       }
       try { book = createBook({ title: body.title, genre: body.theme || body.genre, model: body.model, totalWords: body.words, style: styleInput }, cfg); }
       catch (e) { return json(res, 400, { error: e.message }); }
-      // 立项时选择写作模式（全自动 / 逐批审核）；startWriting 会据 book.writeMode 播种运行时审核开关
-      if (body.writeMode != null) {
+      // 立项时选择参与度；startWriting 会据 book.writeMode/reviewEvery 播种运行时审核开关
+      if (body.participation != null) {
+        try { setParticipation(book.slug, body.participation); } catch {}
+      } else if (body.writeMode != null) {
         const mode = body.writeMode === 'review' ? 'review' : 'auto';
         const every = mode === 'review' ? Math.max(1, Math.floor(Number(body.reviewEvery) || 1)) : 0;
         try { setBookWriteMode(book.slug, mode, every || 1); } catch {}
@@ -886,7 +888,16 @@ async function api(p, req, res, u) {
           pushLog(book.slug, { level: 'act', msg: `已跳过审稿意见（${pend.scope}）→ 不改大纲，继续` });
         }
         clearPending(book.slug);
-        if (sessionLive(book.slug)) { try { await sendToBook(book.slug, instr, cfg); } catch {} }
+        if (sessionLive(book.slug)) {
+          try { await sendToBook(book.slug, instr, cfg); } catch {}
+        } else {
+          // 无状态模式没有长驻会话：把修订指令存为 resume，重启无状态循环 → 到卷口自动应用并接着写
+          setResume(book.slug, instr);
+          const smodel = book.model || cfg.defaultModel;
+          const untilTarget = (book.targetChapters || 0) > 0;
+          try { startStatelessRun(book, { model: smodel, batches: book.standards?.batchSize || 3, untilTarget, cfg }); pushLog(book.slug, { level: 'act', msg: '▶ 已按你的选择恢复写作（无状态）' }); }
+          catch (e) { pushLog(book.slug, { level: 'warn', msg: '恢复写作失败：' + e.message }); }
+        }
         return json(res, 200, { ok: true, applied: !!body.apply });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -907,6 +918,28 @@ async function api(p, req, res, u) {
         }
         pushLog(book.slug, { level: 'act', msg: mode === 'review' ? `已切到【逐批审核】模式：每写 ${every} 批停下等你审核` : '已切到【全自动】模式：连续写作不再停顿' });
         return json(res, 200, { ok: true, writeMode: mode, reviewEvery: every });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/participation') {
+      // 参与度开关（提前/运行中均可，立即生效）：auto 放手写 · 全自动 | volume 卷口把关 | chapter 盯着写
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const level = ['auto', 'volume', 'chapter'].includes(body.level) ? body.level : 'volume';
+        setParticipation(book.slug, level);
+        setReviewEvery(book.slug, level === 'chapter' ? 1 : 0);
+        const label = { auto: '放手写 · 全自动', volume: '卷口把关 · 开新卷时停下让你定大纲', chapter: '盯着写 · 每批写完你先过' }[level];
+        // 放宽参与度时，若正卡在某个门上 → 顺势放行，别把书晾着
+        const pend = getPending(book.slug);
+        if (pend && pend.kind === 'batch-review' && level !== 'chapter') {
+          setResume(book.slug, getReviewDefault(book.slug) || cfg.autopilot?.continueText || '继续');
+          clearPending(book.slug);
+        } else if (pend && pend.kind === 'outline' && level === 'auto') {
+          try { snapshotOutline(book, pend.scope); } catch {}
+          if (sessionLive(book.slug)) { try { await sendToBook(book.slug, buildReviseInstruction(book, pend.scope, pend.file), cfg); } catch {} }
+          clearPending(book.slug);
+        }
+        pushLog(book.slug, { level: 'act', msg: `已切到【${label}】` });
+        return json(res, 200, { ok: true, participation: level });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/review-continue') {
@@ -1186,6 +1219,7 @@ async function api(p, req, res, u) {
         if (rtOf(slug).statelessRun && !rtOf(slug).statelessRun.stopped) return json(res, 409, { error: '无状态写作已在进行中' });
         const model = body.model || book.model || cfg.defaultModel;
         if (body.model) { try { setBookModel(slug, body.model); } catch {} }
+        if (body.participation != null) { try { setParticipation(slug, body.participation); } catch {} }
         const untilTarget = body.untilTarget === true || (book.targetChapters > 0 && body.batches == null);
         const batches = Math.max(1, parseInt(body.batches, 10) || 1);
         const out = startStatelessRun(book, { model, batches, untilTarget, cfg });
@@ -1347,8 +1381,11 @@ async function doWrite(body, cfg, res) {
   const model = body.model || book.model || cfg.defaultModel;
   // 带了模型就持久化（卡片/下次默认值/resume 全跟上）
   if (body.model) { try { setBookModel(book.slug, body.model); } catch {} }
-  // 开写前选择写作模式（全自动 / 逐批审核）：持久化 + 立即热生效（含已在跑的窗口）
-  if (body.writeMode != null) {
+  // 开写前选择参与度（放手写/卷口把关/盯着写）：持久化 + 立即热生效（含已在跑的窗口）
+  if (body.participation != null) {
+    try { setParticipation(book.slug, body.participation); } catch {}
+    setReviewEvery(book.slug, body.participation === 'chapter' ? 1 : 0);
+  } else if (body.writeMode != null) {
     const mode = body.writeMode === 'review' ? 'review' : 'auto';
     const every = mode === 'review' ? Math.max(1, Math.floor(Number(body.reviewEvery) || 1)) : 0;
     try { setBookWriteMode(book.slug, mode, every || 1); } catch {}

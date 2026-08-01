@@ -53,6 +53,29 @@ export function setBookWriteMode(slugOrId, mode, reviewEvery) {
   return b;
 }
 
+// 参与度（用户视角的一个开关，派生底层的 writeMode/reviewEvery/大纲门）：
+//   'auto'    放手写 · 全自动——不停，卷口大纲也自动采纳修订
+//   'volume'  卷口把关——平时自动写，只在【开新卷/立项的大纲】处停下让你定（推荐默认）
+//   'chapter' 盯着写——每批写完都停下等你过目
+export function setParticipation(slugOrId, level) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  const lv = ['auto', 'volume', 'chapter'].includes(level) ? level : 'volume';
+  b.participation = lv;
+  b.writeMode = lv === 'chapter' ? 'review' : 'auto';
+  if (lv === 'chapter') b.reviewEvery = 1; else delete b.reviewEvery;
+  b.outlineApprove = lv !== 'auto';     // 卷口大纲门是否停下等你逐条挑
+  upsertBook(b);
+  return b;
+}
+// 读一本书的参与度；旧书没存过 → 从 writeMode 兜底(review→chapter，否则 volume)。
+export function participationOf(bookOrSlug) {
+  const b = typeof bookOrSlug === 'string' ? getBook(bookOrSlug) : bookOrSlug;
+  if (!b) return 'volume';
+  if (b.participation) return b.participation;
+  return b.writeMode === 'review' ? 'chapter' : 'volume';
+}
+
 // 设定/更换一本书默认使用的模型（codex|claude|gemini），持久化进 book.model。
 // 这样卡片、续写(resume)、下次打开的默认值都会跟上选择；运行中的旧窗口需停掉重开才换。
 export function setBookModel(slugOrId, model) {

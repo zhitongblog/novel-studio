@@ -64,10 +64,11 @@
               <textarea id="writeTask" rows="5" placeholder="例如：续写下一批 3 章，写完自检"></textarea>
             </label>
             <label class="field">
-              <span>写作模式（可随时切换）</span>
+              <span>参与度（随时可切）</span>
               <select id="writeMode">
-                <option value="auto">🤖 全自动 · 连续写作不停顿</option>
-                <option value="review">✋ 逐批审核 · 每批写完停下等我审核</option>
+                <option value="auto">🤖 放手写 · 全自动，我回来验收</option>
+                <option value="volume">🧭 卷口把关 · 平时自动，开新卷时停下让我定大纲（推荐）</option>
+                <option value="chapter">✍️ 盯着写 · 每批写完我先过</option>
               </select>
             </label>
             <label class="field stateless-toggle" title="【默认·推荐】每章用全新无头进程写作、写完即弃会话，靠精准上下文包重喂前文。对长篇可省一个数量级 token、更快、不漂移。无窗口镜像，进度看下方日志。关掉才回到长驻会话模式（越写越贵，不推荐）。">
@@ -244,10 +245,11 @@
       <div id="nbStep2" class="hidden">
         <h2>定书名</h2>
         <label class="field"><span>最终书名 *</span><input id="nbFinalTitle" placeholder="点下面候选填入即可改，或直接自己写" /></label>
-        <label class="field"><span>写作模式（开写后仍可随时切换）</span>
+        <label class="field"><span>参与度（开写后仍可随时切换）</span>
           <select id="nbWriteMode">
-            <option value="auto">🤖 全自动 · 连续写作不停顿</option>
-            <option value="review">✋ 逐批审核 · 每批写完停下等我审核</option>
+            <option value="auto">🤖 放手写 · 全自动，我回来验收</option>
+            <option value="volume" selected>🧭 卷口把关 · 平时自动，开新卷时停下让我定大纲（推荐）</option>
+            <option value="chapter">✍️ 盯着写 · 每批写完我先过</option>
           </select>
         </label>
         <div class="modal-hint">下面是 AI 据题材的建议，点一个填进上面，可任意修改；不喜欢就自己写。</div>

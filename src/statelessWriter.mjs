@@ -11,9 +11,10 @@ import { spawn } from 'node:child_process';
 import { getModel, detectModel } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { buildBatchPack } from './contextpack.mjs';
-import { bookStats, getBook } from './books.mjs';
+import { bookStats, getBook, participationOf } from './books.mjs';
 import { gitSnapshot } from './scaffold.mjs';
-import { reviewOutline } from './editor.mjs';   // 卷边界大纲审稿门复用长驻那套主编无头审稿
+import { reviewOutline, parseReviewItems } from './editor.mjs';   // 卷边界大纲审稿门复用长驻那套主编无头审稿
+import { setPending, takeResume } from './pending.mjs';   // 参与模式：卷口挂起等用户逐条挑 / 用户拍板后恢复
 
 // 各模型"无头 + 自动批准文件读写"的参数。
 function writeArgs(model) {
@@ -74,16 +75,41 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
   const m = (r.out + '\n' + r.err).match(/【大纲待审[:：]\s*([^】\n]+)】/);
   if (grew <= 0 && m) {
     const scope = m[1].trim();
-    let reviewed = false;
-    if (cfg?.stateless?.outlineReview !== false) {
-      onLog({ level: 'act', msg: `卷边界【${scope}】：先过大纲审稿门——主编审该卷分章大纲…` });
-      try { await reviewOutline({ book, scope, cfg, authorModel: model, onLog: (e) => onLog({ ...e, source: 'editor' }) }); reviewed = true; }
-      catch (e) { onLog({ level: 'warn', msg: '大纲审稿失败（放行不阻断）：' + e.message }); }
+    const resumeRevise = takeResume(book.slug);       // 用户已就本卷大纲拍板的修订指令(若有)
+    const level = participationOf(book);
+    if (resumeRevise) {
+      // 用户逐条挑完 → 按其意见改本卷大纲再续写
+      onLog({ level: 'act', msg: `卷边界【${scope}】：按你选定的意见改大纲后续写…` });
+      r = await runHeadless(model, resumeRevise + ' 改完据修订后的大纲继续把本批正文写出来。', { cwd: book.dir, cfg, timeoutMs });
+      after = bookStats(book); grew = (after.chapters || 0) - (before.chapters || 0);
+    } else if (level !== 'auto' && cfg?.stateless?.outlineReview !== false) {
+      // 参与模式(卷口把关/盯着写)：主编审该卷大纲 → 拆成分条 → 挂起等你逐条挑，本轮停下
+      onLog({ level: 'act', msg: `卷边界【${scope}】：主编审该卷分章大纲，拆条待你定…` });
+      let items = [];
+      try {
+        const rv = await reviewOutline({ book, scope, cfg, authorModel: model, onLog: (e) => onLog({ ...e, source: 'editor' }) });
+        items = rv.passthrough ? [] : parseReviewItems(rv.critique);
+        if (items.length) {
+          setPending(book.slug, { kind: 'outline', scope, file: rv.file, critique: (rv.critique || '').slice(0, 6000), items });
+          onLog({ level: 'act', source: 'editor', kind: 'pending-review', scope, file: String(rv.file || '').split(/[\\/]/).pop(), msg: `⏸ 主编审稿：${items.length} 条意见待你逐条挑（${scope}）——选完自动接着写` });
+          return { ok: true, wrote: 0, paused: true, scope };
+        }
+      } catch (e) { onLog({ level: 'warn', msg: '大纲审稿失败（放行不阻断）：' + e.message }); }
+      // 审稿无有效分条 → 不阻断，自愈续写
+      r = await runHeadless(model, buildBoundaryRetryPrompt(book, pack, scope, false), { cwd: book.dir, cfg, timeoutMs });
+      after = bookStats(book); grew = (after.chapters || 0) - (before.chapters || 0);
+    } else {
+      // 放手写(auto)：主编自动审稿 + 直接续写，不打扰
+      let reviewed = false;
+      if (cfg?.stateless?.outlineReview !== false) {
+        onLog({ level: 'act', msg: `卷边界【${scope}】：先过大纲审稿门——主编审该卷分章大纲…` });
+        try { await reviewOutline({ book, scope, cfg, authorModel: model, onLog: (e) => onLog({ ...e, source: 'editor' }) }); reviewed = true; }
+        catch (e) { onLog({ level: 'warn', msg: '大纲审稿失败（放行不阻断）：' + e.message }); }
+      }
+      onLog({ level: 'info', msg: `卷边界【${scope}】：${reviewed ? '按审稿意见改大纲后' : '补大纲后'}直接续写…` });
+      r = await runHeadless(model, buildBoundaryRetryPrompt(book, pack, scope, reviewed), { cwd: book.dir, cfg, timeoutMs });
+      after = bookStats(book); grew = (after.chapters || 0) - (before.chapters || 0);
     }
-    onLog({ level: 'info', msg: `卷边界【${scope}】：${reviewed ? '按审稿意见改大纲后' : '补大纲后'}直接续写…` });
-    r = await runHeadless(model, buildBoundaryRetryPrompt(book, pack, scope, reviewed), { cwd: book.dir, cfg, timeoutMs });
-    after = bookStats(book);
-    grew = (after.chapters || 0) - (before.chapters || 0);
   }
 
   const secs = Math.round((Date.now() - t0) / 1000);
@@ -149,6 +175,7 @@ export async function runStateless({
     onLog({ level: 'info', msg: `—— 第 ${i + 1}${untilTarget ? '' : '/' + batches} 批 ——` });
     const r = await writeBatchStateless({ book, model, cfg, count, onLog });
     results.push(r);
+    if (r.paused) { onLog({ level: 'act', msg: '⏸ 已在卷口停下等你定大纲——选完会自动接着写' }); break; }
     if (!r.ok && r.wrote <= 0) { onLog({ level: 'warn', msg: '本批无产出，停止（请检查模型/代理/额度）' }); break; }
     done++; sinceCheck++;
 

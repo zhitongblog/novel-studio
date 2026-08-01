@@ -5,7 +5,7 @@ import path from 'node:path';
 import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision, reviewEnding, buildEndingRenudgeInstruction, parseReviewItems } from './editor.mjs';
 import { buildFinaleInstruction, buildAfterwordInstruction } from './planner.mjs';
 import { setPending, setReviewDefault } from './pending.mjs';
-import { bookStats, getBook, setBookStatus, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
+import { bookStats, getBook, setBookStatus, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol, participationOf } from './books.mjs';
 import { runFinaleClosure } from './finale.mjs';
 
 // 构建门处理器。slug/model/cfg/onLog 必填；book 可选（缺则按 slug 现读）。
@@ -13,10 +13,9 @@ import { runFinaleClosure } from './finale.mjs';
 export function buildGateHandlers({ slug, book = null, model, cfg, onLog = () => {} }) {
   const bk = () => getBook(slug) || book;
   const editorOff = cfg.editorReview?.enabled === false;
-  // 大纲审稿【确认门】：默认总是暂停等用户逐条挑（用户选择「每次暂停我逐条挑」）。
-  // 与「逐批审核」的 writeMode 无关——即使全自动写作，也在【卷边界大纲审稿】这一步停下让人拍板。
-  // 可用 cfg.editorReview.outlineApproval=false 关掉退回旧的"自动采纳"。
-  const outlineApprove = cfg.editorReview?.outlineApproval !== false && cfg.editorReview?.requireApproval !== false;
+  // 大纲审稿【确认门】是否暂停，由该书的【参与度】决定（每次现读，可热切换）：
+  //   auto → 不停(自动采纳修订)；volume/chapter → 停下等用户逐条挑。
+  // 仍可用 cfg.editorReview.outlineApproval=false 全局关掉。
   const renudge = new Map();
 
   // —— 大纲审稿门：换主编无头审稿 → 拆成分条 → 挂起等用户逐条挑（无有效分条/审稿放行时不卡死，自动走原修订流程）。每 scope 只触发一次——
@@ -24,6 +23,7 @@ export function buildGateHandlers({ slug, book = null, model, cfg, onLog = () =>
     try {
       const r = await reviewOutline({ book: bk(), scope, cfg, authorModel: model, onLog: (e) => onLog({ ...e, source: 'editor' }) });
       const items = r.passthrough ? [] : parseReviewItems(r.critique);
+      const outlineApprove = participationOf(bk()) !== 'auto' && cfg.editorReview?.outlineApproval !== false && cfg.editorReview?.requireApproval !== false;
       if (outlineApprove && items.length) {
         setPending(slug, { kind: 'outline', scope, file: r.file, critique: (r.critique || '').slice(0, 6000), items });
         onLog({ level: 'act', source: 'editor', kind: 'pending-review', scope, file: path.basename(r.file), msg: `⏸ 主编审稿：${items.length} 条意见待你逐条挑（${scope}）——采纳哪些由你定，选完才继续` });
