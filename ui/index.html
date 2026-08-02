@@ -98,11 +98,14 @@
               <span>🌐 网页账号（Unzoo）</span>
               <select id="webProfile"><option value="">（加载账号列表…）</option></select>
             </label>
-            <div class="btn-row">
-              <button class="btn primary" id="btnStart">▶ 开始写作</button>
-              <button class="btn danger" id="btnStop" disabled>■ 停止</button>
-              <button class="btn" id="btnCowrite" title="你出主意·AI 逐章：以你的想法为主，一次只写一章，AI 帮你出主意/搭大纲并按你的要求写，你审完再写下一章——从根上治“越写越变形”。需 claude 或 codex。">🤝 共创模式</button>
-              <button class="btn" id="btnStudio" title="用大白话让 AI 改角色/设定或某卷大纲——AI 只改对应文件、不写新正文、不动已写章节，你不用碰 md。">✍️ 改设定/大纲</button>
+            <div class="write-modes">
+              <button class="btn primary big" id="btnCowrite" title="你出主意→AI 只写一章→你读→满意再写下一章。你定每章走向，AI 不自作主张，从根上治“越写越漂”。推荐。需 claude 或 codex。">🤝 我来主笔 · 共创<span class="tag-rec">推荐</span><small>你定每章走向 · AI 执笔 · 你逐章把关</small></button>
+              <div class="write-alt">
+                <button class="btn" id="btnStart" title="autopilot 全自动连续写。省事，但容易越写越跑偏——务必配合上方健康体检 / 复检。">🤖 放手让它写（全自动）</button>
+                <button class="btn danger" id="btnStop" disabled>■ 停止</button>
+                <button class="btn" id="btnStudio" title="用大白话让 AI 改角色/设定或某卷大纲——AI 只改对应文件、不写新正文、不动已写章节，你不用碰 md。">✍️ 改设定/大纲</button>
+              </div>
+              <div class="write-tip">⚠️ 完全交给 AI 容易跑偏（看上方健康体检的硬伤数）。要质量就用<b>【共创】</b>：你当导演定走向，AI 执笔，你逐章把关。</div>
             </div>
             <div class="btn-row">
               <button class="btn" id="btnRead" title="阅读全书已写章节：左边选章、右边舒适阅读。共创/写作后可随时在这里读当前创作的章节。">📖 阅读</button>

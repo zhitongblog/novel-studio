@@ -301,6 +301,16 @@ textarea { resize: vertical; line-height: 1.5; }
 .pb-danger { border: 1px solid color-mix(in srgb, var(--red) 40%, var(--border)); background: color-mix(in srgb, var(--red) 8%, transparent); border-radius: 9px; padding: 8px 10px; align-items: flex-start; }
 .dz-tag { display: inline-block; font-size: 10px; font-weight: 700; color: #fff; background: var(--red); padding: 1px 6px; border-radius: 5px; margin-right: 4px; letter-spacing: .04em; vertical-align: middle; }
 
+/* 写作主舞台：共创为主、全自动为辅 */
+.write-modes { display: flex; flex-direction: column; gap: 9px; }
+.btn.big { flex: none; width: 100%; padding: 13px 16px 12px; font-size: 15.5px; font-weight: 700; display: flex; flex-direction: column; align-items: center; gap: 3px; position: relative; }
+.btn.big small { font-weight: 500; font-size: 11.5px; opacity: .9; color: var(--accent-ink); }
+.tag-rec { position: absolute; top: 9px; right: 12px; font-size: 10px; font-weight: 700; background: var(--accent-ink); color: var(--accent-2); padding: 2px 8px; border-radius: 20px; }
+.write-alt { display: flex; gap: 8px; }
+.write-alt .btn { flex: 1; }
+.write-tip { font-size: 11.5px; color: var(--muted); line-height: 1.55; background: color-mix(in srgb, var(--warn) 9%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 26%, transparent); border-radius: 9px; padding: 8px 11px; }
+.write-tip b { color: var(--accent-2); }
+
 /* ===== 阅读 / 工作台 ===== */
 /* 固定阅读区高度：目录(rd-nav)与正文(rd-content)各自内部滚动，目录不再跟着正文滚 */
 .reader { display: flex; gap: 14px; height: calc(100vh - 128px); min-height: 0; }
