@@ -1370,6 +1370,28 @@ async function openStudio() {
   } catch { $('#stVol').innerHTML = '<option value="">（读取卷列表失败）</option>'; }
 }
 $('#btnStudio') && $('#btnStudio').addEventListener('click', openStudio);
+// 改名·全书替换（先预览命中数，确认再改，git 可回退）
+$('#stRenameGo') && $('#stRenameGo').addEventListener('click', async () => {
+  if (!CUR) return;
+  const from = $('#stFrom').value.trim(), to = $('#stTo').value.trim();
+  if (!from || !to) { $('#stRenameHint').textContent = '原名和新名都要填'; return; }
+  $('#stRenameGo').disabled = true;
+  try {
+    const pv = await api('/api/book/rename-entity', 'POST', { book: CUR.slug, from, to, preview: true });
+    if (!pv.count) { $('#stRenameHint').textContent = `全书没找到「${from}」，检查下有没有写错`; return; }
+    if (!confirm(`把全书的「${from}」替换成「${to}」——共 ${pv.count} 处、${pv.files} 个文件（含已写章节+大纲+设定+台账）。\n已自动 git 存档，不满意可回退。确定？`)) return;
+    $('#stRenameHint').textContent = '替换中…';
+    const r = await api('/api/book/rename-entity', 'POST', { book: CUR.slug, from, to });
+    $('#stRenameHint').innerHTML = `✅ 已把「${from}」→「${to}」全书替换 ${r.count} 处（${r.files} 文件）。已写章节/大纲/设定都改了。`;
+    $('#stFrom').value = ''; $('#stTo').value = '';
+    toast(`改名完成：${from} → ${to}（${r.count} 处）`);
+  } catch (e) { $('#stRenameHint').textContent = '失败：' + e.message; }
+  finally { $('#stRenameGo').disabled = false; }
+});
+// 阅读页：目录收起/展开
+$('#rdNavToggle') && $('#rdNavToggle').addEventListener('click', () => {
+  const r = $('#reader'); if (r) r.classList.toggle('nav-collapsed');
+});
 $('#stClose') && $('#stClose').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
 $('#stCancel') && $('#stCancel').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
 $('#stTarget') && $('#stTarget').addEventListener('click', (e) => {

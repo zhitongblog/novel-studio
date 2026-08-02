@@ -139,6 +139,32 @@ export function renameBook(slugOrId, newTitle) {
   return { book: b, touched };
 }
 
+// 全书替换一个词（角色名/地名/称呼等）——【会波及全书】：改 bible/大纲/台账/索引 + 所有已写章节正文。
+// dry=true 只统计不改（预览用）。调用方负责改前 git 存档以便回退。返回 {files, count}。
+export function renameEntity(slugOrId, from, to, dry = false) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  const f = String(from || ''), t = String(to || '');
+  if (!f.trim()) throw new Error('原名不能为空');
+  if (!dry && !t.trim()) throw new Error('新名不能为空');
+  if (f === t) return { book: b, files: 0, count: 0 };
+  const rels = ['novel_bible.md', 'chapter_index.md', 'continuity_ledger.md', '简介.txt'];
+  try { for (const x of fs.readdirSync(path.join(b.dir, 'outlines'))) if (x.endsWith('.md')) rels.push(path.join('outlines', x)); } catch {}
+  const cdir = path.join(b.dir, 'chapters');
+  (function walk(d) { try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.txt$/i.test(e.name)) rels.push(path.relative(b.dir, p)); } } catch {} })(cdir);
+  let files = 0, count = 0;
+  for (const rel of rels) {
+    const fp = path.join(b.dir, rel);
+    try {
+      const c = fs.readFileSync(fp, 'utf8');
+      const n = c.split(f).length - 1;
+      if (n > 0) { count += n; files++; if (!dry) fs.writeFileSync(fp, c.split(f).join(t), 'utf8'); }
+    } catch {}
+  }
+  if (!dry) { try { refreshContext(b); } catch {} }
+  return { book: b, files, count };
+}
+
 // 番茄发布配置：account(Unzoo profilePath)、番茄 bookId/书名、是否按卷建卷、每日发布数、预约起始日期/时间、间隔、自动发布开关、预设触发章数。
 export function setBookPublish(slugOrId, patch) {
   const b = getBook(slugOrId);

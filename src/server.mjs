@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol } from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol } from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll, getModel } from './models.mjs';
@@ -849,6 +849,24 @@ async function api(p, req, res, u) {
           try { await sendToBook(book.slug, buildFinaleInstruction(book, { first: true }), cfg); pushLog(book.slug, { level: 'act', msg: '已进入收尾 → 穿插收束令' }); } catch {}
         }
         return json(res, 200, { ok: true, status: b.status, live: sessionLive(book.slug) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/rename-entity') {
+      // 改名一键波及全书：角色名/地名/称呼 → 替换 设定+大纲+台账+索引+所有已写章节。preview 只统计。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const from = String(body.from || '').trim();
+        if (!from) return json(res, 400, { error: '先填要改的原名' });
+        if (body.preview) {
+          const r = renameEntity(book.slug, from, body.to || '', true);
+          return json(res, 200, { ok: true, preview: true, files: r.files, count: r.count });
+        }
+        const to = String(body.to || '').trim();
+        if (!to) return json(res, 400, { error: '先填新名' });
+        try { gitSnapshot(book.dir, `改名前存档：${from}→${to}`); } catch {}
+        const r = renameEntity(book.slug, from, to, false);
+        pushLog(book.slug, { level: 'act', msg: `已把「${from}」全书替换成「${to}」：${r.files} 个文件、${r.count} 处（含已写章节+大纲+设定；不满意可 git 回退）` });
+        return json(res, 200, { ok: true, files: r.files, count: r.count });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/plan-volume') {
