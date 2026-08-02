@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats, plannedTotalChapters, plannedVolumes, currentVolume } from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol } from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll, getModel } from './models.mjs';
@@ -23,7 +23,7 @@ import { brainstorm, writeChapterInWindow, isCowriteModel, COWRITE_MODELS } from
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
-import { proposeTitles, buildKickoffInstruction, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, resolveGenModel, analyzeStyleSample } from './planner.mjs';
+import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction } from './editor.mjs';
@@ -774,7 +774,7 @@ async function api(p, req, res, u) {
         try { styleInput = await recommendStyle({ theme: body.theme || body.genre, model: body.model || cfg.defaultModel }, cfg); }
         catch { styleInput = null; }
       }
-      try { book = createBook({ title: body.title, genre: body.theme || body.genre, model: body.model, totalWords: body.words, style: styleInput }, cfg); }
+      try { book = createBook({ title: body.title, genre: body.theme || body.genre, model: body.model, totalWords: body.words, volumes: body.volumes || '', style: styleInput }, cfg); }
       catch (e) { return json(res, 400, { error: e.message }); }
       // 立项时选择参与度；startWriting 会据 book.writeMode/reviewEvery 播种运行时审核开关
       if (body.participation != null) {
@@ -796,7 +796,8 @@ async function api(p, req, res, u) {
         }
         pushLog(book.slug, { level: 'act', msg: `网页版模型立项：用本地 ${launchModel} 只搭 设定+大纲（不写正文），正文随后用网页版续写` });
       }
-      const instruction = buildKickoffInstruction(book, body.theme || body.genre, body.words, { planOnly: isWebModel });
+      // 共创版立项：只搭设定 + 全书罗盘(每卷一行走向)，绝不细化章节/写正文——之后逐卷共创。
+      const instruction = buildCompassKickoffInstruction(book, body.theme || body.genre, body.words, body.volumes);
       rtOf(book.slug).logs = [];
       try {
         const session = await startWriting({ book, model: launchModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
@@ -848,6 +849,35 @@ async function api(p, req, res, u) {
           try { await sendToBook(book.slug, buildFinaleInstruction(book, { first: true }), cfg); pushLog(book.slug, { level: 'act', msg: '已进入收尾 → 穿插收束令' }); } catch {}
         }
         return json(res, 200, { ok: true, status: b.status, live: sessionLive(book.slug) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/plan-volume') {
+      // 本卷共创：让 AI 据【全书罗盘该卷走向 + 设定 + 上一卷卷末】拟这一卷的章级大纲草案，返回文本供作者审改（不落盘）。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const volNum = Math.max(1, parseInt(body.volume, 10) || 1);
+        let bibleBrief = '', compass = '', prevEnding = '';
+        try { bibleBrief = fs.readFileSync(path.join(book.dir, 'novel_bible.md'), 'utf8').slice(0, 4000); } catch {}
+        try {
+          const od = path.join(book.dir, 'outlines');
+          const cf = fs.readdirSync(od).find(f => /罗盘/.test(f));
+          if (cf) compass = fs.readFileSync(path.join(od, cf), 'utf8').slice(0, 6000);
+        } catch {}
+        try {
+          const cdir = path.join(book.dir, 'chapters'); const files = [];
+          (function walk(d) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p2 = path.join(d, e.name); if (e.isDirectory()) walk(p2); else if (/\.txt$/i.test(e.name)) files.push(p2); } })(cdir);
+          files.sort((a, b) => (parseInt(path.basename(a)) || 0) - (parseInt(path.basename(b)) || 0));
+          const last = files[files.length - 1]; if (last) prevEnding = fs.readFileSync(last, 'utf8').slice(-1200);
+        } catch {}
+        let cpv = 0; try { cpv = chaptersPerVol(book); } catch {}
+        const prompt = buildVolumePlanPrompt(book, volNum, { bibleBrief, compass, prevEnding, cpv });
+        const model = resolveGenModel(body.model || book.model || cfg.defaultModel) || body.model || book.model || cfg.defaultModel;
+        pushLog(book.slug, { level: 'act', msg: `本卷共创：AI 正在据罗盘拟【第 ${volNum} 卷】章级大纲草案…`, source: 'cowrite' });
+        const raw = runModelOnce(model, prompt, cfg, 240000) || '';
+        const clean = raw.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').trim();
+        if (clean.length < 40) return json(res, 500, { error: 'AI 拟稿太短，请重试或换模型' });
+        const rel = `outlines/卷${String(volNum).padStart(2, '0')}分章大纲.md`;
+        return json(res, 200, { ok: true, volume: volNum, draft: clean, rel });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/revise-setting') {

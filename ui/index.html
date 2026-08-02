@@ -103,6 +103,7 @@
               <div class="write-alt">
                 <button class="btn" id="btnStart" title="autopilot 全自动连续写。省事，但容易越写越跑偏——务必配合上方健康体检 / 复检。">🤖 放手让它写（全自动）</button>
                 <button class="btn danger" id="btnStop" disabled>■ 停止</button>
+                <button class="btn" id="btnVolPlan" title="写一卷之前，先跟 AI 共创这一卷的章级大纲，改定了再写。全书只有粗罗盘，每卷你把关，故事不跑偏。新书和已建的书都能用。">🧭 本卷大纲</button>
                 <button class="btn" id="btnStudio" title="用大白话让 AI 改角色/设定或某卷大纲——AI 只改对应文件、不写新正文、不动已写章节，你不用碰 md。">✍️ 改设定/大纲</button>
               </div>
               <div class="write-tip">⚠️ 完全交给 AI 容易跑偏（看上方健康体检的硬伤数）。要质量就用<b>【共创】</b>：你当导演定走向，AI 执笔，你逐章把关。</div>
@@ -220,7 +221,10 @@
           </label>
           <label class="field"><span>模型</span><select id="nbModel"></select></label>
         </div>
-        <label class="field"><span>文风</span><select id="nbStyle"></select></label>
+        <div class="grid2">
+          <label class="field"><span>文风</span><select id="nbStyle"></select></label>
+          <label class="field"><span>规划卷数（只出粗罗盘）</span><input id="nbVolCount" type="number" min="3" max="200" value="30" title="立项只出这么多卷的一句话走向（罗盘），不细化章节。之后每卷开写前跟你共创该卷大纲。" /></label>
+        </div>
         <div class="adv-toggle" id="nbRefToggle">📚 对标别人的书（学文风，立项前就定调，可多本）</div>
         <div class="adv hidden" id="nbRefPanel">
           <div class="modal-hint">先给 1~3 本对标爆款，AI 分析出文风 → <b>立项前就设为本书文风</b>，之后 设定/大纲/正文全程照这个腔写。只学"怎么写"、不复制原文。</div>
@@ -612,6 +616,29 @@
         <button class="btn primary" id="stGo">✍️ 让 AI 改</button>
       </div>
       <div class="modal-err" id="stErr"></div>
+    </div>
+  </div>
+
+  <!-- 本卷共创大纲 -->
+  <div class="modal hidden" id="volPlanModal">
+    <div class="modal-card" style="width: 780px;">
+      <button class="modal-close" id="vpClose" title="关闭 (Esc)">✕</button>
+      <h2>🧭 本卷共创大纲</h2>
+      <p class="modal-hint">全书只有粗<b>罗盘</b>（每卷一句话走向）。写一卷之前，先跟 AI 把<b>这一卷</b>的章级大纲定下来——AI 据罗盘出草案，<b>你随便改</b>（加减章、改走向、改钩子），存了再写这一卷。每卷你亲自把关，故事就不会"看着完整实则跑偏"。</p>
+      <div class="cw-head" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+        <label class="field" style="margin:0"><span>这一卷</span><select id="vpVol"></select></label>
+        <label class="field" style="margin:0"><span>模型</span><select id="vpModel"></select></label>
+        <button class="btn" id="vpDraft">🤖 让 AI 据罗盘拟草案</button>
+        <span class="dim-note" id="vpHint" style="align-self:center"></span>
+      </div>
+      <label class="field"><span>本卷章级大纲（AI 草案，你随便改；也可直接自己写）</span>
+        <textarea id="vpText" class="ai-prompt" rows="15" placeholder="点上面「让 AI 据罗盘拟草案」，或直接自己写这一卷的分章大纲（逐章一行：核心事件/冲突｜推进了什么｜章末钩子）…"></textarea>
+      </label>
+      <div class="btn-row end">
+        <button class="btn ghost" id="vpCancel">取消</button>
+        <button class="btn primary" id="vpSave">💾 保存本卷大纲</button>
+      </div>
+      <div class="modal-err" id="vpErr"></div>
     </div>
   </div>
 

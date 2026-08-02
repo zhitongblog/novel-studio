@@ -1393,6 +1393,50 @@ $('#stGo') && $('#stGo').addEventListener('click', async () => {
   } catch (e) { $('#stErr').textContent = '失败：' + e.message; }
   finally { $('#stGo').disabled = false; }
 });
+
+// ---------- 🧭 本卷共创大纲（全书只有粗罗盘，逐卷共创） ----------
+async function openVolPlan() {
+  if (!CUR) return;
+  $('#vpText').value = ''; $('#vpErr').textContent = ''; $('#vpHint').textContent = '';
+  $('#vpModel').innerHTML = STATE.models.map(m => `<option value="${m.id}" ${m.available ? '' : 'disabled'}>${esc(m.name)}${m.available ? '' : '（未装）'}</option>`).join('');
+  $('#vpModel').value = CUR.model || STATE.config.defaultModel;
+  // 卷号：1..规划卷数；默认下一卷（当前卷+1，没写过则第1卷）
+  let planned = 30, cur = 0;
+  try { const d = await api('/api/book/dashboard?book=' + encodeURIComponent(CUR.slug)); planned = d.plannedVolumes || 30; cur = d.curVol || 0; } catch {}
+  const n = Math.max(planned, cur + 3, 8);
+  const nextVol = Math.min(cur + 1, n) || 1;
+  $('#vpVol').innerHTML = Array.from({ length: n }, (_, i) => i + 1).map(v => `<option value="${v}" ${v === nextVol ? 'selected' : ''}>第 ${v} 卷${v === cur + 1 ? '（下一卷）' : v <= cur ? '（已开写）' : ''}</option>`).join('');
+  $('#volPlanModal').classList.remove('hidden');
+}
+$('#btnVolPlan') && $('#btnVolPlan').addEventListener('click', openVolPlan);
+$('#vpClose') && $('#vpClose').addEventListener('click', () => $('#volPlanModal').classList.add('hidden'));
+$('#vpCancel') && $('#vpCancel').addEventListener('click', () => $('#volPlanModal').classList.add('hidden'));
+$('#vpDraft') && $('#vpDraft').addEventListener('click', async () => {
+  if (!CUR) return;
+  const vol = parseInt($('#vpVol').value, 10) || 1;
+  $('#vpDraft').disabled = true; $('#vpHint').textContent = 'AI 据罗盘拟草案中…（约 1–2 分钟）';
+  try {
+    const r = await api('/api/book/plan-volume', 'POST', { book: CUR.slug, volume: vol, model: $('#vpModel').value });
+    $('#vpText').value = r.draft || '';
+    $('#vpHint').textContent = '✅ 草案已出——你随便改（加减章/改走向/改钩子），满意再保存';
+  } catch (e) { $('#vpErr').textContent = '拟稿失败：' + e.message; $('#vpHint').textContent = ''; }
+  finally { $('#vpDraft').disabled = false; }
+});
+$('#vpSave') && $('#vpSave').addEventListener('click', async () => {
+  if (!CUR) return;
+  const vol = parseInt($('#vpVol').value, 10) || 1;
+  const content = $('#vpText').value.trim();
+  if (content.length < 20) { $('#vpErr').textContent = '本卷大纲太短，先让 AI 拟或自己写几句'; return; }
+  const rel = 'outlines/卷' + String(vol).padStart(2, '0') + '分章大纲.md';
+  $('#vpSave').disabled = true; $('#vpErr').textContent = '';
+  try {
+    await api('/api/book/save-file', 'POST', { book: CUR.slug, rel, content });
+    $('#volPlanModal').classList.add('hidden');
+    toast(`第 ${vol} 卷大纲已保存（${rel}）——现在可以写这一卷了`);
+  } catch (e) { $('#vpErr').textContent = '保存失败：' + e.message; }
+  finally { $('#vpSave').disabled = false; }
+});
+
 // 上传 txt → 读进样本框
 $('#rsFile') && $('#rsFile').addEventListener('change', (e) => {
   const f = e.target.files && e.target.files[0]; if (!f) return;
@@ -2126,6 +2170,7 @@ document.addEventListener('keydown', (e) => {
   if (!$('#styleModal').classList.contains('hidden')) $('#styleModal').classList.add('hidden');
   if (!$('#refStyleModal').classList.contains('hidden')) $('#refStyleModal').classList.add('hidden');
   if ($('#studioModal') && !$('#studioModal').classList.contains('hidden')) $('#studioModal').classList.add('hidden');
+  if ($('#volPlanModal') && !$('#volPlanModal').classList.contains('hidden')) $('#volPlanModal').classList.add('hidden');
   if (!$('#delModal').classList.contains('hidden')) $('#delModal').classList.add('hidden');
   if (!$('#coverModal').classList.contains('hidden')) $('#coverModal').classList.add('hidden');
 });
@@ -2241,13 +2286,14 @@ $('#nbLaunch').addEventListener('click', async () => {
       words: getWords(), model: $('#nbModel').value,
       style: NB_REF_STYLE || $('#nbStyle').value,   // 对标分析过 → 用对标文风；否则用下拉预设
       participation: $('#nbWriteMode').value,   // auto | volume | chapter
+      volumes: $('#nbVolCount') ? $('#nbVolCount').value : '',   // 罗盘卷数（只出粗走向）
     });
     $('#modal').classList.add('hidden');
     await refresh();
     const book = STATE.books.find(b => b.slug === r.book.slug) || r.book;
     openWrite(book); setWriting(true); openStream(book.slug);
     const st = r.book && r.book.style;
-    toast('已立项《' + title + '》' + (st ? ' · 文风：' + st.name : '') + '，AI 开始搭设定与全卷大纲');
+    toast('已立项《' + title + '》' + (st ? ' · 文风：' + st.name : '') + '，AI 正在搭设定 + 全书罗盘（每卷一句话走向）。罗盘出来后，用「🧭 本卷大纲」逐卷共创再写。');
   } catch (e) { $('#nbErr2').textContent = '失败：' + e.message; $('#nbLaunch').disabled = false; }
 });
 

@@ -63,7 +63,7 @@ export function generateSynopsis(book, cfg) {
 }
 
 // 非交互跑一次模型，拿文本输出
-function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
+export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
   // 网页版/无 bin 模型不能本地 spawn → 解析到一个可用的本地生成 CLI（立项/书名/简介等元任务）
   const useId = resolveGenModel(model);
   if (!useId) {
@@ -230,6 +230,38 @@ export function buildRebuildOutlineInstruction(book) {
     `第四步：校对 chapter_index.md，使每章一行(章号/章名/卷/路径/状态)与 chapters/ 实际一致。` +
     `【硬性约束】本次绝不新增/改写/删除任何正文章节(.txt)，只产出或更新 novel_bible.md、outlines/、continuity_ledger.md、chapter_index.md。完成后输出一行「【设定与大纲已重建】」并停下。全程遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范。`;
   return s.replace(/[\r\n]+/g, ' ');
+}
+
+// 【共创版·轻量立项】只搭设定 + 全书罗盘(每卷一行走向)，绝不细化章节、绝不写正文。逐卷共创的起点。单行。
+export function buildCompassKickoffInstruction(book, theme, words, volumes) {
+  const nv = Math.max(3, parseInt(volumes, 10) || 30);
+  const s = `你是资深网文主编。现在为《${book.title}》做【轻量立项——只搭设定与"全书罗盘"，绝不写正文、绝不细化任何一卷的章节】。` +
+    `题材：${theme || '（见题材说明）'}；目标总字数：${words || '长篇'}。` +
+    `第一步：撰写 novel_bible.md（一句话卖点、目标读者、时代世界观、力量/设定体系、主角、关键配角、对抗势力、主题、禁区、命名与文风基线）。` +
+    `第二步：建【全书罗盘】文件 outlines/全书罗盘.md —— 规划约 ${nv} 卷（可据故事体量适当增减）；【每卷只写一行】：卷号 + 4–6字卷名 + 一句话走向（这一卷大概发生什么、主角格局从什么状态升到什么状态、卷末交给下一卷什么局面），一直覆盖到全书结局方向。这是"指南针"——只定方向、不定细节，宁可粗不要满。` +
+    `第三步：建立并初始化 continuity_ledger.md（先放主角起点与已定设定）。` +
+    `【硬性】绝不细化任何一卷的分章大纲、绝不写任何正文章节。这本书采用【逐卷共创】：每一卷的章级大纲会在写到那一卷时，由作者和你一起定。完成后单独输出一行「【全书罗盘就绪：待逐卷共创】」然后停下。全程遵守本目录 AGENTS.md 规范。`;
+  return s.replace(/[\r\n]+/g, ' ');
+}
+
+// 本卷共创·让 AI 拟【某一卷】的章级 beat 草案(喂上下文、返回文本供作者改，不落盘)。给 runModelOnce 用的 prompt。
+export function buildVolumePlanPrompt(book, volNum, { bibleBrief = '', compass = '', prevEnding = '', cpv = 0 } = {}) {
+  const n = parseInt(volNum, 10) || 1;
+  const approx = cpv > 0 ? `约 ${cpv} 章` : '20–40 章（据本卷体量自定）';
+  return [
+    `你是资深网文主编。为《${book.title}》拟【第 ${n} 卷】的分章大纲草案（章级 beat 表），供作者审改。`,
+    `依据：全书罗盘里第 ${n} 卷那一行的走向 + 设定圣经 + 上一卷卷末局面。只拟这一卷，${approx}。`,
+    ``,
+    `# 设定圣经（节选）`, bibleBrief || '（略）', ``,
+    `# 全书罗盘（找到第 ${n} 卷那一行为准）`, compass || '（略）', ``,
+    prevEnding ? `# 上一卷卷末正文结尾（衔接用）\n${prevEnding}\n` : '',
+    `# 输出要求（中文，只输出这一卷的章级大纲，别写正文、别写别的卷）`,
+    `先给本卷【卷名】(4–6字) 与【本卷阶段目标：主角处境从什么→什么】一句话；`,
+    `然后【逐章一行】：\`第N章 章名 | 核心事件/冲突 | 推进了什么 | 章末钩子\`；`,
+    `节奏按规范：一个阶段目标用 3–8 章兑现、隔几章一次可感爽点、别把小事拉几十章、卷末留一个交给下一卷的钩子；`,
+    `最后列【本卷伏笔布点表】：埋设章号→计划回收章号。`,
+    `直接输出大纲正文，不要客套、不要代码块。`,
+  ].filter(Boolean).join('\n');
 }
 
 // 创作台：按作者【大白话】改设定/角色 或 某卷大纲，AI 只改对应文件、不写新正文。单行。
