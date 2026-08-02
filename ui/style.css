@@ -37,8 +37,9 @@ body {
   display: flex; flex-direction: column; padding: 18px 14px; gap: 22px;
 }
 .brand { display: flex; align-items: center; gap: 11px; padding: 4px 6px; }
-.logo { font-size: 26px; filter: saturate(1.2); }
-.brand-title { font-family: var(--serif); font-size: 18px; font-weight: 600; letter-spacing: .5px; }
+.logo { width: 40px; height: 40px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
+.logo svg { width: 40px; height: 40px; filter: drop-shadow(0 4px 12px rgba(52, 214, 166, .28)); }
+.brand-title { font-family: var(--serif); font-size: 18px; font-weight: 700; letter-spacing: .3px; }
 .brand-sub { font-size: 11px; color: var(--muted); letter-spacing: 3px; }
 .nav { display: flex; flex-direction: column; gap: 4px; }
 .nav-item {
