@@ -170,7 +170,20 @@ export class Autopilot {
     // 【仅确认模式】confirmOnly：只自动应答提问（y/n、菜单、信任目录），【绝不自动续写下一批/下一章】。
     // 用于共创窗口模式——作者主导每一章，AI 写完这一章就停在那，等作者读完再给下一章要求。
     // （上面的提问应答已处理；这里没有提问=空闲，直接返回，不走下面的续写/完本/审稿逻辑。）
-    if (this.opt.confirmOnly) { this.prevScreen = screen; return; }
+    if (this.opt.confirmOnly) {
+      this.prevScreen = screen;
+      // 任务干完（连续空闲、不忙）就【自动完成】：回调收窗 + 转"写作完成"。要不要继续是作者的事，不挂着"写作中"。
+      let cbusy = false;
+      try { const st = await this.mcp.status(this.paneId); cbusy = st?.busy ?? st?.is_busy ?? (st?.state === 'busy') ?? false; } catch {}
+      if (cbusy) { this._doneIdle = 0; return; }
+      this._doneIdle = (this._doneIdle || 0) + 1;
+      if (this.sawAgentRunning && this._doneIdle >= (this.opt.confirmDoneIdle || 5)) {
+        this.running = false;
+        this.log('✅ 本次任务完成，自动收起窗口', 'act');
+        try { this.opt.onDone && this.opt.onDone('任务完成'); } catch {}
+      }
+      return;
+    }
 
     // 读 busy 标志（字段名做兼容）
     let busy = false;

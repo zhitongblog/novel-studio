@@ -13,7 +13,7 @@ import { refreshContext } from './scaffold.mjs';
 import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision, reviewEnding, buildEndingRenudgeInstruction } from './editor.mjs';
 import { buildFinaleInstruction, buildAfterwordInstruction } from './planner.mjs';
 import { setPending, hasPending, getReviewEvery, setReviewEvery, setReviewDefault, takeResume } from './pending.mjs';
-import { saveSession } from './sessions.mjs';
+import { saveSession, removeSession } from './sessions.mjs';
 import { recordUsage, currentContextSize } from './usage.mjs';
 import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFolders, clearFlatImport, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
@@ -159,6 +159,13 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       ...cfg.autopilot, confirmOnly: true,
       onLog: (e) => onLog({ ...e, source: 'autopilot' }),
       onTokens: (n) => recordUsage(book.slug, tokenKey, n),
+      // 任务干完 → 自动收窗 + 从会话表移除(状态转"写作完成")。续写与否由作者决定。
+      onDone: () => {
+        try { onLog({ level: 'act', source: 'autopilot', msg: '✅ 本次任务完成，已收起窗口（要不要继续由你定）' }); } catch {}
+        try { removeSession(book.slug); } catch {}
+        try { mcp.close(); } catch {}
+        try { killProcess(instance.pid); } catch {}
+      },
     });
     autopilot.start();
   } else if (attachAutopilot && cfg.autopilot?.enabled) {
