@@ -273,6 +273,23 @@ textarea { resize: vertical; line-height: 1.5; }
 .rb-req { width: 100%; box-sizing: border-box; resize: vertical; margin: 0 0 8px; padding: 8px; border-radius: 8px; background: var(--bg-2); border: 1px solid var(--border); color: var(--text); font: 13px/1.5 inherit; }
 .rb-req:focus { outline: none; border-color: var(--accent); }
 
+/* 创作看板 */
+.board { background: linear-gradient(160deg, var(--panel), var(--panel-2)); border: 1px solid var(--border); border-radius: 12px; padding: 14px 15px; box-shadow: var(--shadow); }
+.board-load { color: var(--muted); font-size: 12.5px; padding: 4px 2px; }
+.bd-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 11px; }
+.bd-status { font-family: var(--serif); font-size: 15px; font-weight: 700; color: var(--accent-2); }
+.bd-part { font-size: 11px; color: var(--muted); background: var(--bg-2); border: 1px solid var(--border); padding: 2px 9px; border-radius: 20px; }
+.bd-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.bd-kpi { background: var(--bg-2); border: 1px solid var(--border); border-radius: 9px; padding: 8px 4px; text-align: center; }
+.bd-kpi b { display: block; font-family: var(--serif); font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+.bd-kpi span { font-size: 10.5px; color: var(--muted); }
+.bd-bar { height: 6px; background: var(--panel-2); border-radius: 5px; overflow: hidden; margin: 11px 0 4px; }
+.bd-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); box-shadow: var(--glow); }
+.bd-pct { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bd-health { display: flex; flex-direction: column; gap: 5px; margin-top: 11px; }
+.bd-h { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
+.dot.warn { background: var(--warn); }
+
 /* ===== 阅读 / 工作台 ===== */
 /* 固定阅读区高度：目录(rd-nav)与正文(rd-content)各自内部滚动，目录不再跟着正文滚 */
 .reader { display: flex; gap: 14px; height: calc(100vh - 128px); min-height: 0; }

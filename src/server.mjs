@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats } from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats, plannedTotalChapters, plannedVolumes, currentVolume } from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll, getModel } from './models.mjs';
@@ -300,6 +300,40 @@ async function api(p, req, res, u) {
         const book = getBook(u.searchParams.get('book') || ''); if (!book) return json(res, 400, { error: '找不到书' });
         return json(res, 200, readBookFile(book, u.searchParams.get('rel') || ''));
       } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/dashboard') {   // 创作看板：我在哪 / 健康体检 / 下一步
+      try {
+        const slug = slugOf(u.searchParams.get('book') || '');
+        const book = getBook(slug); if (!book) return json(res, 400, { error: '找不到书：' + slug });
+        const st = bookStats(book);
+        const planned = plannedTotalChapters(book);
+        const words = Math.round((st.kb || 0) * 1024 / 3);   // 中文 UTF-8 约 3 字节/字
+        const progress = planned > 0 ? Math.min(100, Math.round(st.chapters / planned * 100)) : 0;
+        let tokens = 0; try { tokens = bookUsage(slug) || 0; } catch {}
+        // 健康：连贯性台账 + 最近一份自检/审稿(数 硬伤/隐患)
+        let ledger = false, lastReview = '', crit = 0, warn = 0;
+        try { ledger = fs.existsSync(path.join(book.dir, 'continuity_ledger.md')); } catch {}
+        try {
+          const rdir = path.join(book.dir, 'reviews');
+          const files = fs.readdirSync(rdir).filter(f => f.endsWith('.md'));
+          let latest = null, lt = 0;
+          for (const f of files) { const mt = fs.statSync(path.join(rdir, f)).mtimeMs; if (mt > lt) { lt = mt; latest = f; } }
+          if (latest) { lastReview = latest; const txt = fs.readFileSync(path.join(rdir, latest), 'utf8'); crit = (txt.match(/硬伤/g) || []).length; warn = (txt.match(/隐患/g) || []).length; }
+        } catch {}
+        // 状态 + 下一步建议
+        const live = sessionLive(slug) || !!(rtOf(slug).statelessRun && !rtOf(slug).statelessRun.stopped);
+        const pend = getPending(slug);
+        let status = '连载中', next = 'write', nextLabel = '继续往下写';
+        if (book.status === '已完本') { status = '已完本'; next = 'publish'; nextLabel = '去发行'; }
+        else if (pend) { status = pend.kind === 'outline' ? '待你定大纲' : '待你审核'; next = 'review'; nextLabel = '去处理'; }
+        else if (live) { status = '正在写'; next = 'watch'; nextLabel = '看写作进度'; }
+        else if (planned > 0 && st.chapters >= planned) { status = '已达目标'; next = 'finale'; nextLabel = '可以完本/发行了'; }
+        return json(res, 200, {
+          ok: true, title: book.title, status, chapters: st.chapters, words, kb: st.kb, tokens,
+          curVol: currentVolume(book), plannedVolumes: plannedVolumes(book), plannedChapters: planned, progress,
+          health: { ledger, lastReview, crit, warn }, next, nextLabel, participation: participationOf(book),
+        });
+      } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/pending') {   // 写作台重开时恢复"待确认审稿/审核"动作条
       const slug = slugOf(u.searchParams.get('book') || '');

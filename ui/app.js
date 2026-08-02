@@ -147,7 +147,37 @@ function openWrite(book) {
   setWriting(!!running);
   $('#writeTokens').textContent = 'tokens ' + fmtTok(book.tokens || 0);
   hideReviewBar(); showReviewBar();   // 若有待确认审稿，恢复动作条
+  renderBoard(book.slug);   // 创作看板：我在哪 / 健康体检 / 下一步
   if (running) openStream(book.slug);
+}
+// 创作看板
+async function renderBoard(slug) {
+  const box = $('#wbBoard'); if (!box) return;
+  box.innerHTML = '<div class="board-load">看板加载中…</div>';
+  try {
+    const d = await api('/api/book/dashboard?book=' + encodeURIComponent(slug));
+    const wan = (d.words / 10000);
+    const wanTxt = wan >= 1 ? wan.toFixed(1) + '万' : Math.round(d.words) + '字';
+    const volTxt = d.curVol ? '卷' + d.curVol + (d.plannedVolumes ? '/' + d.plannedVolumes : '') : '筹备中';
+    const h = d.health || {};
+    const healthRows = [];
+    healthRows.push(`<div class="bd-h"><span class="dot ${h.ledger ? 'ok' : 'bad'}"></span>连贯性台账${h.ledger ? '在盯着' : '缺失'}</div>`);
+    if (h.lastReview) {
+      const clean = (h.crit || 0) === 0 && (h.warn || 0) === 0;
+      healthRows.push(`<div class="bd-h"><span class="dot ${clean ? 'ok' : (h.crit ? 'bad' : 'warn')}"></span>最近自检：${h.crit ? '硬伤 ' + h.crit + ' 处' : ''}${h.warn ? (h.crit ? ' · ' : '') + '隐患 ' + h.warn + ' 处' : ''}${clean ? '未见硬伤/隐患' : ''}</div>`);
+    }
+    const pct = d.plannedChapters ? d.progress : null;
+    box.innerHTML =
+      `<div class="bd-head"><span class="bd-status">${esc(d.status || '连载中')}</span>${d.participation ? '<span class="bd-part">' + ({ auto: '🤖放手写', volume: '🧭卷口把关', chapter: '✍️盯着写' }[d.participation] || '') + '</span>' : ''}</div>` +
+      `<div class="bd-kpis">` +
+        `<div class="bd-kpi"><b>${esc(volTxt)}</b><span>进度</span></div>` +
+        `<div class="bd-kpi"><b>${d.chapters}</b><span>已写章</span></div>` +
+        `<div class="bd-kpi"><b>${esc(wanTxt)}</b><span>字数</span></div>` +
+        `<div class="bd-kpi"><b>${fmtTok(d.tokens || 0)}</b><span>tokens</span></div>` +
+      `</div>` +
+      (pct != null ? `<div class="bd-bar"><i style="width:${pct}%"></i></div><div class="bd-pct">${pct}% · 目标约 ${d.plannedChapters} 章</div>` : '') +
+      `<div class="bd-health">${healthRows.join('')}</div>`;
+  } catch (e) { box.innerHTML = '<div class="board-load">看板暂不可用</div>'; }
 }
 function showWriteView() {
   document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
