@@ -165,6 +165,58 @@ export function renameEntity(slugOrId, from, to, dry = false) {
   return { book: b, files, count };
 }
 
+// 改名不简单：一个角色有多种叫法。据 旧名→新名 推导候选替换对(全名/单名/姓+称呼/称呼+姓/姓X)。
+// 【不含】裸姓单字替换——那会误伤村名(陈家洼)和其他同姓角色，故只给"姓+称呼"这类明确指向本角色的组合，由用户勾选确认。
+export function suggestRenamePairs(oldName, newName) {
+  const on = String(oldName || '').trim(), nn = String(newName || '').trim();
+  const out = [];
+  if (!on || !nn || on === nn) return out;
+  const push = (f, t, kind) => { if (f && t && f !== t && !out.some(x => x.from === f)) out.push({ from: f, to: t, kind }); };
+  push(on, nn, '全名');
+  const oSur = on[0], oGiven = on.slice(1), nSur = nn[0], nGiven = nn.slice(1);
+  if (oGiven && nGiven) push(oGiven, nGiven, '单名');
+  if (oSur && nSur && oSur !== nSur) {
+    for (const s of ['老师', '先生', '总', '老板', '哥', '姐', '爷', '叔', '工', '董', '局长', '处长', '科长', '经理']) push(oSur + s, nSur + s, '称呼');
+    for (const p of ['老', '小', '大', '阿']) push(p + oSur, p + nSur, '称呼');
+    push('姓' + oSur, '姓' + nSur, '姓氏');
+  }
+  return out;
+}
+
+// 收集本书要参与替换的所有文件(设定/大纲/台账/索引/简介 + 所有已写章节)。
+function renameTargetRels(dir) {
+  const rels = ['novel_bible.md', 'chapter_index.md', 'continuity_ledger.md', '简介.txt'];
+  try { for (const x of fs.readdirSync(path.join(dir, 'outlines'))) if (x.endsWith('.md')) rels.push(path.join('outlines', x)); } catch {}
+  (function walk(d) { try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.txt$/i.test(e.name)) rels.push(path.relative(dir, p)); } } catch {} })(path.join(dir, 'chapters'));
+  return rels;
+}
+
+// 多对一起替换(角色改名的正确姿势)。dry=true 只逐对统计命中。apply 时按 from 长度降序替换(先全名后单名，避免"守一"先换掉导致"陈守一"匹配不上)。
+export function applyRenamePairs(slugOrId, pairs, dry = false) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  const list = (pairs || []).filter(p => p && p.from && p.to && p.from !== p.to)
+    .sort((a, b2) => b2.from.length - a.from.length);
+  const per = list.map(p => ({ from: p.from, to: p.to, count: 0 }));
+  if (!list.length) return { files: 0, count: 0, per };
+  const rels = renameTargetRels(b.dir);
+  let filesTouched = 0, total = 0;
+  for (const rel of rels) {
+    const fp = path.join(b.dir, rel);
+    try {
+      let c = fs.readFileSync(fp, 'utf8');
+      let changed = false;
+      for (let i = 0; i < list.length; i++) {
+        const n = c.split(list[i].from).length - 1;
+        if (n > 0) { per[i].count += n; total += n; if (!dry) { c = c.split(list[i].from).join(list[i].to); changed = true; } }
+      }
+      if (changed) { fs.writeFileSync(fp, c, 'utf8'); filesTouched++; }
+    } catch {}
+  }
+  if (!dry) { try { refreshContext(b); } catch {} }
+  return { files: filesTouched, count: total, per };
+}
+
 // 番茄发布配置：account(Unzoo profilePath)、番茄 bookId/书名、是否按卷建卷、每日发布数、预约起始日期/时间、间隔、自动发布开关、预设触发章数。
 export function setBookPublish(slugOrId, patch) {
   const b = getBook(slugOrId);

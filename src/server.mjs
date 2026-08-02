@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol } from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol } from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll, getModel } from './models.mjs';
@@ -800,7 +800,7 @@ async function api(p, req, res, u) {
       const instruction = buildCompassKickoffInstruction(book, body.theme || body.genre, body.words, body.volumes, body.characters);
       rtOf(book.slug).logs = [];
       try {
-        const session = await startWriting({ book, model: launchModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
+        const session = await startWriting({ book, model: launchModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, book: { ...book, stats: { chapters: 0, kb: 0 }, tokens: 0 }, instance: session.instance.id, pane: session.paneId, planOnly: isWebModel });
       } catch (e) { pushLog(book.slug, { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -819,7 +819,7 @@ async function api(p, req, res, u) {
         }
         // 未在写 → 开一个会话专门做复检
         rtOf(book.slug).logs = [];
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, pane: session.paneId });
       } catch (e) { pushLog(book.slug, { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -911,7 +911,7 @@ async function api(p, req, res, u) {
           pushLog(book.slug, { level: 'act', msg: `已让 AI 按你的话改${target === 'outline' ? '大纲' : '设定/角色'}（不写新正文）` });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
         return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -925,7 +925,7 @@ async function api(p, req, res, u) {
           pushLog(book.slug, { level: 'act', msg: '已穿插指令：重建设定圣经 + 各卷大纲（不写新正文）' });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
         return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -940,7 +940,7 @@ async function api(p, req, res, u) {
           pushLog(book.slug, { level: 'act', msg: '已穿插指令：写《完本感言 / 尾声》' });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
         return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
