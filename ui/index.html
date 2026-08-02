@@ -102,6 +102,7 @@
               <button class="btn primary" id="btnStart">▶ 开始写作</button>
               <button class="btn danger" id="btnStop" disabled>■ 停止</button>
               <button class="btn" id="btnCowrite" title="你出主意·AI 逐章：以你的想法为主，一次只写一章，AI 帮你出主意/搭大纲并按你的要求写，你审完再写下一章——从根上治“越写越变形”。需 claude 或 codex。">🤝 共创模式</button>
+              <button class="btn" id="btnStudio" title="用大白话让 AI 改角色/设定或某卷大纲——AI 只改对应文件、不写新正文、不动已写章节，你不用碰 md。">✍️ 改设定/大纲</button>
             </div>
             <div class="btn-row">
               <button class="btn" id="btnRead" title="阅读全书已写章节：左边选章、右边舒适阅读。共创/写作后可随时在这里读当前创作的章节。">📖 阅读</button>
@@ -586,6 +587,28 @@
         <button class="btn primary hidden" id="rsSave">💾 保存为本书风格</button>
       </div>
       <div class="modal-err" id="rsErr"></div>
+    </div>
+  </div>
+
+  <!-- 创作台：大白话改设定/大纲 -->
+  <div class="modal hidden" id="studioModal">
+    <div class="modal-card" style="width: 600px;">
+      <button class="modal-close" id="stClose" title="关闭 (Esc)">✕</button>
+      <h2>✍️ 改设定 / 大纲</h2>
+      <p class="modal-hint">用<b>大白话</b>说你想怎么改，AI 直接改对应文件——<b>不写新正文、不动已写章节</b>，你完全不用碰 md。改完在下方日志/镜像里能看到它改了啥。</p>
+      <div class="seg" id="stTarget">
+        <button type="button" class="seg-btn active" data-t="bible">👤 设定 / 角色</button>
+        <button type="button" class="seg-btn" data-t="outline">🗺️ 某卷大纲</button>
+      </div>
+      <label class="field hidden" id="stVolWrap"><span>改哪一卷</span><select id="stVol"></select></label>
+      <label class="field"><span>你想怎么改（说人话就行）</span>
+        <textarea id="stAsk" class="ai-prompt" rows="4" placeholder="例如：把主角改得更腹黑、别老被动挨打；　或：卷2加一个暗中较劲的对手——七十多岁的老木匠柳先生；　或：卷3的卷末改成主角当众打脸顾家"></textarea>
+      </label>
+      <div class="btn-row end">
+        <button class="btn ghost" id="stCancel">取消</button>
+        <button class="btn primary" id="stGo">✍️ 让 AI 改</button>
+      </div>
+      <div class="modal-err" id="stErr"></div>
     </div>
   </div>
 

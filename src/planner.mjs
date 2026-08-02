@@ -231,6 +231,18 @@ export function buildRebuildOutlineInstruction(book) {
   return s.replace(/[\r\n]+/g, ' ');
 }
 
+// 创作台：按作者【大白话】改设定/角色 或 某卷大纲，AI 只改对应文件、不写新正文。单行。
+export function buildReviseSettingInstruction(book, { target, scope, instruction } = {}) {
+  const ask = String(instruction || '').replace(/[\r\n]+/g, ' ').trim();
+  if (target === 'outline') {
+    const s = (scope || '当前卷').replace(/[\r\n]+/g, ' ').trim();
+    return (`作者要调整【${s}】的大纲。请【只】打开并修改 outlines/ 下【${s}】对应的分章大纲（必要时同步 novel_bible.md 相关设定与 continuity_ledger.md），据作者要求改：「${ask}」。` +
+      `改动落到具体章级 beat；与已写正文、主线伏笔保持一致，能不动已写章节就不动。【绝不写新正文章节(.txt)】。改完在窗口用一行中文简述你改了哪些文件、关键改了什么，然后停下。全程遵守本目录 AGENTS.md 规范。`).replace(/[\r\n]+/g, ' ');
+  }
+  return (`作者要调整本书的设定/角色。请【只】打开并修改 novel_bible.md（若牵涉后续走向，可同步相关 outlines/ 与 continuity_ledger.md），据作者要求改：「${ask}」。` +
+    `保持与已写正文一致、不推翻已发生的剧情；改人物性格/动机时若影响后续，就在对应卷大纲里点到为止地调整。【绝不写新正文章节(.txt)】。改完在窗口用一行中文简述你改了哪些文件、关键改了什么，然后停下。全程遵守本目录 AGENTS.md 规范。`).replace(/[\r\n]+/g, ' ');
+}
+
 // 范围重写：把指定范围的章节【推倒重写】（不是润色）。单行。
 export function buildRewriteInstruction(book, range, note) {
   const r = (range || '全书').trim();

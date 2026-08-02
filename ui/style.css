@@ -291,6 +291,12 @@ textarea { resize: vertical; line-height: 1.5; }
 .bd-h { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
 .dot.warn { background: var(--warn); }
 
+/* 分段控件（创作台目标切换） */
+.seg { display: flex; gap: 6px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; padding: 4px; }
+.seg-btn { flex: 1; background: transparent; border: 0; color: var(--muted); font-size: 13.5px; font-weight: 600; padding: 8px 10px; border-radius: 7px; cursor: pointer; transition: .15s; }
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--panel); color: var(--accent-2); box-shadow: var(--shadow); }
+
 /* ===== 阅读 / 工作台 ===== */
 /* 固定阅读区高度：目录(rd-nav)与正文(rd-content)各自内部滚动，目录不再跟着正文滚 */
 .reader { display: flex; gap: 14px; height: calc(100vh - 128px); min-height: 0; }

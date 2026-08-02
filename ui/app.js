@@ -1348,6 +1348,51 @@ function openRefStyle() {
   }).catch(() => { $('#rsProfile').innerHTML = '<option value="">（未连上 Unzoo）</option>'; });
 }
 $('#btnRefStyle').addEventListener('click', openRefStyle);
+
+// ---------- 创作台：大白话改设定 / 大纲 ----------
+let ST_TARGET = 'bible';
+async function openStudio() {
+  if (!CUR) return;
+  ST_TARGET = 'bible';
+  $('#stAsk').value = ''; $('#stErr').textContent = '';
+  $('#stTarget').querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', b.dataset.t === 'bible'));
+  $('#stVolWrap').classList.add('hidden');
+  $('#studioModal').classList.remove('hidden');
+  try {
+    const t = await api('/api/book/files?book=' + encodeURIComponent(CUR.slug));
+    const outs = (t.outlines || []).filter(o => /卷\s*\d+/.test(o.name || o.rel || ''));
+    $('#stVol').innerHTML = outs.map(o => {
+      const nm = o.name || o.rel || '';
+      const m = nm.match(/卷\s*0*\d+[^./\\]*/);
+      const scope = (m ? m[0] : nm).replace(/分章大纲.*$/, '').trim();
+      return `<option value="${esc(scope)}">${esc(nm)}</option>`;
+    }).join('') || '<option value="">（还没有分卷大纲）</option>';
+  } catch { $('#stVol').innerHTML = '<option value="">（读取卷列表失败）</option>'; }
+}
+$('#btnStudio') && $('#btnStudio').addEventListener('click', openStudio);
+$('#stClose') && $('#stClose').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
+$('#stCancel') && $('#stCancel').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
+$('#stTarget') && $('#stTarget').addEventListener('click', (e) => {
+  const b = e.target.closest('.seg-btn'); if (!b) return;
+  ST_TARGET = b.dataset.t;
+  $('#stTarget').querySelectorAll('.seg-btn').forEach(x => x.classList.toggle('active', x === b));
+  $('#stVolWrap').classList.toggle('hidden', ST_TARGET !== 'outline');
+});
+$('#stGo') && $('#stGo').addEventListener('click', async () => {
+  if (!CUR) return;
+  const ask = $('#stAsk').value.trim();
+  if (ask.length < 2) { $('#stErr').textContent = '先用一句话说说你想怎么改'; return; }
+  const scope = ST_TARGET === 'outline' ? $('#stVol').value : '';
+  if (ST_TARGET === 'outline' && !scope) { $('#stErr').textContent = '先选要改哪一卷'; return; }
+  $('#stGo').disabled = true; $('#stErr').textContent = 'AI 正在改…（约 1–2 分钟，别关窗）';
+  try {
+    const r = await api('/api/book/revise-setting', 'POST', { book: CUR.slug, target: ST_TARGET, scope, instruction: ask, model: $('#writeModel').value });
+    $('#studioModal').classList.add('hidden');
+    if (r.mode === 'opened') { setWriting(true); openStream(CUR.slug); }
+    toast(ST_TARGET === 'outline' ? `AI 正在按你的话改【${scope}】大纲（看下方日志/镜像）` : 'AI 正在按你的话改设定/角色（看下方日志/镜像）');
+  } catch (e) { $('#stErr').textContent = '失败：' + e.message; }
+  finally { $('#stGo').disabled = false; }
+});
 // 上传 txt → 读进样本框
 $('#rsFile') && $('#rsFile').addEventListener('change', (e) => {
   const f = e.target.files && e.target.files[0]; if (!f) return;
@@ -2080,6 +2125,7 @@ document.addEventListener('keydown', (e) => {
   if (!$('#reviewModal').classList.contains('hidden')) $('#reviewModal').classList.add('hidden');
   if (!$('#styleModal').classList.contains('hidden')) $('#styleModal').classList.add('hidden');
   if (!$('#refStyleModal').classList.contains('hidden')) $('#refStyleModal').classList.add('hidden');
+  if ($('#studioModal') && !$('#studioModal').classList.contains('hidden')) $('#studioModal').classList.add('hidden');
   if (!$('#delModal').classList.contains('hidden')) $('#delModal').classList.add('hidden');
   if (!$('#coverModal').classList.contains('hidden')) $('#coverModal').classList.add('hidden');
 });
