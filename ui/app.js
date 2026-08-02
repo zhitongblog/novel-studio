@@ -2287,6 +2287,7 @@ $('#nbLaunch').addEventListener('click', async () => {
       style: NB_REF_STYLE || $('#nbStyle').value,   // 对标分析过 → 用对标文风；否则用下拉预设
       participation: $('#nbWriteMode').value,   // auto | volume | chapter
       volumes: $('#nbVolCount') ? $('#nbVolCount').value : '',   // 罗盘卷数（只出粗走向）
+      characters: $('#nbChars') ? $('#nbChars').value.trim() : '',   // 作者指定的角色（AI 原样采用）
     });
     $('#modal').classList.add('hidden');
     await refresh();

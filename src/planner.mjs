@@ -233,10 +233,15 @@ export function buildRebuildOutlineInstruction(book) {
 }
 
 // 【共创版·轻量立项】只搭设定 + 全书罗盘(每卷一行走向)，绝不细化章节、绝不写正文。逐卷共创的起点。单行。
-export function buildCompassKickoffInstruction(book, theme, words, volumes) {
+export function buildCompassKickoffInstruction(book, theme, words, volumes, characters) {
   const nv = Math.max(3, parseInt(volumes, 10) || 30);
+  const chars = String(characters || '').replace(/[\r\n]+/g, '；').trim();
+  const charLine = chars
+    ? `【作者已指定角色，务必原样采用、不得改名或替换】：${chars}。请把这些角色（姓名、身份/性格）写进 bible 的主角/配角，并作为全书命名与人物基线；未指定的次要角色再由你补齐、风格与之统一。`
+    : '';
   const s = `你是资深网文主编。现在为《${book.title}》做【轻量立项——只搭设定与"全书罗盘"，绝不写正文、绝不细化任何一卷的章节】。` +
     `题材：${theme || '（见题材说明）'}；目标总字数：${words || '长篇'}。` +
+    charLine +
     `第一步：撰写 novel_bible.md（一句话卖点、目标读者、时代世界观、力量/设定体系、主角、关键配角、对抗势力、主题、禁区、命名与文风基线）。` +
     `第二步：建【全书罗盘】文件 outlines/全书罗盘.md —— 规划约 ${nv} 卷（可据故事体量适当增减）；【每卷只写一行】：卷号 + 4–6字卷名 + 一句话走向（这一卷大概发生什么、主角格局从什么状态升到什么状态、卷末交给下一卷什么局面），一直覆盖到全书结局方向。这是"指南针"——只定方向、不定细节，宁可粗不要满。` +
     `第三步：建立并初始化 continuity_ledger.md（先放主角起点与已定设定）。` +

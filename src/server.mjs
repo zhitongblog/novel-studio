@@ -796,8 +796,8 @@ async function api(p, req, res, u) {
         }
         pushLog(book.slug, { level: 'act', msg: `网页版模型立项：用本地 ${launchModel} 只搭 设定+大纲（不写正文），正文随后用网页版续写` });
       }
-      // 共创版立项：只搭设定 + 全书罗盘(每卷一行走向)，绝不细化章节/写正文——之后逐卷共创。
-      const instruction = buildCompassKickoffInstruction(book, body.theme || body.genre, body.words, body.volumes);
+      // 共创版立项：只搭设定 + 全书罗盘(每卷一行走向)，绝不细化章节/写正文——之后逐卷共创。作者可指定角色。
+      const instruction = buildCompassKickoffInstruction(book, body.theme || body.genre, body.words, body.volumes, body.characters);
       rtOf(book.slug).logs = [];
       try {
         const session = await startWriting({ book, model: launchModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
