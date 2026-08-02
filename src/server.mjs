@@ -23,7 +23,7 @@ import { brainstorm, writeChapterInWindow, isCowriteModel, COWRITE_MODELS } from
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
-import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
+import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction } from './editor.mjs';
@@ -849,6 +849,23 @@ async function api(p, req, res, u) {
           try { await sendToBook(book.slug, buildFinaleInstruction(book, { first: true }), cfg); pushLog(book.slug, { level: 'act', msg: '已进入收尾 → 穿插收束令' }); } catch {}
         }
         return json(res, 200, { ok: true, status: b.status, live: sessionLive(book.slug) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/ai-rename') {
+      // AI 上下文改名：先 git 存档，再让 AI 通读全书、辨认角色所有叫法后一致改、不误伤、不写正文(confirmOnly)。有会话穿插，没会话开窗。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const from = String(body.from || '').trim(), to = String(body.to || '').trim();
+        if (!from || !to) return json(res, 400, { error: '原名和新名都要填' });
+        try { gitSnapshot(book.dir, `AI改名前存档：${from}→${to}`); } catch {}
+        const instruction = buildRenameInstruction(book, from, to);
+        if (sessionLive(book.slug)) {
+          await sendToBook(book.slug, instruction, cfg);
+          pushLog(book.slug, { level: 'act', msg: `已让 AI 上下文改名：${from}→${to}（辨认所有叫法、不误伤、不写正文）` });
+          return json(res, 200, { ok: true, mode: 'inserted' });
+        }
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
+        return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/rename-entity') {

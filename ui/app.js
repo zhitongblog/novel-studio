@@ -1388,6 +1388,21 @@ $('#stRenameGo') && $('#stRenameGo').addEventListener('click', async () => {
   } catch (e) { $('#stRenameHint').textContent = '失败：' + e.message; }
   finally { $('#stRenameGo').disabled = false; }
 });
+// AI 智能改名（人名：AI 通读全书辨认所有叫法后一致改，不误伤，不写正文）
+$('#stAiRename') && $('#stAiRename').addEventListener('click', async () => {
+  if (!CUR) return;
+  const from = $('#stFrom').value.trim(), to = $('#stTo').value.trim();
+  if (!from || !to) { $('#stRenameHint').textContent = '原名和新名都要填'; return; }
+  if (!confirm(`让 AI 通读全书，把角色「${from}」的所有叫法(全名/小名/别人的各种称呼)一致改成「${to}」，不动同姓的人/地名/系统名。\n已自动 git 存档可回退。比机械替换慢但不会改崩，确定？`)) return;
+  $('#stAiRename').disabled = true; $('#stRenameHint').textContent = 'AI 正在通读全书、辨认叫法后改…（看下方日志/镜像，别关窗）';
+  try {
+    const r = await api('/api/book/ai-rename', 'POST', { book: CUR.slug, from, to, model: $('#writeModel') ? $('#writeModel').value : undefined });
+    $('#studioModal').classList.add('hidden');
+    if (r.mode === 'opened') { setWriting(true); openStream(CUR.slug); }
+    toast(`AI 正在把「${from}」→「${to}」改遍全书（看日志/镜像）`);
+  } catch (e) { $('#stRenameHint').textContent = '失败：' + e.message; }
+  finally { $('#stAiRename').disabled = false; }
+});
 // 阅读页：目录收起/展开
 $('#rdNavToggle') && $('#rdNavToggle').addEventListener('click', () => {
   const r = $('#reader'); if (r) r.classList.toggle('nav-collapsed');

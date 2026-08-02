@@ -605,12 +605,15 @@
       <button class="modal-close" id="stClose" title="关闭 (Esc)">✕</button>
       <h2>✍️ 改设定 / 大纲</h2>
       <div class="st-rename">
-        <div class="st-rename-h">🔤 只是改个名字？→ <b>全书一键替换</b>（角色/地名/称呼；<b>连已写章节+大纲+设定+台账一起改</b>，git 可回退）</div>
+        <div class="st-rename-h">🔤 改名字？<b>人名用「AI 智能改名」</b>——它先通读全书认清 TA 的全名/小名/别人各种称呼(陈老师/老陈…)再一致改，<b>不误伤</b>同姓的人、地名、系统名；<b>地名/生僻整词</b>可用「直接替换」。两者都会 git 存档、连已写章节一起改。</div>
         <div class="pick-row">
-          <input id="stFrom" placeholder="原名，如 陈守一" />
+          <input id="stFrom" placeholder="原名，如 陈守一 或 陈家洼" />
           <span class="st-arrow">→</span>
-          <input id="stTo" placeholder="新名，如 李元一" />
-          <button class="btn" id="stRenameGo" type="button">全书替换</button>
+          <input id="stTo" placeholder="新名，如 李元一 或 李营寨" />
+        </div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn primary" id="stAiRename" type="button">🤖 AI 智能改名（人名推荐）</button>
+          <button class="btn" id="stRenameGo" type="button">⚡ 直接整词替换（地名）</button>
         </div>
         <div class="dim-note" id="stRenameHint"></div>
       </div>
