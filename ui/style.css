@@ -297,6 +297,10 @@ textarea { resize: vertical; line-height: 1.5; }
 .seg-btn:hover { color: var(--text); }
 .seg-btn.active { background: var(--panel); color: var(--accent-2); box-shadow: var(--shadow); }
 
+/* 不可逆动作·红色危险区 */
+.pb-danger { border: 1px solid color-mix(in srgb, var(--red) 40%, var(--border)); background: color-mix(in srgb, var(--red) 8%, transparent); border-radius: 9px; padding: 8px 10px; align-items: flex-start; }
+.dz-tag { display: inline-block; font-size: 10px; font-weight: 700; color: #fff; background: var(--red); padding: 1px 6px; border-radius: 5px; margin-right: 4px; letter-spacing: .04em; vertical-align: middle; }
+
 /* ===== 阅读 / 工作台 ===== */
 /* 固定阅读区高度：目录(rd-nav)与正文(rd-content)各自内部滚动，目录不再跟着正文滚 */
 .reader { display: flex; gap: 14px; height: calc(100vh - 128px); min-height: 0; }

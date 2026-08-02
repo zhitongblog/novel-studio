@@ -393,7 +393,7 @@
         <label class="field"><span>预约起始日期</span><select id="pbDate"><option value="">立即发（不预约）</option></select></label>
         <label class="field"><span>预约时间（留空=平台默认）</span><select id="pbTime"><option value="">（平台默认）</option></select></label>
       </div>
-      <label class="check"><input type="checkbox" id="pbMatchVol"> 按图书分卷建卷（默认关：忽略卷、只追加发，最安全。开启需番茄卷结构与图书一致）</label>
+      <label class="check pb-danger"><input type="checkbox" id="pbMatchVol"> <span class="dz-tag">不可逆</span> 按图书分卷建卷（默认关：忽略卷、只追加发，最安全。开启会在番茄真实建卷、无法删除，需卷结构与图书一致）</label>
       <label class="check"><input type="checkbox" id="pbSyncRw"> 同步重写章（默认关：上次发布后被改写的旧章，去番茄找对应章覆盖编辑。仅在已发布过的书生效）</label>
       <label class="check"><input type="checkbox" id="pbAuto"> 🤖 自动发布（写满「目标章节数」且节奏+逻辑质检通过后，自动发番茄。需先配好账号+书籍。质检不过会暂缓并提示）</label>
       <label class="check"><input type="checkbox" id="pbUseAI"> 🧠 内容含 AI 生成（发布时番茄「是否AI创作」声明选「是」；不勾=「否」。请如实勾选——AI 生成/AI 辅助建议勾）</label>
