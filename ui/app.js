@@ -147,7 +147,7 @@ function openWrite(book) {
   $('#writeMode').value = book.participation || (book.writeMode === 'review' ? 'chapter' : 'volume');
   // 探索式(freehand)：全书不建任何大纲 → 藏掉「🧭 本卷大纲」，改用共创面板逐段给情节
   if ($('#btnVolPlan')) $('#btnVolPlan').classList.toggle('hidden', book.planMode === 'freehand');
-  $('#synText').value = book.synopsis || '';
+  setSynopsisBox(book);
   const running = STATE.sessions.find(s => s.slug === book.slug && s.running !== false);
   setWriting(!!running);
   $('#writeTokens').textContent = 'tokens ' + fmtTok(book.tokens || 0);
@@ -525,13 +525,29 @@ $('#rvStart').addEventListener('click', async () => {
 });
 
 // ---------- 简介 ----------
+// 简介框长在【写作台】里，但番茄建书是在【发布弹窗】里读它 —— 只要 CUR 换了书而框没跟着换，
+// 就会拿上一本的简介去建这一本的书（书名对、简介是别人的）。所以给框绑一个 slug：
+// 填的时候记下这段简介属于谁，读/存的时候一律以它为准，不信任 CUR。
+function setSynopsisBox(book) {
+  const el = $('#synText'); if (!el) return;
+  el.value = book?.synopsis || '';
+  el.dataset.slug = book?.slug || '';
+}
+// 取"确实属于 slug 这本书"的简介：框里的 slug 对得上就用框里的（含用户刚手改的），否则用书自己的存档。
+function synopsisFor(slug) {
+  const el = $('#synText');
+  if (el && el.dataset.slug === slug) return (el.value || '').trim();
+  const b = STATE.books.find(x => x.slug === slug);
+  return ((b && b.synopsis) || '').trim();
+}
 $('#btnGenSyn').addEventListener('click', async () => {
   if (!CUR) return;
   const btn = $('#btnGenSyn'); const old = btn.textContent; btn.disabled = true; btn.textContent = '生成中…';
   try {
-    const r = await api('/api/book/synopsis', 'POST', { book: CUR.slug });
-    $('#synText').value = r.synopsis || '';
-    CUR.synopsis = r.synopsis; const b = STATE.books.find(x => x.slug === CUR.slug); if (b) b.synopsis = r.synopsis;
+    const slug = CUR.slug;
+    const r = await api('/api/book/synopsis', 'POST', { book: slug });
+    const b = STATE.books.find(x => x.slug === slug); if (b) b.synopsis = r.synopsis;
+    if (CUR.slug === slug) { CUR.synopsis = r.synopsis; setSynopsisBox({ slug, synopsis: r.synopsis }); }   // 生成期间用户换了书就别覆盖框
     toast(`简介已生成（${r.synopsis.length}字 · ${modelName(r.model)}）`);
   } catch (e) { toast('生成失败：' + e.message); }
   finally { btn.disabled = false; btn.textContent = old; }
@@ -543,11 +559,17 @@ $('#btnCopySyn').addEventListener('click', async () => {
 });
 // 手改后失焦自动保存
 $('#synText').addEventListener('blur', async () => {
-  if (!CUR) return;
+  // 存回【框上记的那本书】，不是 CUR —— 否则 CUR 被发布弹窗切走后，一次失焦就把上一本的简介写进新书里。
+  const slug = $('#synText').dataset.slug || '';
+  if (!slug) return;
+  const b = STATE.books.find(x => x.slug === slug);
   const t = $('#synText').value.trim();
-  if (t === (CUR.synopsis || '')) return;
-  try { await api('/api/book/synopsis', 'POST', { book: CUR.slug, text: t }); CUR.synopsis = t; const b = STATE.books.find(x => x.slug === CUR.slug); if (b) b.synopsis = t; }
-  catch (e) { toast('简介保存失败：' + e.message); }
+  if (t === ((b && b.synopsis) || '')) return;
+  try {
+    await api('/api/book/synopsis', 'POST', { book: slug, text: t });
+    if (b) b.synopsis = t;
+    if (CUR && CUR.slug === slug) CUR.synopsis = t;
+  } catch (e) { toast('简介保存失败：' + e.message); }
 });
 
 // ---------- 打开书目录 ----------
@@ -671,12 +693,20 @@ async function openPublish(book) {
   $('#pbGo').disabled = true; $('#pbGo').textContent = '🔍 请先点「预览将发」';   // 发布前必须先预览
   const b = STATE.books.find(x => x.slug === book.slug) || book;
   pbFill(b);
+  // 番茄建书要用的两处【每本书各不相同】的内容，必须跟着当前这本换掉，不能留上一本的：
+  //   ①简介框在写作台里，从书架直接进发布时它还是上一本的 → 这里补刷；
+  //   ②主角/配角框是"空框才填"，上一本的名字会粘着不换 → 先清空再按这本的圣经填。
+  setSynopsisBox(b);
+  if ($('#cbHero')) $('#cbHero').value = '';
+  if ($('#cbHero2')) $('#cbHero2').value = '';
   pbSyncStopBtn();   // 若这本正在发布，展示「停止发布」并接回进度
   $('#publishModal').classList.remove('hidden');
   // 从设定圣经自动带入主角名/配角名到「创建新书」的主角框（空框才填，不覆盖手改）
   (async () => {
     try {
+      const forSlug = book.slug;   // 读圣经期间用户可能又换了书 → 回来时对不上就丢弃，别把别人的名字填进来
       const bf = await api('/api/book/read?book=' + encodeURIComponent(book.slug) + '&rel=' + encodeURIComponent('novel_bible.md'));
+      if (!CUR || CUR.slug !== forSlug) return;
       const bible = bf.content || '';
       const cn = s => ((String(s || '').match(/[一-鿿]{2,6}/) || [])[0] || '');
       const heroM = bible.match(/##\s*主角[\s\S]{0,60}?\*\*\s*([一-鿿]{2,6})/) || bible.match(/##\s*主角[\s\S]{0,140}?姓名[：:]\s*([^。\n；;（(·]+)/) || bible.match(/(?:^|\n)[-\s]*主角[：:]\s*([^。\n，,；;（(]+)/);
@@ -788,7 +818,7 @@ $('#cbCreate')?.addEventListener('click', async () => {
   if (!CUR) return;
   const hint = $('#cbHint'); hint.style.color = '';
   const profilePath = $('#pbProfile').value;
-  const synopsis = ($('#synText')?.value || '').trim();
+  const synopsis = synopsisFor(CUR.slug);   // 只认属于这本书的简介，绝不拿框里可能残留的上一本
   const channel = $('#cbChannel').value;
   const mainCategory = $('#cbCategory').value;
   const hero = $('#cbHero').value.trim();
