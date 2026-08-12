@@ -21,6 +21,8 @@ import { parseChapters, saveChapter, appendIndex, hanziCount } from './webwriter
 import { startWriting } from './writer.mjs';
 import { sendToBook, sessionAgentAlive } from './attach.mjs';
 import { deslopRange } from './deslop.mjs';
+import { getSession, removeSession } from './sessions.mjs';
+import { killProcess } from './unterm.mjs';
 
 // 允许用于共创的模型：能忠实跟住作者具体指令、会写好文的强 CLI。排除弱/网页/API 免费模型。
 export const COWRITE_MODELS = ['claude', 'codex', 'gemini', 'qwen'];
@@ -339,6 +341,7 @@ export async function writeChaptersFromPlot({ book, model, plot, useLastEnding =
   const alive = await sessionAgentAlive(book.slug, cfg).catch(() => false);
   if (alive) {
     onLog({ level: 'act', msg: `按你这段情节连写 ${BATCH_MIN}–${BATCH_MAX} 章：向已开的 AI 窗口注入（从第 ${startNum} 章起）…` });
+    onLog({ level: 'warn', msg: '注意：这是复用你已开着的窗口。若它是「▶ 开始写作」起的全自动窗口，写完这批它仍会自己接着写——本模式建议先停掉那个窗口再给情节。' });
     await sendToBook(book.slug, instruction, cfg);
   } else {
     onLog({ level: 'act', msg: `按你这段情节连写 ${BATCH_MIN}–${BATCH_MAX} 章：打开 Unterm 窗口（${getModel(model)?.name || model}），从第 ${startNum} 章起（你能看着它写）…` });
@@ -368,6 +371,16 @@ export async function writeChaptersFromPlot({ book, model, plot, useLastEnding =
   const got = seen - before;
   if (!got) throw new Error(`等 AI 写这一批超时（${Math.round(timeoutMs / 60000)} 分钟没有任何新章落盘）。可到窗口看看它卡在哪，或重试；claude 较慢可换 codex。`);
   if (got < BATCH_MIN) onLog({ level: 'warn', msg: `只写出 ${got} 章（少于 ${BATCH_MIN} 章）就停了——可能情节量太小或被中断，正文已保留。` });
+
+  // 【硬闸】这一批到此为止：我们自己开的窗口，写完就收掉。作者主导模式下"多写"永远是错的——
+  // 靠指令里那句"写完就停"不够硬(agent 一句"要接着写吗"就可能把自己续下去)，直接断掉执行环境最保险。
+  // 复用来的窗口不动（那是作者自己开的，由他决定何时停）。
+  if (!alive) {
+    try {
+      const s = getSession(book.slug);
+      if (s?.pid) { killProcess(s.pid); removeSession(book.slug); onLog({ level: 'act', msg: '这一批写完 → 已收起窗口（下一段情节会重新开窗，避免它自己接着写）' }); }
+    } catch (e) { onLog({ level: 'warn', msg: '收窗失败（不影响已写的章）：' + e.message }); }
+  }
 
   await new Promise(r => setTimeout(r, 4000));   // 让最后一章写完整再读
   const chapters = readChaptersFrom(getBook(book.slug) || book, startNum);

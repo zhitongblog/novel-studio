@@ -152,11 +152,15 @@ export class Autopilot {
       if (this._promptStreak >= (this.opt.idleConfirms || 2) && cooled) {
         try {
           // 菜单/信任 = 纯回车采纳高亮项；y-n / 开放式 = 先打字再回车（分两次提交）
+          // 【作者主导】模式下，"要不要接着写"一律回【不】——否则"只确认不续写"就成了空话（见 classify 里的血泪注释）。
+          const denyContinue = this.opt.confirmOnly && pa.continueAsk;
+          const denyText = this.opt.declineContinueText || '不用继续。就写到这里停下，等作者给下一段要求；在此之前不要再写任何新章。';
           if (pa.kind === 'menu') await this.mcp.enter(this.paneId);
-          else if (pa.kind === 'yn') await this.mcp.submitText(this.paneId, this.opt.affirmativeText || 'y');
-          else await this.mcp.submitText(this.paneId, pa.send);
+          else if (pa.kind === 'yn') await this.mcp.submitText(this.paneId, denyContinue ? denyText : (this.opt.affirmativeText || 'y'));
+          else await this.mcp.submitText(this.paneId, denyContinue ? denyText : pa.send);
           this._lastPromptSendAt = now; this.stats.approvals++;
-          const what = pa.kind === 'menu' ? '选择/信任提示 → 回车采纳推荐项'
+          const what = denyContinue ? '它在问"要不要接着写" → 作者主导模式，已回绝并让它停下'
+            : pa.kind === 'menu' ? '选择/信任提示 → 回车采纳推荐项'
             : pa.kind === 'yn' ? 'y/n 提问 → 应答 ' + (this.opt.affirmativeText || 'y')
             : '开放式提问 → 自动应答';
           this.log('检测到' + what + ' ｜ ' + pa.reason, 'act');
@@ -422,7 +426,12 @@ export class Autopilot {
     const endsQuestion = /[?？]\s*$/.test(t.trimEnd()) || /[:：]\s*$/.test(t.trimEnd());
     const selectionHint = /(press enter|enter to (continue|select|confirm|apply)|use arrows|↑|↓|请选择)/i.test(t);
 
-    if (isYn(t)) return { kind: 'yn', reason: 'y/n 模式' };
+    // 「要不要继续写下去」这一类提问必须和"信任目录/审批/一般确认"区分开：
+    // 在【作者主导】模式(confirmOnly)下，它的正确答案永远是【不】——继续与否是作者的事。
+    // 血泪：不区分时，共创批次写完 agent 问一句"要我接着写下一段吗？"，autopilot 回 y，
+    // 它就接着写、再问、再 y……一夜滚出 44 章(用户："我让他写三五章，直接写了好几十章")。
+    const continueAsk = /(继续|接着写|接下来|下一[批章段]|再写|写下去|往下写)[^\n。！!]{0,12}(吗[?？]?|[?？])\s*$/.test(String(t).trimEnd());
+    if (isYn(t)) return { kind: 'yn', reason: continueAsk ? '续写征询' : 'y/n 模式', continueAsk };
     if ((approveKw.test(t) || trusty) && hasMenu) return { kind: 'menu', reason: trusty ? '信任目录提示' : '审批选择菜单' };
     if (approveKw.test(t) || trusty) return { kind: 'yn', reason: trusty ? '信任目录(y)' : '审批关键词' };
     // 仅当光标停在编号选项上（真菜单）才按菜单处理
