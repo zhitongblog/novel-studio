@@ -45,21 +45,66 @@ function cleanSynopsis(text) {
   let s = (cand.length ? cand.join('') : lines.join('')).trim();
   s = s.replace(/^[「『（("'\s]+|[」』）)"'\s]+$/g, '').replace(/^(简介|内容简介|文案)[：:]\s*/, '').replace(/\s+/g, '').trim();
   if (s.length > 240) s = s.slice(0, 230) + '…';
+  // 兜底闸：简介必须是中文正文。CLI 横幅/英文报错洗出来的串中文占比极低——宁可返回空让上层换模型重试，
+  // 也绝不能把 "OpenAICodexv0.141.0workdir:..." 这种东西存成作品简介（会被番茄发布直接采用）。
+  if (s && (s.match(/[一-鿿]/g) || []).length < s.length * 0.6) return '';
   return s;
 }
 
+// 生成简介/书名等【元任务】的候选 CLI 队列：首选 pickAuxModel，其余可用的本地 CLI 依次兜底。
+// 单一 CLI 一挂（额度用尽/未登录）整个功能就废，是之前"生成简介出问题"的根——所以逐个试。
+function auxCandidates(bookModel, cfg) {
+  const first = pickAuxModel(bookModel, cfg);
+  // 兜底顺序按 CLI_GEN_PREF（claude 排最后）——杂活尽量别烧 claude 额度，那是留给正文的。
+  const avail = detectAll().filter(m => m.available && m.kind !== 'web' && m.bin && CLI_GEN_PREF.includes(m.id))
+    .map(m => m.id).sort((a, b) => CLI_GEN_PREF.indexOf(a) - CLI_GEN_PREF.indexOf(b));
+  return [...new Set([first, ...avail].filter(Boolean))];
+}
+
 // 生成一段约150字的中文简介/推广文案（写作模型是 claude 时自动换 codex/gemini 来跑）。
+// 一个 CLI 失败（额度/登录/限流）或吐出非中文垃圾 → 自动换下一个，全挂才报错并说清每个为什么挂。
 export function generateSynopsis(book, cfg) {
   let bible = '';
   try { bible = fs.readFileSync(path.join(book.dir, 'novel_bible.md'), 'utf8').slice(0, 3000); } catch {}
   const ground = bible || [book.title && '书名：' + book.title, book.genre && '题材：' + book.genre].filter(Boolean).join('\n');
-  const model = pickAuxModel(book.model, cfg);
   const prompt =
     `你是资深网文编辑。为下面这本小说写一段【中文简介/推广文案】，用于发布到网文平台、分享给读者。\n` +
     `硬性要求：①长度 150 字左右（130–170 字）；②一段话，不分段、不用列表；③点出核心卖点、主角处境与主要冲突，留一个悬念钩子；④不剧透结局；⑤不要出现"本书/简介/作者/读者/爽点/大纲"等元词，也不要任何引导语；⑥只输出简介正文本身，不要解释、不要标题、不要加引号。\n` +
     `小说信息：\n${ground}`;
-  const out = runModelOnce(model, prompt, cfg, 120000) || '';
-  return { synopsis: cleanSynopsis(out), model };
+  const notes = [];
+  for (const id of auxCandidates(book.model, cfg)) {
+    const name = getModel(id)?.name || id;
+    try {
+      const s = cleanSynopsis(runModelOnce(id, prompt, cfg, 120000) || '');
+      if (s && (s.match(/[一-鿿]/g) || []).length >= 60) return { synopsis: s, model: id };
+      notes.push(`${name}：没给出像样的中文简介`);
+    } catch (e) { notes.push(`${name}：${e.message.replace(/^.*?跑不动：/, '')}`); }
+  }
+  throw new Error('简介生成失败——挨个试过的本地模型都不行：' + notes.join('；') + '。可换个模型、或先自己写一段。');
+}
+
+// CLI「根本没跑成」的典型输出：额度、限流、未登录、网络。这些绝不能被当成"模型的回答"往下用——
+// 【血泪】codex 额度用尽时只吐启动横幅 + 一行 ERROR，旧代码照收，cleanSynopsis 把横幅洗成
+// "ReadingpromptfromstdinOpenAICodexv0.141.0workdir..." 当简介存进书里（231字、0个中文），
+// 番茄发布直接拿它当作品简介。必须在源头识别失败并抛错。
+const CLI_FAIL_PATTERNS = [
+  [/hit your usage limit|usage limit (reached|exceeded)|out of credits|quota exceeded|额度.{0,4}(用尽|不足|耗尽)/i, '额度已用尽'],
+  [/rate ?limit|too many requests|\b429\b/i, '被限流'],
+  [/not logged ?in|please log ?in|login required|unauthorized|\b401\b|authentication failed/i, '未登录或鉴权失败'],
+  [/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)/i, '网络/代理不通'],
+];
+
+// 判断一次 CLI 输出是不是"跑失败了"。返回 {why, detail} 或 null。
+// 注意：不能只看有没有 ERROR 字样（正常回答里也可能出现），判据是【命中失败特征】+【去掉被回显的
+// prompt 之后没剩下像样的中文正文】——只有这两条同时成立，才说明它真的什么都没生成。
+function detectCliFailure(raw, prompt) {
+  const t = String(raw || '');
+  const hit = CLI_FAIL_PATTERNS.find(([re]) => re.test(t));
+  if (!hit) return null;
+  const rest = prompt ? t.split(prompt).join('\n') : t;          // 去掉 CLI 原样回显的 prompt
+  if ((rest.match(/[一-鿿]/g) || []).length >= 20) return null;   // 还是给出了中文正文 → 不算失败
+  const line = (rest.split(/\r?\n/).find(l => hit[0].test(l)) || '').trim().replace(/\s+/g, ' ');
+  return { why: hit[1], detail: line.slice(0, 160) };
 }
 
 // 非交互跑一次模型，拿文本输出
@@ -87,7 +132,10 @@ export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
     env, maxBuffer: 8 * 1024 * 1024, shell: true, windowsHide: true,
   });
   if (r.error) throw new Error(m.name + ' 调用失败：' + r.error.message);
-  return (r.stdout || '') + '\n' + (r.stderr || '');
+  const out = (r.stdout || '') + '\n' + (r.stderr || '');
+  const fail = detectCliFailure(out, prompt);
+  if (fail) { const e = new Error(`${m.name} 跑不动：${fail.why}${fail.detail ? '（' + fail.detail + '）' : ''}`); e.cliFailed = useId; throw e; }
+  return out;
 }
 
 // 从模型输出里抽取候选数组。先试严格 JSON，失败则用容错正则
