@@ -15,6 +15,7 @@ import { bookStats, getBook, participationOf } from './books.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, parseReviewItems } from './editor.mjs';   // 卷边界大纲审稿门复用长驻那套主编无头审稿
 import { setPending, takeResume } from './pending.mjs';   // 参与模式：卷口挂起等用户逐条挑 / 用户拍板后恢复
+import { deslopRange } from './deslop.mjs';   // 写后强制排版矫正闸：治「……」雪球+逐句换行，断掉自我模仿的滚雪球
 
 // 各模型"无头 + 自动批准文件读写"的参数。
 function writeArgs(model) {
@@ -118,6 +119,14 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
     onLog({ level: 'warn', msg: `本批未见新章（${secs}s${r.killed ? '，超时被中止' : ''}）。模型输出尾部：${tail}` });
     return { ok: false, wrote: 0, secs, before, after, raw: r };
   }
+  // 🧹写后强制矫正闸：对本批新章跑确定性排版矫正（删「……」tic、合并逐句换行）。
+  // 关键——这一步在【下一批把本章当上下文喂回去之前】跑，病章清干净后模型看到的范文永远干净，
+  // 从根上断掉「读自己上一章→放大 tic→滚雪球」的循环。矫正只改排版不丢字，对已干净章近似幂等。
+  try {
+    const dr = deslopRange(book.dir, (before.maxChapter || 0) + 1, after.maxChapter || 0, onLog);
+    if (dr.touched) onLog({ level: 'act', msg: `🧹 排版矫正闸：本批 ${dr.touched}/${dr.files} 章已矫正（防「……」雪球）` });
+  } catch (e) { onLog({ level: 'warn', msg: '排版矫正闸异常（不阻断）：' + (e.message || e) }); }
+
   onLog({ level: 'act', msg: `本批完成：新增 ${grew} 章（最高章号 ${before.maxChapter}→${after.maxChapter}），用时 ${secs}s` });
   return { ok: true, wrote: grew, maxFrom: before.maxChapter, maxTo: after.maxChapter, secs, before, after };
 }
