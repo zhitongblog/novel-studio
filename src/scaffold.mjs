@@ -43,10 +43,13 @@ export function scaffoldBook(book) {
   const vol1 = path.join(dir, 'chapters', '卷01');
   fs.mkdirSync(vol1, { recursive: true });
 
-  writeIfMissing(path.join(dir, 'novel_bible.md'), bibleTemplate(book));
+  // 探索式(freehand)：全书不要任何大纲——bible 只留"手法/主角/概述"三节的空壳，也不铺卷01大纲模板
+  //（铺了模型就会往里填，等于又冒出大纲）。台账退化成一张【人物名册】，配角临时起名后往里追加。
+  const freehand = book.planMode === 'freehand';
+  writeIfMissing(path.join(dir, 'novel_bible.md'), freehand ? freehandBibleTemplate(book) : bibleTemplate(book));
   writeIfMissing(path.join(dir, 'chapter_index.md'), indexTemplate(book));
-  writeIfMissing(path.join(dir, 'outlines', '卷01分章大纲.md'), outlineTemplate(book));
-  writeIfMissing(path.join(dir, 'continuity_ledger.md'), ledgerTemplate(book));
+  if (!freehand) writeIfMissing(path.join(dir, 'outlines', '卷01分章大纲.md'), outlineTemplate(book));
+  writeIfMissing(path.join(dir, 'continuity_ledger.md'), freehand ? rosterTemplate(book) : ledgerTemplate(book));
 
   // 各模型上下文文件（写作 skill），每次刷新以保证最新标准
   const files = contextFiles(book);
@@ -106,6 +109,52 @@ ${b.genre || '（类型 / 卖点 / 目标读者）'}
 - 卷弧（150–300 章）：
 
 ## 命名风格 / 口吻基线
+-
+`;
+}
+
+// 探索式(freehand)的 bible：只允许三节——故事概述 / 主角 / 写作手法。没有世界观、没有配角表、没有任何大纲。
+function freehandBibleTemplate(b) {
+  const std = b.standards || {};
+  return `# 《${b.title}》创作基线（novel_bible.md）
+
+> 本书为【探索式】：这个文件只写「怎么写」和最基本的「谁在写什么故事」。
+> 全书没有大纲——剧情由作者一段一段给，AI 据每段情节自拆 3–5 章。
+> 【禁止】在本文件里出现：世界观长篇、力量体系表、配角/势力名单、剧情走向、阶段或卷章规划。
+
+## 故事概述
+${b.genre || '（150–250 字：主角是谁、什么处境、核心矛盾、大致方向。不排阶段、不排卷章、不写结局。）'}
+
+## 主角
+- 姓名：
+- 身份 / 性格 / 初始处境：
+（配角不在此列——写到谁再临时起名，起了登记到 continuity_ledger.md 的人物名册。）
+
+## 写作手法（本文件的主体，全书照这个手法写）
+- 人称与视角：
+- 叙事口吻 / 语感：
+- 句式与段落形态（段落长度、换行密度、对话与叙述配比；严禁逐句换行）：
+- 单章结构（开头怎么起 / 中段怎么推 / 章末钩子怎么抛）：
+- 单章字数：${std.targetCharsLo || 3000}–${std.targetCharsHi || 3600}
+- 实锚密度：每 250–400 字一个可见实锚（物件 / 身体感觉 / 具体动作 / 专有名词与数目）
+- 对话怎么写（潜台词、人物口吻如何区分）：
+- 爽点与节奏的做法：
+- 命名口味基线（人名 / 地名什么味道——临时起配角名时照这个起）：
+- 反 AI 味禁令：禁解释性套话（“这不是…而是”“这意味着”）、禁翻译腔现代词、禁段尾点题升华、禁句长均匀、禁重复句式；「……」一章不超过 5 次，正常成段。
+`;
+}
+
+// 探索式的台账 = 一张人物名册（临时起名的配角随写随登记，防改名/串名）。
+function rosterTemplate(b) {
+  return `# 《${b.title}》人物名册（continuity_ledger.md）
+
+> 本书没有大纲、没有人物设定表。配角写到谁才起名——起了就登记在这里，全书沿用，绝不改名、绝不串名。
+
+| 姓名 | 身份 | 当前处境 | 首次出场章 |
+|---|---|---|---|
+|  |  |  |  |
+
+## 需要记住的既成事实（写到再补，一行一条）
 -
 `;
 }

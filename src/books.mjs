@@ -53,6 +53,20 @@ export function setBookWriteMode(slugOrId, mode, reviewEvery) {
   return b;
 }
 
+// 规划模式：
+//   'compass'   全书粗罗盘（默认）：AI 先出每卷一句话走向，之后逐卷共创章级大纲
+//   'freehand'  探索式·只给手法：bible 只有写作手法+主角名+故事概述，全书无任何大纲，
+//               作者逐段给情节、AI 自拆 3–5 章（见 cowrite.writeChaptersFromPlot）
+//   'discovery' 旧版探索式（保留兼容：老书仍走"逐卷共创大纲"）
+// 影响立项指令、AGENTS.md 里的大纲闸、以及写作台是否显示「🧭 本卷大纲」。
+export function setBookPlanMode(slugOrId, mode) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  b.planMode = ['discovery', 'freehand'].includes(mode) ? mode : 'compass';
+  upsertBook(b);
+  return b;
+}
+
 // 参与度（用户视角的一个开关，派生底层的 writeMode/reviewEvery/大纲门）：
 //   'auto'    放手写 · 全自动——不停，卷口大纲也自动采纳修订
 //   'volume'  卷口把关——平时自动写，只在【开新卷/立项的大纲】处停下让你定（推荐默认）
@@ -453,6 +467,8 @@ export function createBook(opts, cfg) {
     genre: opts.genre || '',
     model: opts.model || cfg.defaultModel,
     style: resolveStyle(opts.style),   // { id, name, short, rules, tweak } 或 null
+    // 规划模式要在 scaffold 之前定下来：freehand 的骨架不铺大纲模板、bible 模板也只有手法三节
+    planMode: ['discovery', 'freehand'].includes(opts.planMode) ? opts.planMode : 'compass',
     createdAt: new Date().toISOString(),
     standards: {
       totalWords: opts.totalWords || '',

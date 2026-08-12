@@ -227,6 +227,13 @@
           <label class="field"><span>文风</span><select id="nbStyle"></select></label>
           <label class="field"><span>规划卷数（只出粗罗盘）</span><input id="nbVolCount" type="number" min="3" max="200" value="30" title="立项只出这么多卷的一句话走向（罗盘），不细化章节。之后每卷开写前跟你共创该卷大纲。" /></label>
         </div>
+        <label class="field"><span>开局架构 · 谁来定故事骨架</span>
+          <div class="seg" id="nbPlanMode">
+            <button type="button" class="seg-btn on" data-plan="compass">🧭 全书粗罗盘（AI 先出每卷一句话走向）</button>
+            <button type="button" class="seg-btn" data-plan="freehand">🌱 探索式 · 只给手法（全书不出大纲，情节我一段段给）</button>
+          </div>
+        </label>
+        <div class="modal-hint" id="nbPlanHint">推荐「粗罗盘」：AI 只给每卷一行走向当指南针，不铺细节，之后逐卷共创。选「探索式」则圣经只写【写作手法 + 主角名 + 故事概述】——不出全书大纲、不出卷大纲，剧情你一段段给，AI 据每段自拆 3–5 章，配角写到谁临时起名。</div>
         <div class="adv-toggle" id="nbRefToggle">📚 对标别人的书（学文风，立项前就定调，可多本）</div>
         <div class="adv hidden" id="nbRefPanel">
           <div class="modal-hint">先给 1~3 本对标爆款，AI 分析出文风 → <b>立项前就设为本书文风</b>，之后 设定/大纲/正文全程照这个腔写。只学"怎么写"、不复制原文。</div>
@@ -296,7 +303,7 @@
     <div class="modal-card" style="max-width:820px">
       <button class="modal-close" id="cwClose" title="关闭 (Esc)">✕</button>
       <h2>🤝 共创模式 · 你出主意，AI 逐章</h2>
-      <p class="modal-hint">以<b>你的想法为主</b>：一次只写一章，AI 帮你出主意、按你的要求写，你审完满意再写下一章——AI 不自作主张改方向，从根上治“越写越变形”。人物关系与逻辑由你把控，AI 不需要额外记忆。<b>需 claude 或 codex。</b></p>
+      <p class="modal-hint">以<b>你的想法为主</b>：你给情节、AI 执笔，你审完满意再给下一段——AI 不自作主张改方向，从根上治“越写越变形”。两种给法：<b>给一段故事情节</b>让 AI 自拆 3–5 章连写（探索式书的主写法，全书不需要大纲），或<b>只给这一章的要求</b>让它一次只写一章。人物关系与逻辑由你把控。<b>需 claude 或 codex。</b></p>
       <div class="cw-head" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
         <label class="field" style="margin:0"><span>模型</span><select id="cwModel"></select></label>
         <span class="badge" id="cwChapInfo">下一章：第 ? 章</span>
@@ -313,13 +320,14 @@
       <div id="cwIdeaBox" class="cw-box hidden" style="max-height:180px;overflow:auto;white-space:pre-wrap;background:rgba(127,127,127,.08);border-radius:8px;padding:10px;font-size:13px;line-height:1.6;margin-bottom:10px"></div>
 
       <div class="field">
-        <span>✍️ 本章我的要求（人物、情节、走向、结尾——你说了算，写得越具体 AI 越不跑偏）</span>
+        <span id="cwIntentLabel">✍️ 本章我的要求（人物、情节、走向、结尾——你说了算，写得越具体 AI 越不跑偏）</span>
         <textarea id="cwIntent" rows="5" placeholder="例如：本章崇祯回到乾清宫，先稳住溃散的太监；用只有崇祯知道的旧事让王承恩彻底信他；结尾骆养性来报——李自成开始追赃助饷，京中大乱。基调冷静、克制，别喊忠烈。"></textarea>
       </div>
       <label class="cw-check" style="display:flex;gap:6px;align-items:center;font-size:13px;margin:-2px 0 8px">
         <input type="checkbox" id="cwUseLast" checked /> 带上一章结尾衔接（保持文笔连续）
       </label>
       <div class="btn-row">
+        <button class="btn primary" id="cwBatchBtn" title="你给一段故事情节，AI 自己判断该拆成几章（3–5 章），连着写完落盘。适合没有大纲、剧情你自己一段段给的写法。">📚 按这段情节连写 3–5 章</button>
         <button class="btn primary" id="cwWriteBtn">✍️ 让 AI 写这一章</button>
         <button class="btn" id="cwRedoBtn" disabled title="删掉刚写的这章，按你（可能改过的）要求重写同一章">🔄 重写这一章</button>
         <button class="btn" id="cwReadBtn" disabled title="在舒适的阅读器里读刚写好的这一章（大字号、好读）">📖 舒适阅读本章</button>
@@ -643,9 +651,12 @@
       <div class="cw-head" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
         <label class="field" style="margin:0"><span>这一卷</span><select id="vpVol"></select></label>
         <label class="field" style="margin:0"><span>模型</span><select id="vpModel"></select></label>
-        <button class="btn" id="vpDraft">🤖 让 AI 据罗盘拟草案</button>
+        <button class="btn" id="vpDraft">🤖 让 AI 拟草案</button>
         <span class="dim-note" id="vpHint" style="align-self:center"></span>
       </div>
+      <label class="field"><span id="vpDirLabel">本卷走向（你来定；探索式必填、罗盘式可留空让 AI 依罗盘拟）</span>
+        <textarea id="vpDir" rows="2" placeholder="一句到几句话说清这一卷你想让故事往哪走：主角处境从什么→什么、要抛出/解决什么、卷末留个什么钩子。AI 会照这个把它拆成逐章 beat，不会自己改你的主线方向。"></textarea>
+      </label>
       <label class="field"><span>本卷章级大纲（AI 草案，你随便改；也可直接自己写）</span>
         <textarea id="vpText" class="ai-prompt" rows="15" placeholder="点上面「让 AI 据罗盘拟草案」，或直接自己写这一卷的分章大纲（逐章一行：核心事件/冲突｜推进了什么｜章末钩子）…"></textarea>
       </label>

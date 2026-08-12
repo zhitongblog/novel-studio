@@ -137,11 +137,16 @@ function openWrite(book) {
   $('#writeTitle').textContent = '《' + book.title + '》';
   $('#writeModel').value = book.model || STATE.config.defaultModel;
   syncWebProfileUI();   // 若默认/上次是网页版模型 → 显示并填充网页账号选择器
-  $('#writeTask').value = `请阅读 AGENTS.md 写作规范与 novel_bible.md，续写下一批 ${book.standards?.batchSize || 3} 章，写完自检。`;
+  // 探索式(freehand)没有大纲：不能让 AI 自己"续写下一批"——没有作者的情节就该停下等
+  $('#writeTask').value = book.planMode === 'freehand'
+    ? `请阅读 AGENTS.md 与 novel_bible.md 的【写作手法】。本书是探索式、没有任何大纲，剧情只能由我一段段给：请把我在这里给的情节自拆 3–5 章写完就停；如果我没给新情节，就回一句「等作者给情节」并停下，不要自行推进剧情。`
+    : `请阅读 AGENTS.md 写作规范与 novel_bible.md，续写下一批 ${book.standards?.batchSize || 3} 章，写完自检。`;
   $('#mirror').textContent = '（开始写作后，这里实时显示 AI 写作过程）';
   $('#logFeed').innerHTML = '';
   $('#wbTarget').value = book.targetChapters || 0;
   $('#writeMode').value = book.participation || (book.writeMode === 'review' ? 'chapter' : 'volume');
+  // 探索式(freehand)：全书不建任何大纲 → 藏掉「🧭 本卷大纲」，改用共创面板逐段给情节
+  if ($('#btnVolPlan')) $('#btnVolPlan').classList.toggle('hidden', book.planMode === 'freehand');
   $('#synText').value = book.synopsis || '';
   const running = STATE.sessions.find(s => s.slug === book.slug && s.running !== false);
   setWriting(!!running);
@@ -379,6 +384,13 @@ function openCowrite() {
   const prefer = CW_MODELS.find(id => avail.some(m => m.id === id));
   $('#cwModel').innerHTML = avail.map(m => `<option value="${m.id}" ${m.id === prefer ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
   $('#cwChapInfo').textContent = '下一章：第 ' + cwNextNum() + ' 章';
+  // 探索式(freehand)：本书没有任何大纲，剧情由作者一段段给 → 主按钮换成「连写 3–5 章」，文案跟着换
+  const free = CUR.planMode === 'freehand';
+  $('#cwIntentLabel').textContent = free
+    ? '✍️ 这一段的故事情节（AI 会自己判断该拆成 3–5 章连着写；写得越具体越不跑偏）'
+    : '✍️ 本章我的要求（人物、情节、走向、结尾——你说了算，写得越具体 AI 越不跑偏）';
+  $('#cwBatchBtn').classList.toggle('primary', free);
+  $('#cwWriteBtn').classList.toggle('primary', !free);
   $('#cwAsk').value = ''; $('#cwIntent').value = '';
   $('#cwIdeaBox').classList.add('hidden'); $('#cwIdeaBox').textContent = '';
   $('#cwOut').classList.add('hidden'); $('#cwOut').textContent = '';
@@ -449,6 +461,37 @@ async function cwDoWrite(redoLast) {
   } catch (e) { $('#cwErr').textContent = '写作失败：' + e.message; rBtn.disabled = false; }
   finally { wBtn.disabled = false; wBtn.textContent = oldW; }
 }
+// 一段情节 → AI 自拆 3–5 章连写（探索式主写法；粗罗盘书也能用）
+async function cwDoBatch() {
+  if (!CUR) return;
+  const plot = $('#cwIntent').value.trim();
+  if (!plot) { $('#cwErr').textContent = '先写这一段的故事情节（AI 会据它拆成 3–5 章）'; return; }
+  const bBtn = $('#cwBatchBtn'), wBtn = $('#cwWriteBtn'), rBtn = $('#cwRedoBtn');
+  const oldB = bBtn.textContent;
+  bBtn.disabled = true; wBtn.disabled = true; rBtn.disabled = true; bBtn.textContent = '连写中…';
+  $('#cwErr').textContent = '';
+  const slowModel = /claude|gemini/i.test($('#cwModel').value);
+  $('#cwSaved').textContent = '⏳ AI 正在按你这段情节连写 3–5 章——会弹出一个终端窗口，你可以【在窗口里实时看它写】。'
+    + (slowModel ? '（Claude/Gemini 一批可能 20–45 分钟；想更快可换 codex）' : '（约 5–25 分钟）')
+    + ' 写完这里会显示全部正文。App 不会卡，可先干别的。';
+  try {
+    const r = await api('/api/book/cowrite-batch', 'POST', {
+      book: CUR.slug, model: $('#cwModel').value, plot, useLastEnding: $('#cwUseLast').checked,
+    });
+    const chs = r.chapters || [];
+    $('#cwOut').textContent = chs.map(c => `——— 第 ${c.num} 章 《${c.title}》（约 ${c.words} 字）———\n\n${c.body}`).join('\n\n\n');
+    $('#cwOut').classList.remove('hidden'); $('#cwOut').scrollTop = 0;
+    $('#cwSaved').innerHTML = `✅ 这一段已写成 <b>${chs.length}</b> 章（第 ${r.startNum}–${r.endNum} 章）并保存。<b>请先阅读上面的正文↑</b>。满意后——在下面写<b>下一段情节</b>再点“连写 3–5 章”。`;
+    $('#cwIntent').value = '';
+    CW_LAST_REL = chs.length ? chs[chs.length - 1].rel : '';
+    $('#cwReadBtn').disabled = !CW_LAST_REL;
+    await refresh();
+    $('#cwChapInfo').textContent = '下一章：第 ' + ((r.endNum || 0) + 1) + ' 章（读完满意再给下一段）';
+    toast(`已按你这段情节写好 ${chs.length} 章，请先阅读`);
+  } catch (e) { $('#cwErr').textContent = '连写失败：' + e.message; }
+  finally { bBtn.disabled = false; wBtn.disabled = false; bBtn.textContent = oldB; }
+}
+$('#cwBatchBtn') && $('#cwBatchBtn').addEventListener('click', cwDoBatch);
 $('#cwWriteBtn').addEventListener('click', () => cwDoWrite(false));
 $('#cwRedoBtn').addEventListener('click', () => cwDoWrite(true));
 let CW_LAST_REL = '';   // 刚写好的这一章路径，供"舒适阅读本章"跳转
@@ -1435,6 +1478,13 @@ $('#stGo') && $('#stGo').addEventListener('click', async () => {
 async function openVolPlan() {
   if (!CUR) return;
   $('#vpText').value = ''; $('#vpErr').textContent = ''; $('#vpHint').textContent = '';
+  if ($('#vpDir')) $('#vpDir').value = '';
+  // 探索式书：没有罗盘，本卷走向必须作者给 → 文案强调、按钮改名
+  const disc = CUR.planMode === 'discovery';
+  if ($('#vpDraft')) $('#vpDraft').textContent = disc ? '🤖 按我的走向拟草案' : '🤖 让 AI 拟草案';
+  if ($('#vpDirLabel')) $('#vpDirLabel').textContent = disc
+    ? '本卷走向（探索式·必填：这一卷你想往哪走）'
+    : '本卷走向（你来定；留空则让 AI 依罗盘拟）';
   $('#vpModel').innerHTML = STATE.models.map(m => `<option value="${m.id}" ${m.available ? '' : 'disabled'}>${esc(m.name)}${m.available ? '' : '（未装）'}</option>`).join('');
   $('#vpModel').value = CUR.model || STATE.config.defaultModel;
   // 卷号：1..规划卷数；默认下一卷（当前卷+1，没写过则第1卷）
@@ -1451,9 +1501,11 @@ $('#vpCancel') && $('#vpCancel').addEventListener('click', () => $('#volPlanModa
 $('#vpDraft') && $('#vpDraft').addEventListener('click', async () => {
   if (!CUR) return;
   const vol = parseInt($('#vpVol').value, 10) || 1;
-  $('#vpDraft').disabled = true; $('#vpHint').textContent = 'AI 据罗盘拟草案中…（约 1–2 分钟）';
+  const direction = $('#vpDir') ? $('#vpDir').value.trim() : '';
+  if (CUR.planMode === 'discovery' && !direction) { $('#vpErr').textContent = '探索式没有罗盘，请先在「本卷走向」里写一句这一卷你想往哪走'; return; }
+  $('#vpDraft').disabled = true; $('#vpHint').textContent = 'AI 拟草案中…（约 1–2 分钟）';
   try {
-    const r = await api('/api/book/plan-volume', 'POST', { book: CUR.slug, volume: vol, model: $('#vpModel').value });
+    const r = await api('/api/book/plan-volume', 'POST', { book: CUR.slug, volume: vol, model: $('#vpModel').value, direction });
     $('#vpText').value = r.draft || '';
     $('#vpHint').textContent = '✅ 草案已出——你随便改（加减章/改走向/改钩子），满意再保存';
   } catch (e) { $('#vpErr').textContent = '拟稿失败：' + e.message; $('#vpHint').textContent = ''; }
@@ -2173,6 +2225,22 @@ $('#dlConfirm').addEventListener('click', async () => {
 // ---------- 新建书 · AI 立项 ----------
 let NB_TITLES = [], NB_SEL = -1;
 let NB_REF_STYLE = null;   // 对标分析出的 {name,rules}；有则立项前设为本书文风
+let NB_PLAN_MODE = 'compass';   // compass=全书粗罗盘(默认) | freehand=探索式·只给手法(全书无大纲，情节作者逐段给)
+// 开局架构切换：探索式时罗盘卷数无意义 → 置灰
+(function initNbPlanSeg() {
+  const seg = document.getElementById('nbPlanMode'); if (!seg) return;
+  seg.addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn'); if (!btn) return;
+    NB_PLAN_MODE = btn.dataset.plan === 'freehand' ? 'freehand' : 'compass';
+    seg.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('on', b === btn));
+    const vc = document.getElementById('nbVolCount');
+    if (vc) { vc.disabled = NB_PLAN_MODE === 'freehand'; vc.style.opacity = NB_PLAN_MODE === 'freehand' ? '.4' : ''; }
+    const hint = document.getElementById('nbPlanHint');
+    if (hint) hint.textContent = NB_PLAN_MODE === 'freehand'
+      ? '🌱 探索式：圣经只写【写作手法 + 主角名 + 故事概述】——不出全书概略大纲、不出罗盘、每一卷也不建大纲。之后在「🤝 我来主笔」里，你一段段给故事情节，AI 据每段自拆 3–5 章连写；配角写到谁才临时起名并登记名册。'
+      : '推荐「粗罗盘」：AI 只给每卷一行走向当指南针，不铺细节，之后逐卷共创。选「探索式」则圣经只写手法+主角名+故事概述，全书不出任何大纲，剧情你一段段给。';
+  });
+})();
 // 目标字数：框里只填数字，单位固定"万字" → 拼成 "200万字"
 function getWords() {
   const v = ($('#nbWords').value || '').replace(/[^0-9.]/g, '');
@@ -2185,6 +2253,11 @@ function openModal() {
   $('#nbErr').textContent = ''; $('#nbFinalTitle').value = ''; $('#nbLaunch').disabled = true;
   // 重置对标状态
   NB_REF_STYLE = null;
+  // 重置开局架构为默认「粗罗盘」
+  NB_PLAN_MODE = 'compass';
+  const pseg = document.getElementById('nbPlanMode');
+  if (pseg) pseg.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('on', b.dataset.plan === 'compass'));
+  const pvc = document.getElementById('nbVolCount'); if (pvc) { pvc.disabled = false; pvc.style.opacity = ''; }
   if ($('#nbRefPanel')) $('#nbRefPanel').classList.add('hidden');
   if ($('#nbrsUrl')) $('#nbrsUrl').value = '';
   if ($('#nbrsSample')) $('#nbrsSample').value = '';
@@ -2325,13 +2398,17 @@ $('#nbLaunch').addEventListener('click', async () => {
       participation: $('#nbWriteMode').value,   // auto | volume | chapter
       volumes: $('#nbVolCount') ? $('#nbVolCount').value : '',   // 罗盘卷数（只出粗走向）
       characters: $('#nbChars') ? $('#nbChars').value.trim() : '',   // 作者指定的角色（AI 原样采用）
+      planMode: NB_PLAN_MODE,   // freehand=探索式：只给写作手法，全书不出任何大纲，情节作者逐段给
     });
     $('#modal').classList.add('hidden');
     await refresh();
     const book = STATE.books.find(b => b.slug === r.book.slug) || r.book;
     openWrite(book); setWriting(true); openStream(book.slug);
     const st = r.book && r.book.style;
-    toast('已立项《' + title + '》' + (st ? ' · 文风：' + st.name : '') + '，AI 正在搭设定 + 全书罗盘（每卷一句话走向）。罗盘出来后，用「🧭 本卷大纲」逐卷共创再写。');
+    const free = NB_PLAN_MODE === 'freehand';
+    toast('已立项《' + title + '》' + (st ? ' · 文风：' + st.name : '') + '，AI 正在' +
+      (free ? '定写作手法（只写手法+主角名+故事概述，不出任何大纲）。手法出来后，在「🤝 我来主笔」里给第一段故事情节，AI 自拆 3–5 章。'
+            : '搭设定 + 全书罗盘（每卷一句话走向）。罗盘出来后，用「🧭 本卷大纲」逐卷共创再写。'));
   } catch (e) { $('#nbErr2').textContent = '失败：' + e.message; $('#nbLaunch').disabled = false; }
 });
 

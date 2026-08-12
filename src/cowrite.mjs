@@ -20,6 +20,7 @@ import { currentVolume, getBook, bookStats } from './books.mjs';
 import { parseChapters, saveChapter, appendIndex, hanziCount } from './webwriter.mjs';
 import { startWriting } from './writer.mjs';
 import { sendToBook, sessionAgentAlive } from './attach.mjs';
+import { deslopRange } from './deslop.mjs';
 
 // 允许用于共创的模型：能忠实跟住作者具体指令、会写好文的强 CLI。排除弱/网页/API 免费模型。
 export const COWRITE_MODELS = ['claude', 'codex', 'gemini', 'qwen'];
@@ -268,6 +269,117 @@ export async function writeChapterInWindow({ book, model, intent, useLastEnding 
   if (!ch) throw new Error('章数增加了但没读到新章文件（可去窗口核对）');
   onLog({ level: 'act', msg: `  ✓ 第 ${ch.num} 章《${ch.title}》已写好（约 ${ch.words} 字）→ ${ch.rel}` });
   return { num: ch.num, title: ch.title, body: ch.body, rel: ch.rel, words: ch.words, model, windowMode: true };
+}
+
+// ===== 自由式·一段情节 → AI 自拆 3–5 章（探索式书的主写法）=====
+// 与"一次一章"的区别：作者给的是【一段故事情节】（可能够写好几章），AI 自己判断该拆成几章（3–5），
+// 逐章落盘。全程没有大纲文件——情节以作者这段话为唯一依据；需要新配角就地起名并登记进人物名册。
+
+const BATCH_MIN = 3, BATCH_MAX = 5;
+
+// 自拆批次的窗口指令：读手法与名册 → 把作者这段情节拆成 3–5 章 → 逐章落盘登记 → 停。单行。
+function buildPlotBatchInstruction(book, startNum, plot, useLastEnding) {
+  const lo = book?.standards?.minChars || 3000;
+  const hi = book?.standards?.targetCharsHi || 3600;
+  const last = useLastEnding ? lastChapterTail(book, 1200) : { tail: '' };
+  const volNum = currentVolume(book) || 1;
+  const volDir = '卷' + String(volNum).padStart(2, '0');
+  const endNum = startNum + BATCH_MAX - 1;
+  const s = `这是【作者主导·探索式】：本书没有任何大纲，剧情由作者一段一段给你，你只负责拆章执笔。` +
+    `动笔前先读 novel_bible.md 的【写作手法】（整本照这个手法写）与 continuity_ledger.md 的【人物名册】（已出场人物一律沿用名册里的名字，绝不改名、绝不串名）。` +
+    `【作者给的这一段情节（最高优先，必须原样落实）】：${plot} 。` +
+    `请把这段情节【自己判断拆成 ${BATCH_MIN}–${BATCH_MAX} 章】——情节量小就 ${BATCH_MIN} 章、量大就 ${BATCH_MAX} 章，宁可写足也别注水；` +
+    `从第 ${startNum} 章开始连续写（最多写到第 ${endNum} 章），一章一个文件，写完这一批就【立即停下】，不要自作主张往后续写、不要问是否继续。` +
+    `【硬性】不得改变作者定的情节走向、人物设定与结果，不得自加大转折或提前用掉作者没给的剧情；` +
+    `拆章只是分配节奏（每章一个小目标 + 章末钩子），不是改故事。` +
+    `【配角临时起名】这一段里若出现新人物，就按 bible 里的命名口味【当场给他起名】，并把「姓名｜身份｜当前处境｜首次出场章」追加进 continuity_ledger.md 的人物名册；` +
+    `除名册与 chapter_index.md 外不要改动别的设定文件。` +
+    (last.tail ? `【上一章结尾（衔接用，保持文笔语气连续）】：${last.tail} 。` : '') +
+    `写作标准：每章约 ${lo}–${hi} 字（硬下限 > ${lo} 字），严格遵守本目录 AGENTS.md 的反AI味/排版/节奏规范，靠推进与细节写足、绝不重复凑字。` +
+    `落盘：写到 chapters/${volDir}/，文件名=3位全局章号+唯一章名（如 ${String(startNum).padStart(3, '0')}章名.txt），内容【仅正文】不含标题行/卷名/注释；` +
+    `章名先在 chapter_index.md 全表查重确保唯一；每写完一章就立刻登记进 chapter_index.md 再写下一章。` +
+    `【绝对禁止】新建或写入 outlines/ 下的任何大纲文件、给本书排卷排阶段、改写 novel_bible.md 的故事概述。` +
+    `这一批 ${BATCH_MIN}–${BATCH_MAX} 章写完就停下，等作者给下一段情节。`;
+  return s.replace(/[\r\n]+/g, ' ');
+}
+
+// 读 chapters/ 下所有章号 >= fromNum 的章（正文+路径+字数），按章号升序。
+function readChaptersFrom(book, fromNum) {
+  const out = [];
+  const walk = (d) => {
+    let ents = []; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const fp = path.join(d, e.name);
+      if (e.isDirectory()) { walk(fp); continue; }
+      if (!/\.txt$/i.test(e.name)) continue;
+      const num = parseInt((e.name.match(/^(\d{1,4})/) || [])[1] || '0', 10);
+      if (!num || num < fromNum) continue;
+      let body = ''; try { body = fs.readFileSync(fp, 'utf8'); } catch {}
+      out.push({
+        num, title: e.name.replace(/\.txt$/i, '').replace(/^\d{1,4}/, ''), body: body.trim(),
+        rel: path.relative(book.dir, fp).replace(/\\/g, '/'), words: hanziCount(body),
+      });
+    }
+  };
+  walk(path.join(book.dir, 'chapters'));
+  return out.sort((a, b) => a.num - b.num);
+}
+
+// 按作者这一段情节连写 3–5 章（可见窗口模式）：开/复用窗口 → 注入 → 轮询到"写完不再增加" → 排版矫正 → 读回。
+export async function writeChaptersFromPlot({ book, model, plot, useLastEnding = true, cfg, onLog = () => {} }) {
+  book = getBook(book.slug) || book;
+  const pt = String(plot || '').trim();
+  if (!pt) throw new Error('请先写「这一段的故事情节」——本书没有大纲，剧情以你给的这段为准。');
+  if (!isCowriteModel(model)) throw new Error('需 claude / codex（或 gemini / qwen）CLI；当前：' + model);
+
+  const before = bookStats(book).chapters;
+  const startNum = (lastChapterTail(book, 0).num || 0) + 1;
+  const instruction = buildPlotBatchInstruction(book, startNum, pt, useLastEnding);
+
+  const alive = await sessionAgentAlive(book.slug, cfg).catch(() => false);
+  if (alive) {
+    onLog({ level: 'act', msg: `按你这段情节连写 ${BATCH_MIN}–${BATCH_MAX} 章：向已开的 AI 窗口注入（从第 ${startNum} 章起）…` });
+    await sendToBook(book.slug, instruction, cfg);
+  } else {
+    onLog({ level: 'act', msg: `按你这段情节连写 ${BATCH_MIN}–${BATCH_MAX} 章：打开 Unterm 窗口（${getModel(model)?.name || model}），从第 ${startNum} 章起（你能看着它写）…` });
+    await startWriting({ book, model, instruction, cfg, attachAutopilot: true, autopilotConfirmOnly: true, onLog: (e) => onLog({ ...e }) });
+  }
+
+  // 轮询：一批 3–5 章比单章久得多 → 超时给到单章的 3 倍。判定这一批写完：
+  //   ① 已写满 BATCH_MAX 章；② 已够 BATCH_MIN 章且 90s 没有新章落盘（AI 停在窗口里等下一段情节）；
+  //   ③ 不足 BATCH_MIN 但"够写一整章的时间"都没有新章 → 它是真停了（情节太小/被中断），别干等到总超时。
+  const chapterMs = cwTimeout(model, 'chapter');
+  const timeoutMs = chapterMs * 3;
+  const deadline = Date.now() + timeoutMs;
+  let seen = before, lastGrow = Date.now();
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 5000));
+    const now = bookStats(getBook(book.slug) || book).chapters;
+    if (now > seen) {
+      seen = now; lastGrow = Date.now();
+      onLog({ level: 'info', msg: `  …已落盘 ${seen - before} 章` });
+    }
+    const got = seen - before;
+    const idle = Date.now() - lastGrow;
+    if (got >= BATCH_MAX) break;
+    if (got >= BATCH_MIN && idle > 90000) break;
+    if (got >= 1 && idle > chapterMs) break;
+  }
+  const got = seen - before;
+  if (!got) throw new Error(`等 AI 写这一批超时（${Math.round(timeoutMs / 60000)} 分钟没有任何新章落盘）。可到窗口看看它卡在哪，或重试；claude 较慢可换 codex。`);
+  if (got < BATCH_MIN) onLog({ level: 'warn', msg: `只写出 ${got} 章（少于 ${BATCH_MIN} 章）就停了——可能情节量太小或被中断，正文已保留。` });
+
+  await new Promise(r => setTimeout(r, 4000));   // 让最后一章写完整再读
+  const chapters = readChaptersFrom(getBook(book.slug) || book, startNum);
+  if (!chapters.length) throw new Error('章数增加了但没读到新章文件（可去窗口核对）');
+  const endNum = chapters[chapters.length - 1].num;
+  // 写后强制排版矫正：治「……」雪球 + 逐句换行（不靠模型自觉）
+  try {
+    const dr = deslopRange(book.dir, startNum, endNum, onLog);
+    if (dr && dr.touched) { for (const c of chapters) { try { c.body = fs.readFileSync(path.join(book.dir, c.rel), 'utf8').trim(); } catch {} } }
+  } catch (e) { onLog({ level: 'warn', msg: '排版矫正跳过：' + e.message }); }
+  onLog({ level: 'act', msg: `  ✓ 这一段已写成 ${chapters.length} 章（第 ${startNum}–${endNum} 章，约 ${chapters.reduce((s, c) => s + c.words, 0)} 字）` });
+  return { chapters, startNum, endNum, count: chapters.length, model, windowMode: true };
 }
 
 // 清洗“出主意”文本：去 CLI 回显的 prompt/元信息，保留建议正文。

@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol } from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol } from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll, getModel } from './models.mjs';
@@ -19,11 +19,11 @@ import { runStateless } from './statelessWriter.mjs';
 import { runWebWrite, getAdapter } from './webwriter.mjs';
 import { runApiWrite, isApiProvider } from './apiwriter.mjs';
 import { API_PROVIDERS, providerConfigured } from './apichat.mjs';
-import { brainstorm, writeChapterInWindow, isCowriteModel, COWRITE_MODELS } from './cowrite.mjs';
+import { brainstorm, writeChapterInWindow, writeChaptersFromPlot, isCowriteModel, COWRITE_MODELS } from './cowrite.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
-import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
+import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction } from './editor.mjs';
@@ -774,7 +774,10 @@ async function api(p, req, res, u) {
         try { styleInput = await recommendStyle({ theme: body.theme || body.genre, model: body.model || cfg.defaultModel }, cfg); }
         catch { styleInput = null; }
       }
-      try { book = createBook({ title: body.title, genre: body.theme || body.genre, model: body.model, totalWords: body.words, volumes: body.volumes || '', style: styleInput }, cfg); }
+      // 探索式(freehand)：只给写作手法、全书不出任何大纲，剧情由作者逐段给。必须在建书前定下来——
+      // scaffold 要据它决定 bible 模板、是否铺卷01大纲模板、AGENTS.md 里的大纲闸。
+      const freehand = body.freehand === true || body.discovery === true || body.planMode === 'discovery' || body.planMode === 'freehand';
+      try { book = createBook({ title: body.title, genre: body.theme || body.genre, model: body.model, totalWords: body.words, volumes: body.volumes || '', style: styleInput, planMode: freehand ? 'freehand' : 'compass' }, cfg); }
       catch (e) { return json(res, 400, { error: e.message }); }
       // 立项时选择参与度；startWriting 会据 book.writeMode/reviewEvery 播种运行时审核开关
       if (body.participation != null) {
@@ -796,8 +799,12 @@ async function api(p, req, res, u) {
         }
         pushLog(book.slug, { level: 'act', msg: `网页版模型立项：用本地 ${launchModel} 只搭 设定+大纲（不写正文），正文随后用网页版续写` });
       }
-      // 共创版立项：只搭设定 + 全书罗盘(每卷一行走向)，绝不细化章节/写正文——之后逐卷共创。作者可指定角色。
-      const instruction = buildCompassKickoffInstruction(book, body.theme || body.genre, body.words, body.volumes, body.characters);
+      // 探索式：立项只定"怎么写"（写作手法+主角名+故事概述），不出罗盘、不出任何大纲。否则走共创版粗罗盘立项。
+      try { setBookPlanMode(book.slug, freehand ? 'freehand' : 'compass'); } catch {}
+      const instruction = freehand
+        ? buildFreehandKickoffInstruction(book, body.theme || body.genre, body.words, body.characters)
+        : buildCompassKickoffInstruction(book, body.theme || body.genre, body.words, body.volumes, body.characters);
+      if (freehand) pushLog(book.slug, { level: 'info', msg: '🌱 探索式立项：圣经只写【写作手法 + 主角名 + 故事概述】，不出全书大纲、不出卷大纲——剧情你一段一段给，AI 自拆 3–5 章' });
       rtOf(book.slug).logs = [];
       try {
         const session = await startWriting({ book, model: launchModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
@@ -890,6 +897,7 @@ async function api(p, req, res, u) {
       // 本卷共创：让 AI 据【全书罗盘该卷走向 + 设定 + 上一卷卷末】拟这一卷的章级大纲草案，返回文本供作者审改（不落盘）。
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        if (book.planMode === 'freehand') return json(res, 400, { error: '本书是【探索式】：全书不建任何大纲。请在「🤝 我来主笔」里一段一段给情节，AI 会据每段自拆 3–5 章。' });
         const volNum = Math.max(1, parseInt(body.volume, 10) || 1);
         let bibleBrief = '', compass = '', prevEnding = '';
         try { bibleBrief = fs.readFileSync(path.join(book.dir, 'novel_bible.md'), 'utf8').slice(0, 4000); } catch {}
@@ -905,10 +913,12 @@ async function api(p, req, res, u) {
           const last = files[files.length - 1]; if (last) prevEnding = fs.readFileSync(last, 'utf8').slice(-1200);
         } catch {}
         let cpv = 0; try { cpv = chaptersPerVol(book); } catch {}
-        const prompt = buildVolumePlanPrompt(book, volNum, { bibleBrief, compass, prevEnding, cpv });
+        const authorDirection = String(body.direction || '').trim();   // 作者给的本卷走向（探索式主导架构；罗盘式可留空）
+        const prompt = buildVolumePlanPrompt(book, volNum, { bibleBrief, compass, prevEnding, cpv, authorDirection });
         const model = resolveGenModel(body.model || book.model || cfg.defaultModel) || body.model || book.model || cfg.defaultModel;
         pushLog(book.slug, { level: 'act', msg: `本卷共创：AI 正在据罗盘拟【第 ${volNum} 卷】章级大纲草案…`, source: 'cowrite' });
-        const raw = runModelOnce(model, prompt, cfg, 240000) || '';
+        // 慢环境实测：一卷章级大纲约 231s，卡在旧的 240s 上限边缘→动辄超时"拟稿失败"。给到 600s 留足余量。
+        const raw = runModelOnce(model, prompt, cfg, 600000) || '';
         const clean = raw.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').trim();
         if (clean.length < 40) return json(res, 500, { error: 'AI 拟稿太短，请重试或换模型' });
         const rel = `outlines/卷${String(volNum).padStart(2, '0')}分章大纲.md`;
@@ -1232,6 +1242,18 @@ async function api(p, req, res, u) {
         if (!isCowriteModel(model)) return json(res, 400, { error: '共创模式请用 claude 或 codex（也可 gemini/qwen）。当前模型：' + model });
         const r = await writeChapterInWindow({
           book, model, intent: body.intent, useLastEnding: body.useLastEnding !== false, redoLast: !!body.redoLast, cfg,
+          onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
+        });
+        return json(res, 200, { ok: true, ...r });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/cowrite-batch') {   // 探索式·按作者这一段情节连写：AI 自拆 3–5 章并逐章落盘
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const model = body.model || book.model || cfg.defaultModel;
+        if (!isCowriteModel(model)) return json(res, 400, { error: '请用 claude 或 codex（也可 gemini/qwen）。当前模型：' + model });
+        const r = await writeChaptersFromPlot({
+          book, model, plot: body.plot, useLastEnding: body.useLastEnding !== false, cfg,
           onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
         });
         return json(res, 200, { ok: true, ...r });
