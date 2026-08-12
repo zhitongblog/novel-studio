@@ -171,13 +171,18 @@ export class Autopilot {
     // 用于共创窗口模式——作者主导每一章，AI 写完这一章就停在那，等作者读完再给下一章要求。
     // （上面的提问应答已处理；这里没有提问=空闲，直接返回，不走下面的续写/完本/审稿逻辑。）
     if (this.opt.confirmOnly) {
-      this.prevScreen = screen;
       // 任务干完（连续空闲、不忙）就【自动完成】：回调收窗 + 转"写作完成"。要不要继续是作者的事，不挂着"写作中"。
+      // ⚠️血泪教训：只看 status.busy 会误杀【长思考任务】——立项写整本 bible 要 ~8 分钟，思考期 status 常报 not-busy，
+      // 15s(旧默认5拍×3s)就被当"干完"收窗，bible 一个字没写就没了(用户："圣经生成失败")。
+      // 修法：必须【不忙 且 屏幕也不再变】才算真空闲——claude 思考期的 spinner/流式会不断刷新屏幕，据此判定它还在干活。
+      const changed = this.prevScreen !== null && screen !== this.prevScreen;
+      this.prevScreen = screen;
       let cbusy = false;
       try { const st = await this.mcp.status(this.paneId); cbusy = st?.busy ?? st?.is_busy ?? (st?.state === 'busy') ?? false; } catch {}
-      if (cbusy) { this._doneIdle = 0; return; }
+      if (cbusy || changed) { this._doneIdle = 0; return; }   // 忙 或 屏幕还在动(思考中) → 没干完，清零
       this._doneIdle = (this._doneIdle || 0) + 1;
-      if (this.sawAgentRunning && this._doneIdle >= (this.opt.confirmDoneIdle || 5)) {
+      // 默认 40 拍×3s = 120s【既不忙又屏幕不动】才收窗，给慢环境的长思考留足余量，绝不打断在写的窗口。
+      if (this.sawAgentRunning && this._doneIdle >= (this.opt.confirmDoneIdle || 40)) {
         this.running = false;
         this.log('✅ 本次任务完成，自动收起窗口', 'act');
         try { this.opt.onDone && this.opt.onDone('任务完成'); } catch {}
