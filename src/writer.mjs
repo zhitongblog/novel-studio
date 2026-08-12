@@ -13,13 +13,40 @@ import { refreshContext } from './scaffold.mjs';
 import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision, reviewEnding, buildEndingRenudgeInstruction } from './editor.mjs';
 import { buildFinaleInstruction, buildAfterwordInstruction } from './planner.mjs';
 import { setPending, hasPending, getReviewEvery, setReviewEvery, setReviewDefault, takeResume } from './pending.mjs';
-import { saveSession, removeSession } from './sessions.mjs';
+import { saveSession, removeSession, listSessions } from './sessions.mjs';
 import { recordUsage, currentContextSize } from './usage.mjs';
 import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFolders, clearFlatImport, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { runFinaleClosure } from './finale.mjs';
 
 const IS_WIN = process.platform === 'win32';
+
+const normDir = (p) => String(p || '').replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
+
+// 找出【属于某本书目录】的活实例（用于开窗前清掉孤儿窗口）。
+// ⚠️ Unterm ≥0.61 起，instances/*.json 里的 cwd/profile 字段恒为 null —— 老写法「按 json 的 cwd 匹配」
+// 永远匹配不到，等于这道去重保护静默失效（同一本书可能开出两个窗口抢写同一章）。
+// 新做法：json 的 cwd 有值就先用（老版本兼容）；否则连上每个实例的 MCP，看它的 pane 的 shell.cwd
+// 是不是这本书的目录 —— 这是 0.61 下唯一可靠的归属判据。连不上/超时的实例一律跳过（宁可不杀，绝不错杀）。
+export async function instancesForBookDir(dir, selfSlug) {
+  const want = normDir(dir);
+  // 别碰【别的书正在用的】实例：那是引擎在驱动的活窗口，不是孤儿。
+  const busyElsewhere = new Set(listSessions().filter(s => s.slug !== selfSlug).map(s => s.instanceId));
+  const out = [];
+  for (const inst of listInstances()) {
+    if (busyElsewhere.has(inst.id)) continue;
+    if (normDir(inst.cwd) === want) { out.push(inst); continue; }   // 老版本：json 里就有 cwd
+    if (inst.cwd) continue;                                          // 有 cwd 但不是这本 → 明确不是
+    let mcp = null;
+    try {
+      mcp = await connectInstance(inst, {});
+      const panes = await mcp.sessionList();
+      if (panes.some(p => normDir(p?.shell?.cwd) === want)) out.push(inst);
+    } catch {}
+    finally { try { mcp?.close?.(); } catch {} }
+  }
+  return out;
+}
 
 // 生成启动脚本：设代理环境、cd 到书目录、启动 agent 带初始指令。
 // Windows → launch.ps1（pwsh）；macOS/Linux → launch.sh（POSIX sh）。
@@ -107,8 +134,7 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   // 【去重】startWriting 只在会话已死/探不到时才走到这（doWrite/resume 已判过 sessionLive）——此时该书目录若还残留活窗口，
   // 就是引擎驱动不了的"孤儿窗口"（会 sentinel 卡死、又抢写同一本撞章）。开新窗口前先把它们杀掉，保证一本书只有一个受控窗口。
   try {
-    const normDir = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase();
-    const orphans = listInstances().filter(i => normDir(i.cwd) === normDir(book.dir));
+    const orphans = await instancesForBookDir(book.dir, book.slug);
     for (const inst of orphans) {
       onLog({ level: 'warn', msg: `发现《${book.title}》残留孤儿窗口 ${inst.id}(pid ${inst.pid})，引擎未在驱动 → 关闭，避免开出重复窗口抢写` });
       try { killProcess(inst.pid); } catch {}

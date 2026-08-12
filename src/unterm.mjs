@@ -18,14 +18,22 @@ function whichBin(name) {
   return null;
 }
 
-// 读某个 unterm 二进制的版本（格式 "unterm 20260620-092052-hash"），取可比较的时间戳串。
+// 读某个 unterm 二进制的版本（格式 "unterm 20260620-092052-hash" 或 "unterm-cli 0.61.1"），取可比较的版本串。
+// ⚠️ Unterm ≥0.61 的 GUI 二进制【忽略一切命令行参数】——直接 `unterm.exe --version` 不会打印版本，
+// 而是弹出一个空窗口（4s 后被 timeout 杀掉），既拿不到版本、又给用户凭空开窗。故版本一律问同目录的
+// unterm-cli（真 CLI，秒回、不开窗）；只有没有 CLI 时才退回问 GUI 自己。
 export function untermVersion(bin) {
   try {
-    const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 4000 });
+    let probe = bin;
+    if (!/unterm-cli(\.exe)?$/i.test(bin)) {
+      const sib = path.join(path.dirname(bin), IS_WIN ? 'unterm-cli.exe' : 'unterm-cli');
+      if (fs.existsSync(sib)) probe = sib;
+    }
+    const r = spawnSync(probe, ['--version'], { encoding: 'utf8', timeout: 4000 });
     if (r.status === 0) {
       const s = (r.stdout || '').trim();
       const m = s.match(/(\d{8}-\d{6}-[0-9a-f]+)/);   // 日期时间串，可按字典序比较新旧
-      return m ? m[1] : s;
+      return m ? m[1] : s.replace(/^unterm(-cli)?\s+/i, '');   // 新版是语义版本 "0.61.1"
     }
   } catch {}
   return '';
@@ -158,24 +166,45 @@ export function winShell() {
 }
 
 // spawn 一个绑定 profile 的新 Unterm 实例，运行启动脚本。detached，不阻塞。
-// 返回 child pid。随后用 waitForNewInstance() 定位它的 mcp_port/token。
+// 返回 child pid（注意：走 unterm-cli 时这是 CLI 自己的 pid、不是实例 pid）。随后用
+// waitForNewInstance() 定位实例的 mcp_port/token —— 它会回退到"新出现的 pid"匹配，不依赖这个 pid。
 // Windows：pwsh/powershell -NoExit -File launch.ps1；macOS/Linux：登录 shell source launch.sh 后保持交互
 //（mirror -NoExit，让 agent 退出后窗口停在 shell 提示符，autopilot 据此判定停止）。
+//
+// ⚠️【Unterm ≥0.61 的破坏性变更，血泪】命令行面全部搬到了 unterm-cli，GUI 二进制
+// （unterm.exe）现在【忽略一切参数】，只会 WARN "ignoring unrecognised argument" 然后开一个空窗口：
+// 老写法 `unterm --profile P start --always-new-process --cwd D -e pwsh -File launch.ps1` 的
+// -e / launch.ps1 全被丢掉 → 窗口是起来了、但 agent 从没被拉起，表现为"立项建完书就没动静""未能定位到新实例"。
+// 新写法：`unterm-cli start --profile P --cwd D -- <程序> <参数...>`（首段命令放在 `--` 之后）。
 export function spawnInstance({ profile, cwd, launchScript }) {
+  const cliBin = findUntermCli();
   const exe = findUntermExe();
-  if (!exe) throw new Error('未找到 unterm 可执行文件（设 UNTERM_EXE 或装到 ~/.local/bin / Program Files）');
-  const args = [];
-  if (profile) args.push('--profile', profile);
-  args.push('start', '--always-new-process', '--cwd', cwd, '-e');
+  if (!cliBin && !exe) throw new Error('未找到 unterm 可执行文件（设 UNTERM_EXE / UNTERM_CLI，或装到 ~/.local/bin / Program Files）');
+  // 首段命令（新旧两种调用方式共用）
+  let cmd;
   if (IS_WIN) {
-    args.push(winShell(), '-NoLogo', '-NoExit', '-File', launchScript);
+    cmd = [winShell(), '-NoLogo', '-NoExit', '-File', launchScript];
   } else {
     const shell = process.env.SHELL || '/bin/zsh';
     const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
     // source 脚本(运行 agent，前台)，agent 退出后落到交互 shell 保持窗口存活
-    args.push(shell, '-l', '-c', `source ${q(launchScript)}; exec ${q(shell)} -i`);
+    cmd = [shell, '-l', '-c', `source ${q(launchScript)}; exec ${q(shell)} -i`];
   }
-  const child = spawn(exe, args, {
+  let bin, args;
+  if (cliBin) {
+    bin = cliBin;
+    args = ['start'];
+    if (profile) args.push('--profile', profile);
+    if (cwd) args.push('--cwd', cwd);
+    args.push('--', ...cmd);
+  } else {
+    // 没装 unterm-cli 的老环境：退回旧 GUI 调用方式
+    bin = exe;
+    args = [];
+    if (profile) args.push('--profile', profile);
+    args.push('start', '--always-new-process', '--cwd', cwd, '-e', ...cmd);
+  }
+  const child = spawn(bin, args, {
     detached: true,
     stdio: 'ignore',
     windowsHide: false,
