@@ -202,7 +202,14 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
   if (fm.pageInvalid || fm.error) {
     return { ok: false, blocked: true, reason: fm.error || '番茄页面无效', fanqieMax: null, localMax: loadPublishChapters(book).length, newCount: 0 };
   }
-  const fanqieMax = fm.maxChapter || 0;
+  const fqRead = Number.isFinite(Number(fm.maxChapter)) ? Number(fm.maxChapter) : 0;   // 防 "NaN" 脏值毒化 floor
+  // 🛡️高水位保护：番茄不可能比"我们已经发到的最高章"更少。多卷书若最新卷的【待发布/定时】章
+  // 没被章节表读到(排期章渲染方式不同/被审核状态过滤)，实时读会回退到上一卷的已发布最大号→偏低→
+  // 会把已排期章当新章重复发布。用 publishedMax 兜底，取二者较大者作为真正的"番茄已到"。
+  const floor = pc.publishedMax || 0;
+  const fanqieMax = Math.max(fqRead, floor);
+  const floored = floor > fqRead;
+  if (floored) onLog({ level: 'warn', msg: `⚠️ 番茄实时只读到第 ${fqRead} 章，但记录显示已发到第 ${floor} 章(疑似最新卷的待发布章未读到)——按第 ${floor} 章兜底，避免重复发布` });
   const all = loadPublishChapters(book);
   // 🛡️兜底：这本以前发布过(lastPublishAt>0)，番茄却读到 0 章 → 几乎必是读取异常/页面没加载完，
   // 绝不从第1章把已发章重发 → 阻断并提示重试。
@@ -228,7 +235,7 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
   }
   const sched = resolveSchedule(pc, fm.latestDate);
   return {
-    ok: true, fanqieMax, approx: !!fm.approx, localMax,
+    ok: true, fanqieMax, fanqieRead: fqRead, floored, approx: !!fm.approx, localMax,
     newCount: newCh.length, from: newCh[0]?.num || null, to: newCh[newCh.length - 1]?.num || null,
     titles: newCh.slice(0, 5).map(c => c.title),
     rewrittenCount: rewritten.length, rewrittenNums: rewritten.slice(0, 8).map(c => c.num),
@@ -264,7 +271,11 @@ export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}
     onLog({ level: 'error', msg: `⛔ 已中止发布：无法确认番茄当前章号（${fm.error || '页面无效'}）。请确认该账号能正常打开番茄章节管理页后再发，避免重复发布。` });
     return { ok: false, blocked: true, reason: fm.error || '番茄页面无效', published: 0 };
   }
-  const fanqieMax = fm.maxChapter || 0;
+  const fqRead = Number.isFinite(Number(fm.maxChapter)) ? Number(fm.maxChapter) : 0;   // 防 "NaN" 脏值毒化 floor
+  // 🛡️高水位保护(与 previewPublish 同)：番茄不可能比"我们已发到的最高章"更少。
+  const floor = pc.publishedMax || 0;
+  const fanqieMax = Math.max(fqRead, floor);
+  if (floor > fqRead) onLog({ level: 'warn', msg: `⚠️ 番茄实时只读到第 ${fqRead} 章，但记录已发到第 ${floor} 章(疑似最新卷待发布章未读到)——按第 ${floor} 章兜底，从第 ${floor + 1} 章续发，避免重复` });
   const all = loadPublishChapters(book);
   // 🛡️兜底：以前发布过却读到番茄 0 章 → 疑似读取异常，绝不从第1章重发，直接中止提示重试。
   if (fanqieMax === 0 && (pc.lastPublishAt || 0) > 0) {
@@ -367,8 +378,15 @@ export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}
   // 发布成功后记账：记录本次发布时间(用于下次识别重写章)与已发到的章号
   if (r.ok) {
     try {
-      const newMax = Math.max(fanqieMax, r.lastChapter || 0, ...(newCh.map(c => c.num)));
-      setBookPublish(book.slug, { lastPublishAt: Date.now(), publishedMax: newMax });
+      // 单调不回退 + 防脏值：所有候选强制转数字、剔除 NaN/非有限值，取最大。
+      // 血泪教训——曾有一路读到的 maxChapter 是字符串 "NaN"，"NaN"||0 仍是真值，
+      // Math.max 出 NaN，JSON.stringify(NaN)=null → publishedMax 被写成 null，floor 保护失效、起始章号又选低。
+      const cands = [fanqieMax, pc.publishedMax, r.lastChapter, ...newCh.map(c => c.num)]
+        .map(Number).filter(Number.isFinite);
+      const newMax = cands.length ? Math.max(...cands) : 0;
+      const patch = { lastPublishAt: Date.now() };
+      if (Number.isFinite(newMax) && newMax > 0) patch.publishedMax = newMax;   // 只写正有限数；绝不写 null/NaN、绝不降
+      setBookPublish(book.slug, patch);
     } catch {}
   }
   return { ok: !!r.ok, fanqieMax, attempted: chapters.length, edited: editCh.length, ...r };
