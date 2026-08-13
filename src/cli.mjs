@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig, updateConfig } from './config.mjs';
 import { createBook, listBooksWithStats, getBook } from './books.mjs';
 import { detectAll, getModel } from './models.mjs';
-import { findUntermExe, findUntermCli, untermVersion, listInstances, readProxyConfig, resolveProxyNode } from './unterm.mjs';
+import { findUntermExe, findUntermCli, untermVersion, listInstances, readProxyConfig, resolveProxyNode, sharesGlobalPaneNamespace } from './unterm.mjs';
 import { startWriting } from './writer.mjs';
 import { listSessions, sendToBook, streamBook, stopBook, attachAutopilot, sampleTokens } from './attach.mjs';
 import { loadUsage, bookUsage, fmtTokens } from './usage.mjs';
@@ -59,6 +59,9 @@ function doctor() {
   line('Unterm CLI', cli || '未找到', !!cli);
   const inst = listInstances();
   line('运行中实例', inst.length ? inst.map(i => `${i.id}(v${i.version})`).join(', ') : '无', true);
+  // Unterm ≥0.65：所有窗口共用一个 MCP 端口，pane 编号是全机器的 —— 出问题时这一行最能说明状况
+  const shared = sharesGlobalPaneNamespace();
+  if (shared !== null) line('pane 命名空间', shared ? '全机器共用（0.65+）：按 shell.cwd 认本书的 pane' : '按窗口独立（旧版）', true);
   const proxy = readProxyConfig();
   line('代理配置', proxy ? `${proxy.enabled ? '启用' : '禁用'} ${proxy.http_proxy || ''} 节点=${proxy.current_node}` : '无', !!proxy);
   console.log(hr());

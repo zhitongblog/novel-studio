@@ -71,16 +71,44 @@ export function findUntermCli() {
   return (_cliCache = whichBin(IS_WIN ? 'unterm-cli.exe' : 'unterm-cli') || exe);
 }
 
-// 跨平台结束一个进程（Windows 用 taskkill 杀进程树；POSIX 用信号，先 TERM 后 KILL）。
-export function killProcess(pid) {
+// 跨平台结束一个进程，先 TERM 后 KILL。
+// ⚠️【Unterm ≥0.65 的连坐陷阱】0.65 把 MCP/pty 搬进了独立的 unterm-core.exe，而 core 是【最早那个 GUI 窗口的
+// 子进程】、却给全机器所有窗口服务（实测：core pid 的 ParentProcessId = 第一个 unterm.exe）。对 GUI pid 用
+// `taskkill /T`（POSIX 杀进程组同理）会顺手带走 core → 所有书的窗口集体失联。
+// 故这里默认【只杀这一个进程】；确实要连子进程一起杀时显式传 { tree: true }。
+export function killProcess(pid, { tree = false } = {}) {
   if (pid == null) return false;
   if (IS_WIN) {
-    try { spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { encoding: 'utf8' }); return true; }
+    const args = tree ? ['/PID', String(pid), '/T', '/F'] : ['/PID', String(pid), '/F'];
+    try { spawnSync('taskkill', args, { encoding: 'utf8' }); return true; }
     catch { return false; }
   }
-  // POSIX：spawnInstance 用 detached 起的是新进程组，优先杀进程组（负 pid），失败再杀单进程。
-  try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch {} }
-  setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} } }, 1500).unref?.();
+  const sig = (target, s) => { try { process.kill(target, s); return true; } catch { return false; } };
+  // tree 时才杀进程组（负 pid，spawnInstance 用 detached 起的是新进程组）
+  if (tree) { if (!sig(-pid, 'SIGTERM')) sig(pid, 'SIGTERM'); } else sig(pid, 'SIGTERM');
+  setTimeout(() => {
+    if (tree) { if (!sig(-pid, 'SIGKILL')) sig(pid, 'SIGKILL'); } else sig(pid, 'SIGKILL');
+  }, 1500).unref?.();
+  return true;
+}
+
+// 收起一个写作窗口（本书自己的窗口，正常收尾/停止时用）。
+// ⚠️ 0.65 起窗口进程不再是 agent 的父进程 —— pty 归 unterm-core 管，只杀窗口 pid 可能留下一个还在
+// 烧 token 的 agent 进程；而 taskkill /T 又会连坐 core（见 killProcess）。所以顺序是：
+// 先 session.destroy 把 pane 关掉（agent 随之退出），再杀窗口进程（不带 /T）。
+// 传入 { id, mcp_port, auth_token, pid, pane }（会话记录/实例记录都能直接喂）。
+export async function closeWindow({ id, mcp_port, auth_token, pid, pane }) {
+  if (pane != null && mcp_port) {
+    let mcp = null;
+    try {
+      const { connectInstance } = await import('./mcpclient.mjs');
+      mcp = await connectInstance({ id, mcp_port, auth_token }, {});
+      await mcp.destroyPane(pane);
+      await new Promise(r => setTimeout(r, 600));   // 给 agent 一点退出时间
+    } catch {}
+    finally { try { mcp?.close?.(); } catch {} }
+  }
+  try { killProcess(pid); } catch {}
   return true;
 }
 
@@ -139,8 +167,23 @@ export function listInstances() {
         try { return JSON.parse(fs.readFileSync(path.join(UNTERM_INSTANCES_DIR, f), 'utf8')); }
         catch { return null; }
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      // Unterm ≥0.65 的注册表里可能出现非 GUI 角色的条目（core / mcp_bridge）——那不是"窗口"，
+      // 混进来会被当成孤儿窗口误杀。老版本没这个字段，一律放行。
+      .filter(i => !i.process_role || i.process_role === 'gui');
   } catch { return []; }
+}
+
+// Unterm ≥0.65：所有窗口【共用同一个 mcp_port 和同一个 auth_token】（core 是单例），
+// 连任一实例的端口，session.list 返回的都是【全机器所有 pane】，且传 instance/instance_id 参数无效
+// （实测 instance.info{id} 也忽略 id）。meta.surface 自陈 "pane location metadata is synthetic until
+// next-core owns real GUI tabs/windows" —— 即当前【没有 pane→窗口的映射】。
+// 凡是"这个窗口里的 pane"这类假设，都必须改成按 pane 自身属性（shell.cwd / pane id 差集）来认。
+export function sharesGlobalPaneNamespace() {
+  const list = listInstances();
+  if (list.length < 2) return null;                     // 只有一个窗口时无从判断
+  const ports = new Set(list.map(i => i.mcp_port));
+  return ports.size === 1;
 }
 
 export function instanceIds() {

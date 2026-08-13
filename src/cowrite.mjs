@@ -22,7 +22,7 @@ import { startWriting } from './writer.mjs';
 import { sendToBook, sessionAgentAlive } from './attach.mjs';
 import { deslopRange } from './deslop.mjs';
 import { getSession, removeSession } from './sessions.mjs';
-import { killProcess } from './unterm.mjs';
+import { closeWindow } from './unterm.mjs';
 
 // 允许用于共创的模型：能忠实跟住作者具体指令、会写好文的强 CLI。排除弱/网页/API 免费模型。
 export const COWRITE_MODELS = ['claude', 'codex', 'gemini', 'qwen'];
@@ -378,7 +378,12 @@ export async function writeChaptersFromPlot({ book, model, plot, useLastEnding =
   if (!alive) {
     try {
       const s = getSession(book.slug);
-      if (s?.pid) { killProcess(s.pid); removeSession(book.slug); onLog({ level: 'act', msg: '这一批写完 → 已收起窗口（下一段情节会重新开窗，避免它自己接着写）' }); }
+      // 先关 pane 再杀窗口进程：0.65 起 agent 不是窗口进程的子进程，只杀窗口会留下一个还在接着写的 agent
+      if (s?.pid) {
+        await closeWindow({ id: s.instanceId, mcp_port: s.mcp_port, auth_token: s.auth_token, pid: s.pid, pane: s.pane });
+        removeSession(book.slug);
+        onLog({ level: 'act', msg: '这一批写完 → 已收起窗口（下一段情节会重新开窗，避免它自己接着写）' });
+      }
     } catch (e) { onLog({ level: 'warn', msg: '收窗失败（不影响已写的章）：' + e.message }); }
   }
 

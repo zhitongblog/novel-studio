@@ -90,6 +90,59 @@ export class UntermMcp {
     if (typeof r?.text === 'string') return r.text;
     return JSON.stringify(r);
   }
+  // 读屏并带回尺寸/非空行数：Unterm 0.65 首次连上时观测到过一次【1×1 空屏】的瞬时残缺读数
+  // （session.list 报 pane 1x1、screen.text 只有一个空行，数秒后自愈）。把它当"屏幕没变化"会让
+  // autopilot 误判空闲 → 提前收窗，故调用方需要能识别这种读数并跳过该拍。
+  async screenInfo(paneId) {
+    const r = await this.call('screen.text', this._target(paneId));
+    if (typeof r === 'string') return { text: r, rows: null, cols: null, nonEmpty: r.split(/\r?\n/).filter(l => l.trim()).length };
+    const lines = Array.isArray(r?.lines) ? r.lines : (typeof r?.text === 'string' ? r.text.split(/\r?\n/) : []);
+    return { text: lines.join('\n'), rows: r?.rows ?? null, cols: r?.cols ?? null, nonEmpty: lines.filter(l => String(l).trim()).length };
+  }
+
+  // —— Unterm 0.65 的权威状态信号（老版本没有 → 一律返回 null，调用方回退到屏幕启发式）——
+  // agent.status：pane 上 agent 的状态机 {state: working|waiting|idle|done}，由 agent 侧 hook 上报
+  //（实测 last_signal="hook"），比"猜屏幕上有没有 spinner"可靠得多：
+  //   working = 真的在干活（长思考也算，别再误判成"干完了"收窗）
+  //   waiting = 真的在等人（在问问题/等审批，才需要自动应答）
+  //   idle/done = 干完了（才轮到续写/收窗）
+  async agentStatus(paneId) {
+    if (this._noAgentStatus) return null;
+    try {
+      const r = await this.call('agent.status', { pane_id: paneId }, 8000);
+      if (!r || r.enabled === false) { this._noAgentStatus = true; return null; }
+      const a = r.agent || (Array.isArray(r.agents) ? r.agents.find(x => String(x.pane_id) === String(paneId)) : null);
+      if (!a) return null;   // 这个 pane 上没识别到 agent（不代表方法不存在，不要禁用）
+      return { state: a.state, agent: a.agent, forSecs: a.for_secs, lastSignal: a.last_signal, taskHint: a.task_hint };
+    } catch (e) {
+      if (e?.code === -32601) this._noAgentStatus = true;   // 老版本没这个方法
+      return null;
+    }
+  }
+
+  // session.idle：pane 的活动统计。output.total_bytes 是单调计数器——判"屏幕还在动"用它比每拍 diff 整屏
+  // 又便宜又准（不受光标闪烁/idle 占位符干扰，正是"屏幕永不稳定→审稿门永远触发不了"的解药）。
+  async sessionIdle(paneId) {
+    if (this._noSessionIdle) return null;
+    try {
+      const r = await this.call('session.idle', this._target(paneId), 8000);
+      if (!r) return null;
+      return {
+        idle: r.idle,
+        outBytes: r.output?.total_bytes ?? null,
+        inBytes: r.input?.total_bytes ?? null,
+        foreground: r.foreground_process || r.process?.foreground_argv?.[0] || '',
+        detectedAgent: r.process?.detected_agent || null,
+        childCount: r.process?.child_count ?? null,
+      };
+    } catch (e) {
+      if (e?.code === -32601) this._noSessionIdle = true;
+      return null;
+    }
+  }
+
+  async destroyPane(paneId) { return this.call('session.destroy', this._target(paneId), 8000); }
+
   // 0.22 实例要求键名为 input；reference 文档写的是 text。两者都带上。
   async input(paneId, text) { return this.call('session.input', { ...this._target(paneId), input: text, text }); }
   // 提交一段文字：先把文字打进输入框，停顿后再单独按回车。

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadBooks, upsertBook, getBook, slugify, newId, removeBook } from './store.mjs';
 import { scaffoldBook, refreshContext } from './scaffold.mjs';
-import { ensureProfile, cli, killProcess } from './unterm.mjs';
+import { ensureProfile, cli, closeWindow } from './unterm.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { getStyle } from './styles.mjs';
 
@@ -11,7 +11,14 @@ import { getStyle } from './styles.mjs';
 export function deleteBook(slugOrId, { deleteFiles = false } = {}) {
   const b = getBook(slugOrId);
   if (!b) throw new Error('找不到书：' + slugOrId);
-  try { const s = getSession(b.slug); if (s) { killProcess(s.pid); removeSession(b.slug); } } catch {}
+  // 收窗：先关 pane 再杀窗口进程（0.65 起 agent 不挂在窗口进程下）。不 await，删书流程照常同步返回。
+  try {
+    const s = getSession(b.slug);
+    if (s) {
+      closeWindow({ id: s.instanceId, mcp_port: s.mcp_port, auth_token: s.auth_token, pid: s.pid, pane: s.pane }).catch(() => {});
+      removeSession(b.slug);
+    }
+  } catch {}
   try { if (b.profile) cli(['profile', 'delete', b.profile, '--yes']); } catch {}
   removeBook(b.slug);
   let filesDeleted = false;

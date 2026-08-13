@@ -5,7 +5,7 @@ import path from 'node:path';
 import { getModel, detectModel } from './models.mjs';
 import {
   ensureProfile, spawnInstance, instancePids, waitForNewInstance,
-  resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess,
+  resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow,
 } from './unterm.mjs';
 import { connectInstance } from './mcpclient.mjs';
 import { Autopilot } from './autopilot.mjs';
@@ -23,29 +23,64 @@ const IS_WIN = process.platform === 'win32';
 
 const normDir = (p) => String(p || '').replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
 
-// 找出【属于某本书目录】的活实例（用于开窗前清掉孤儿窗口）。
-// ⚠️ Unterm ≥0.61 起，instances/*.json 里的 cwd/profile 字段恒为 null —— 老写法「按 json 的 cwd 匹配」
-// 永远匹配不到，等于这道去重保护静默失效（同一本书可能开出两个窗口抢写同一章）。
-// 新做法：json 的 cwd 有值就先用（老版本兼容）；否则连上每个实例的 MCP，看它的 pane 的 shell.cwd
-// 是不是这本书的目录 —— 这是 0.61 下唯一可靠的归属判据。连不上/超时的实例一律跳过（宁可不杀，绝不错杀）。
-export async function instancesForBookDir(dir, selfSlug) {
+// 清掉【属于某本书目录】的残留窗口/pane（开写前的去重保护）。
+// ⚠️ 两代破坏性变更叠加，老写法已经彻底不成立：
+//   0.61：instances/*.json 的 cwd/profile 恒为 null → "按 json 的 cwd 找窗口"永远匹配不到；
+//   0.65：所有窗口【共用一个 MCP 端口】，session.list 返回【全机器】的 pane，且没有 pane→窗口的映射
+//        （meta.surface 自陈 "pane location metadata is synthetic"）。于是"连上每个实例、看有没有 pane
+//        的 cwd 等于本书目录"会把【每一个】窗口都判成本书的孤儿 → 反手去杀别的书的窗口。
+// 新做法：归属只认 pane 自己的 shell.cwd，并且【按 pane 关】(session.destroy)，不再对窗口进程动手
+//（0.65 下杀窗口进程还有连坐 unterm-core 的风险，见 unterm.mjs 的 killProcess）。
+// 别的书正在驱动的 pane 一律跳过（那是活窗口，不是孤儿）。
+export async function closeBookOrphans(dir, selfSlug, onLog = () => {}) {
   const want = normDir(dir);
-  // 别碰【别的书正在用的】实例：那是引擎在驱动的活窗口，不是孤儿。
-  const busyElsewhere = new Set(listSessions().filter(s => s.slug !== selfSlug).map(s => s.instanceId));
-  const out = [];
+  const others = listSessions().filter(s => s.slug !== selfSlug);
+  const busyInstances = new Set(others.map(s => s.instanceId));
+  const busyPanes = new Set(others.filter(s => s.pane != null).map(s => String(s.pane)));
+  let panes = 0, windows = 0;
+
+  // ① 老版本（instances json 里真的带 cwd）：还能按窗口归属判 → 直接关窗口
   for (const inst of listInstances()) {
-    if (busyElsewhere.has(inst.id)) continue;
-    if (normDir(inst.cwd) === want) { out.push(inst); continue; }   // 老版本：json 里就有 cwd
-    if (inst.cwd) continue;                                          // 有 cwd 但不是这本 → 明确不是
+    if (busyInstances.has(inst.id)) continue;
+    if (inst.cwd && normDir(inst.cwd) === want) {
+      onLog({ level: 'warn', msg: `发现残留窗口 ${inst.id}(pid ${inst.pid})，引擎未在驱动 → 关闭` });
+      try { killProcess(inst.pid); windows++; } catch {}
+    }
+  }
+
+  // ② 0.61+：按 pane 的 shell.cwd 认归属。pane 列表是全局的，连上任意一个实例即可枚举全部。
+  for (const inst of listInstances()) {
     let mcp = null;
     try {
       mcp = await connectInstance(inst, {});
-      const panes = await mcp.sessionList();
-      if (panes.some(p => normDir(p?.shell?.cwd) === want)) out.push(inst);
+      const list = await mcp.sessionList();
+      for (const p of list) {
+        if (p.is_dead) continue;
+        if (busyPanes.has(String(p.id))) continue;
+        if (normDir(p?.shell?.cwd) !== want) continue;
+        onLog({ level: 'warn', msg: `发现残留 pane ${p.id}（cwd 指向本书目录、引擎未在驱动）→ 关闭，避免两个窗口抢写同一章` });
+        try { await mcp.destroyPane(p.id); panes++; } catch (e) { onLog({ level: 'warn', msg: `关闭 pane ${p.id} 失败：${e.message}` }); }
+      }
+      break;   // 端口/pane 命名空间是全局的，成功枚举过一次就够了
     } catch {}
     finally { try { mcp?.close?.(); } catch {} }
   }
-  return out;
+  return { panes, windows };
+}
+
+// spawn 之前把当前【全局】pane id 拍个快照，用于之后认出"新出现的那个 pane"。
+// 拿不到（一个实例都没有/连不上）就返回空集合——那种情况下所有 pane 都算新的，同样能认。
+export async function snapshotPaneIds() {
+  for (const inst of listInstances()) {
+    let mcp = null;
+    try {
+      mcp = await connectInstance(inst, {});
+      const list = await mcp.sessionList();
+      return new Set(list.map(p => String(p.id)));
+    } catch {}
+    finally { try { mcp?.close?.(); } catch {} }
+  }
+  return new Set();
 }
 
 // 生成启动脚本：设代理环境、cd 到书目录、启动 agent 带初始指令。
@@ -134,16 +169,15 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   // 【去重】startWriting 只在会话已死/探不到时才走到这（doWrite/resume 已判过 sessionLive）——此时该书目录若还残留活窗口，
   // 就是引擎驱动不了的"孤儿窗口"（会 sentinel 卡死、又抢写同一本撞章）。开新窗口前先把它们杀掉，保证一本书只有一个受控窗口。
   try {
-    const orphans = await instancesForBookDir(book.dir, book.slug);
-    for (const inst of orphans) {
-      onLog({ level: 'warn', msg: `发现《${book.title}》残留孤儿窗口 ${inst.id}(pid ${inst.pid})，引擎未在驱动 → 关闭，避免开出重复窗口抢写` });
-      try { killProcess(inst.pid); } catch {}
-    }
-    if (orphans.length) await new Promise(r => setTimeout(r, 1500));
+    const r = await closeBookOrphans(book.dir, book.slug,
+      (e) => onLog({ ...e, msg: `《${book.title}》${e.msg}` }));
+    if (r.panes + r.windows > 0) await new Promise(r2 => setTimeout(r2, 1500));
   } catch {}
 
   // spawn 新实例
   const beforePids = instancePids();
+  // 认 pane 的第一判据：spawn 之后【新出现】的那个 pane（0.65 起 pane 编号是全机器共用的）
+  const beforePaneIds = await snapshotPaneIds();
   onLog({ msg: `spawn 新 Unterm 实例（绑定 profile ${profileName}，cwd ${book.dir}）…` });
   const pid = spawnInstance({ profile: profileName, cwd: book.dir, launchScript: launch });
   onLog({ msg: `已启动 unterm 进程 pid=${pid}，等待实例注册…` });
@@ -165,7 +199,7 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   if (cfg.enableProxy) onLog({ msg: `代理已为会话注入环境变量：${proxyUrl() || '(未配置)'}` });
 
   // 找到 agent 所在 pane
-  const paneId = await waitForPane(mcp, 20000);
+  const paneId = await waitForPane(mcp, 20000, { beforePaneIds, cwd: book.dir });
   if (paneId == null) throw new Error('未找到 agent pane');
   onLog({ msg: `agent pane id=${paneId}` });
 
@@ -189,8 +223,10 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       onDone: () => {
         try { onLog({ level: 'act', source: 'autopilot', msg: '✅ 本次任务完成，已收起窗口（要不要继续由你定）' }); } catch {}
         try { removeSession(book.slug); } catch {}
-        try { mcp.close(); } catch {}
-        try { killProcess(instance.pid); } catch {}
+        // 先关 pane 再关窗口（0.65 下只杀窗口 pid 会留下还在跑的 agent），关完再断自己的连接
+        closeWindow({ id: instance.id, mcp_port: instance.mcp_port, auth_token: instance.auth_token, pid: instance.pid, pane: paneId })
+          .catch(() => {})
+          .finally(() => { try { mcp.close(); } catch {} });
       },
     });
     autopilot.start();
@@ -355,14 +391,29 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   return { instance, mcp, autopilot, paneId, pid };
 }
 
-async function waitForPane(mcp, timeoutMs) {
+// 认出刚开的窗口里那个 pane。
+// ⚠️【绝不能再取"第一个活 pane"】—— Unterm ≥0.65 的 session.list 是【全机器】的 pane 列表，
+// 第一个 pane 往往是【另一本书】的窗口：挂上去等于两个 autopilot 抢同一个窗口打字、新窗口没人驱动
+//（多本书并行写作直接串窗）。
+// 判据按可靠性排：① spawn 后新出现的 pane 且 shell.cwd == 本书目录（最强，两条独立证据）→
+// ② 新出现且全场只有它一个新 pane → ③ 只有它一个 pane 的 cwd 指向本书目录。都没有就返回 null，
+// 宁可报"未找到 agent pane"让上层重试，也不要挂错窗口。
+export async function waitForPane(mcp, timeoutMs, { beforePaneIds = new Set(), cwd = '' } = {}) {
+  const want = normDir(cwd);
   const deadline = performance.now() + timeoutMs;
+  let fallback = null;
   while (performance.now() < deadline) {
-    const ss = await mcp.sessionList().catch(() => []);
-    const alive = ss.filter(s => !s.is_dead);
-    if (alive.length) return alive[0].id;
+    const alive = (await mcp.sessionList().catch(() => [])).filter(s => !s.is_dead);
+    const fresh = alive.filter(s => !beforePaneIds.has(String(s.id)));
+    const matchCwd = (arr) => want ? arr.filter(s => normDir(s?.shell?.cwd) === want) : [];
+    const freshCwd = matchCwd(fresh);
+    if (freshCwd.length) return freshCwd[freshCwd.length - 1].id;                  // ①
+    if (fresh.length === 1 && !want) return fresh[0].id;                            // ② 没有目录可比时
+    if (fresh.length === 1) fallback = fallback ?? fresh[0].id;                     // ② 暂存，继续等 ①
+    const anyCwd = matchCwd(alive);
+    if (anyCwd.length === 1) fallback = fallback ?? anyCwd[0].id;                   // ③
     await sleep(500);
   }
-  return null;
+  return fallback;
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

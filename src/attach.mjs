@@ -1,7 +1,7 @@
 // 连接一个运行中的写作会话，做：穿插指令(send) / 实时镜像(watch) / 停止(stop)。
 // 每次都按会话描述符新建一条 MCP 连接（任意进程皆可），与启动它的进程互不依赖。
 import { connectInstance } from './mcpclient.mjs';
-import { killProcess } from './unterm.mjs';
+import { closeWindow } from './unterm.mjs';
 import { getSession, removeSession, listSessions } from './sessions.mjs';
 import { Autopilot } from './autopilot.mjs';
 import { recordUsage, parseTokens, currentContextSize } from './usage.mjs';
@@ -21,12 +21,20 @@ async function connect(sess, cfg) {
   return connectInstance(instanceOf(sess), { identifyAs: cfg?.untermAgentName || 'claude-code' });
 }
 
+const normDir = (p) => String(p || '').replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
+
+// 认这本书的 pane。
+// ⚠️【回退到"第一个活 pane"是致命的】—— Unterm ≥0.65 起所有窗口共用一个 MCP 端口，session.list 返回
+// 【全机器】的 pane：记录的 pane 一旦没了就顺手取第一个，等于把续写/穿插指令打进【另一本书】的窗口。
+// 正确判据：① 记录的 pane 还活着（pane id 全局唯一，够准）；② 否则只认 shell.cwd == 本书目录、
+// 且唯一的那个 pane；③ 都不满足就返回 null，让上层报错/重新开窗，绝不猜。
 async function resolvePane(mcp, sess) {
-  // 优先用记录的 pane；否则取第一个活 pane
-  const ss = await mcp.sessionList().catch(() => []);
-  const alive = ss.filter(s => !s.is_dead);
+  const alive = (await mcp.sessionList().catch(() => [])).filter(s => !s.is_dead);
   if (sess.pane != null && alive.some(s => String(s.id) === String(sess.pane))) return sess.pane;
-  return alive.length ? alive[0].id : null;
+  const dir = getBook(sess.slug)?.dir;
+  if (!dir) return null;
+  const byCwd = alive.filter(s => normDir(s?.shell?.cwd) === normDir(dir));
+  return byCwd.length === 1 ? byCwd[0].id : null;
 }
 
 // 穿插一条指令到正在写作的窗口
@@ -159,7 +167,9 @@ export async function sampleTokens(slug, cfg) {
 export function stopBook(slug) {
   const sess = getSession(slug);
   if (!sess) return { ok: false, reason: '无该会话' };
-  try { killProcess(sess.pid); } catch {}
+  // 先关 pane 再杀窗口进程（0.65 下 agent 不再是窗口进程的子进程，只杀窗口会留下还在跑的 agent）。
+  // 不 await：保持原来的同步签名，收窗在后台完成。
+  closeWindow({ id: sess.instanceId, mcp_port: sess.mcp_port, auth_token: sess.auth_token, pid: sess.pid, pane: sess.pane }).catch(() => {});
   removeSession(slug);
   return { ok: true, killed: sess.pid };
 }

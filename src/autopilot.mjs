@@ -30,10 +30,20 @@ export class Autopilot {
     if (opts.assumeStarted) { this.sawBusy = true; this.sawAgentRunning = true; }
     this.noAgentPolls = 0;          // 启动后仍是 shell 的连续次数
     this.shellAfterAgent = 0;       // agent 运行后又回到 shell 的连续次数
+    this._lastOutBytes = null;      // session.idle 的输出字节计数（单调），判"还在动"用
+    this._degradedLogged = false;   // 残缺读屏只提示一次
     this.stats = { approvals: 0, continues: 0, answers: 0 };
   }
 
   log(msg, level = 'info') { this.onLog({ level, msg, stats: { ...this.stats } }); }
+
+  // 调一个【可能不存在】的 MCP 便捷方法：老版本 Unterm 没有的方法、以及测试用的精简假 MCP，
+  // 都统一返回 null，让上面的逻辑走屏幕启发式回退，而不是抛 TypeError 把整个监控循环打瘸。
+  async _call(name, ...args) {
+    const f = this.mcp?.[name];
+    if (typeof f !== 'function') return null;
+    try { return await f.apply(this.mcp, args); } catch { return null; }
+  }
 
   async start() {
     this.running = true;
@@ -69,13 +79,34 @@ export class Autopilot {
     if (!pane) { this.stop('窗口/pane 已关闭'); return; }
     if (pane.is_dead) { this.stop('agent 进程已退出'); return; }
 
-    let screen = (await this.mcp.screenText(this.paneId).catch(() => '')) || '';
+    // —— Unterm 0.65 的权威信号（老版本/老客户端拿不到 → 一律 null，自动回退到下面的屏幕启发式）——
+    // agentState: working=真在干活(长思考也算) / waiting=真在等人 / idle|done=干完了；由 agent 侧 hook 上报。
+    // outBytes: pane 的累计输出字节，单调递增——判"还在动"比 diff 整屏更准（不受光标闪烁、idle 占位符干扰）。
+    const ag = await this._call('agentStatus', this.paneId);
+    const idleInfo = await this._call('sessionIdle', this.paneId);
+    const agentState = ag?.state || null;
+    const outBytes = idleInfo?.outBytes ?? null;
+    const bytesGrew = outBytes != null && this._lastOutBytes != null && outBytes > this._lastOutBytes;
+    if (outBytes != null) this._lastOutBytes = outBytes;
+    // detectedAgent 是"这个 pane 前台跑的是不是 AI CLI"的进程级判据，比屏幕正则可靠：
+    // true=在跑；false=明确没在跑；null=这版 Unterm 不提供，别下结论。
+    const agentPresent = idleInfo ? !!idleInfo.detectedAgent : null;
+
+    const scr = await this._call('screenInfo', this.paneId);
+    // ⚠️ 0.65 首连时观测到过瞬时的【1×1 空屏】残缺读数（数秒后自愈）。把它当"屏幕没变化"会一路累加
+    //    空闲计数 → confirmOnly 下提前收窗。这类读数整拍跳过：不更新 prevScreen、不计入任何稳定性判定。
+    if (scr && scr.rows != null && scr.rows <= 1 && scr.nonEmpty === 0) {
+      if (!this._degradedLogged) { this.log('读到 1×1 空屏（Unterm 瞬时状态）→ 跳过该拍，不计入空闲', 'warn'); this._degradedLogged = true; }
+      return;
+    }
+    let screen = scr ? scr.text : ((await this._call('screenText', this.paneId)) || '');
     // ⚠️ 窗口被【卷上去】时(底部出现 "Jump to bottom / ctrl+End ↓" 提示)，真正的提问(审批 Yes/No、菜单)在视口
     //    【下方】读不到 → 永远应答不了(圣女 csld 卡在 Yes/No 的直接原因之一)。故先跳到底部再读，且只在真卷屏时才跳、
     //    不打扰正常写作。用 Ctrl+End(xterm \x1b[1;5F)。
     if (/jump to bottom|ctrl\+end|按住.*到底部|↓\s*$/i.test(screen)) {
       try { await this.mcp.input(this.paneId, '\x1b[1;5F'); await sleep(300); screen = (await this.mcp.screenText(this.paneId).catch(() => '')) || screen; } catch {}
     }
+    const screenChanged = this.prevScreen !== null && screen !== this.prevScreen;
     // 用"非空行"的尾部：codex/claude 的 TUI 常把提问渲染在顶部、下面大片空行，
     // 若取最后 N 个原始行会全是空行 → 漏判提问。故过滤空行后再取尾部。
     const tail = screen.split(/\r?\n/).filter(l => l.trim()).slice(-40).join('\n');
@@ -117,12 +148,27 @@ export class Autopilot {
       return;
     }
 
-    // agent 在场检测（基于屏幕内容，比前台进程名可靠）：
-    // bypass 模式下 codex 会 spawn 子 shell 执行命令，进程名会变成 pwsh —— 但屏幕仍是 agent 的 TUI。
-    // 只有屏幕回到"裸 shell 提示符且无 agent TUI 标记"才算 agent 退出 → 绝不向裸 shell 注入指令。
+    // 【权威信号优先】agent.status 说它正在干活、且输出/屏幕确实还在动 → 这一拍什么都不做。
+    // 此刻屏幕上那些"像提问"的片段多半是流式输出的中间态，抢答就是在打断它（"要不要接着写"被回 y、
+    // 一夜滚出几十章那类事故的根）。只在【两个信号互相印证】时压制；万一 hook 状态滞后而屏幕已经静止，
+    // 照常走下面的屏幕启发式，绝不会因此卡死。
+    if (agentState === 'working' && (bytesGrew || screenChanged)) {
+      this.sawAgentRunning = true; this.sawBusy = true;
+      this.stableCount = 0; this._doneIdle = 0;
+      this.prevScreen = screen;
+      return;
+    }
+
+    // agent 在场检测：屏幕特征 + 进程级判据（detectedAgent）+ hook 状态，三者任一为正就算在场。
+    // bypass 模式下 codex 会 spawn 子 shell 执行命令，前台进程名会变成 pwsh —— 但屏幕仍是 agent 的 TUI。
+    // 只有"裸 shell 提示符 + 无 TUI 标记 + 进程级也看不到 agent"才算它退出 → 绝不向裸 shell 注入指令。
     const agentTui = /(esc to interrupt|tokens used|gpt-[0-9]|claude|gemini|❯|›|•\s*(running|working|ran|queued)|▌|\? for shortcuts|to interrupt|to view transcript|press enter)/i.test(tail);
-    const bareShell = !agentTui && /(^|\n)\s*(PS\s+)?[A-Za-z]:[\\/][^\n]*>\s*$/.test(tail.replace(/\s+$/, '') + '\n');
-    if (agentTui) {
+    const bareShell = !agentTui && agentPresent !== true && /(^|\n)\s*(PS\s+)?[A-Za-z]:[\\/][^\n]*>\s*$/.test(tail.replace(/\s+$/, '') + '\n');
+    // agentPresent（进程级）/ working·waiting（hook 级）都是"它还在"的正面证据，比屏幕正则可靠。
+    // ⚠️ 但 idle/done 不算：agent 退出后 hook 状态可能残留成 done，若据此认定"在场"，就会绕过下面
+    //    "回到裸 shell 就停手"的保护 → 把续写指令直接打进命令行。
+    const agentActive = agentState === 'working' || agentState === 'waiting';
+    if (agentTui || agentPresent === true || agentActive) {
       this.sawAgentRunning = true; this.noAgentPolls = 0; this.shellAfterAgent = 0;
     } else if (bareShell) {
       if (this.sawAgentRunning) {
@@ -149,7 +195,10 @@ export class Autopilot {
       this._lastPromptKind = pa.kind;
       const now = Date.now();
       const cooled = !this._lastPromptSendAt || (now - this._lastPromptSendAt) > 5000;
-      if (this._promptStreak >= (this.opt.idleConfirms || 2) && cooled) {
+      // agent.status 明说 waiting = 它真的停下来在等人 → 一拍即可应答（不必等两拍去抖）；
+      // 没有权威状态时仍按老规矩去抖，避免把流式输出中间态误当提问。
+      const needStreak = agentState === 'waiting' ? 1 : (this.opt.idleConfirms || 2);
+      if (this._promptStreak >= needStreak && cooled) {
         try {
           // 菜单/信任 = 纯回车采纳高亮项；y-n / 开放式 = 先打字再回车（分两次提交）
           // 【作者主导】模式下，"要不要接着写"一律回【不】——否则"只确认不续写"就成了空话（见 classify 里的血泪注释）。
@@ -178,37 +227,45 @@ export class Autopilot {
       // 任务干完（连续空闲、不忙）就【自动完成】：回调收窗 + 转"写作完成"。要不要继续是作者的事，不挂着"写作中"。
       // ⚠️血泪教训：只看 status.busy 会误杀【长思考任务】——立项写整本 bible 要 ~8 分钟，思考期 status 常报 not-busy，
       // 15s(旧默认5拍×3s)就被当"干完"收窗，bible 一个字没写就没了(用户："圣经生成失败")。
-      // 修法：必须【不忙 且 屏幕也不再变】才算真空闲——claude 思考期的 spinner/流式会不断刷新屏幕，据此判定它还在干活。
-      const changed = this.prevScreen !== null && screen !== this.prevScreen;
+      // 而 Unterm 0.65 的 session.status【已经彻底没有 busy 字段了】，那套读法恒为 false，等于纯靠屏幕硬扛。
+      // 现在的判据（按可靠性）：① agent.status —— working/waiting 都算没干完，idle/done 才算干完；
+      // ② session.idle 的输出字节还在涨 → 还在动；③ 屏幕还在变 → 还在动。三者任一成立就清零。
       this.prevScreen = screen;
-      let cbusy = false;
-      try { const st = await this.mcp.status(this.paneId); cbusy = st?.busy ?? st?.is_busy ?? (st?.state === 'busy') ?? false; } catch {}
-      if (cbusy || changed) { this._doneIdle = 0; return; }   // 忙 或 屏幕还在动(思考中) → 没干完，清零
+      let cbusy = agentState === 'working' || agentState === 'waiting';
+      if (agentState == null) {
+        try { const st = await this.mcp.status(this.paneId); cbusy = st?.busy ?? st?.is_busy ?? (st?.state === 'busy') ?? false; } catch {}
+      }
+      if (cbusy || screenChanged || bytesGrew) { this._doneIdle = 0; return; }
       this._doneIdle = (this._doneIdle || 0) + 1;
-      // 默认 40 拍×3s = 120s【既不忙又屏幕不动】才收窗，给慢环境的长思考留足余量，绝不打断在写的窗口。
-      if (this.sawAgentRunning && this._doneIdle >= (this.opt.confirmDoneIdle || 40)) {
+      // 有权威状态(agent.status 明说 idle/done)时 12 拍×3s≈36s 即可收窗；拿不到权威状态就退回保守的
+      // 40 拍×3s=120s【既不忙、输出不涨、屏幕也不动】，给慢环境的长思考留足余量，绝不打断在写的窗口。
+      const authoritative = agentState === 'idle' || agentState === 'done';
+      const need = authoritative ? (this.opt.confirmDoneIdleSignal || 12) : (this.opt.confirmDoneIdle || 40);
+      if (this.sawAgentRunning && this._doneIdle >= need) {
         this.running = false;
-        this.log('✅ 本次任务完成，自动收起窗口', 'act');
+        this.log(`✅ 本次任务完成，自动收起窗口（依据：${authoritative ? 'agent 状态 ' + agentState + ' + 输出静止' : '屏幕与输出连续静止 ' + Math.round(need * (this.opt.pollMs || 3000) / 1000) + 's'}）`, 'act');
         try { this.opt.onDone && this.opt.onDone('任务完成'); } catch {}
       }
       return;
     }
 
-    // 读 busy 标志（字段名做兼容）
-    let busy = false;
-    try {
-      const st = await this.mcp.status(this.paneId);
-      busy = st?.busy ?? st?.is_busy ?? (st?.state === 'busy') ?? false;
-    } catch {}
+    // 忙判定：优先 agent.status（0.65 起 session.status 已无 busy 字段，那套读法恒为 false，只作老版本兜底）
+    let busy = agentState === 'working';
+    if (agentState == null) {
+      try {
+        const st = await this.mcp.status(this.paneId);
+        busy = st?.busy ?? st?.is_busy ?? (st?.state === 'busy') ?? false;
+      } catch {}
+    }
 
-    // 活动检测：屏幕相比上一拍变化即视为 agent 在工作（实例可能不提供 busy 字段，
-    // 因此用屏幕变化作为主信号，busy 仅作辅助）。
-    const changed = screen !== this.prevScreen;
+    // 活动检测：屏幕变化 或 pane 输出字节在涨，都算 agent 在工作。
+    // 加 bytesGrew 是为了治"屏幕看着没变、其实一直在出字"和反过来"光标/占位符微动导致屏幕永不稳定"两种误判。
+    const changed = screen !== this.prevScreen || bytesGrew;
     if (changed && this.prevScreen !== null) { this.sawBusy = true; this.lastRespondedHash = null; }
 
     if (busy) { this.sawBusy = true; this.stableCount = 0; this.prevScreen = screen; return; }
 
-    // 屏幕稳定性判定（即使没有 busy 字段也能工作）
+    // 稳定性判定（没有权威状态时这就是主信号）
     if (changed) { this.stableCount = 1; this.prevScreen = screen; }
     else this.stableCount++;
 
