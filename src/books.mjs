@@ -291,6 +291,16 @@ const META_FILES = new Set([
   'novel_bible.md', 'chapter_index.md', 'continuity_ledger.md',
   'agents.md', 'claude.md', 'gemini.md', 'qwen.md', 'readme.md', '主线伏笔表.md',
 ]);
+// 不是章节的文件名前缀（设定/笔记/方案/简介一类）。白名单挡不住新出现的文件——
+// 历史 bug：`简介.txt` 被当章节归进 chapters/，补进白名单后，换成 `重写方案-011起.md`
+// 又被吞了一次（还带着 011 这个章号数字）。所以改成【正向判定 + 前缀否定】双保险。
+const NON_CHAPTER_NAME = /^(简介|梗概|大纲|细纲|设定|方案|计划|笔记|说明|备注|人物|台账|素材|参考|重写|封面|发布|待办|todo|note|draft|review)/i;
+// 一个平铺文件像不像正文章节：非元文件、非设定笔记类命名、且带章号数字（章节一定有章号）。
+function looksLikeChapterFile(name) {
+  if (META_FILES.has(name.toLowerCase())) return false;
+  if (NON_CHAPTER_NAME.test(name)) return false;
+  return /\d/.test(name);
+}
 // 检测"已分章但平铺在目录根下、不在 chapters/ 里"的导入布局：
 // 根目录有 ≥2 个非元文件的 .txt/.md，且 chapters/ 下还没有正文 → 需要先归档。
 function detectFlatChapters(dir) {
@@ -304,8 +314,22 @@ function detectFlatChapters(dir) {
     chaptersHasText = walk(chaptersDir);
   }
   if (chaptersHasText) return false;  // 已是结构化章节，无需归档
-  const flat = entries.filter(e => e.isFile() && /\.(txt|md)$/i.test(e.name) && !META_FILES.has(e.name.toLowerCase()));
+  const flat = entries.filter(e => e.isFile() && /\.(txt|md)$/i.test(e.name) && looksLikeChapterFile(e.name));
   return flat.length >= 2;
+}
+
+// 卷目录名：优先复用 chapters/ 下【已存在】的该卷目录——它可能带卷名（「卷01县城开张」）。
+// 历史 bug：写作指令里硬拼 `卷` + 卷号，于是带卷名的书每次开写都往 chapters/卷01/ 落盘，
+// 跟已有的 chapters/卷01县城开张/ 分叉成两个卷目录（之前只手工并过目录，没修生成侧）。
+export function volumeDirName(bookDir, volNum = 1) {
+  const pad = '卷' + String(volNum).padStart(2, '0');
+  try {
+    const hit = fs.readdirSync(path.join(bookDir, 'chapters'), { withFileTypes: true })
+      .filter(e => e.isDirectory() && e.name.startsWith(pad))
+      .sort((a, b) => b.name.length - a.name.length)[0];   // 带卷名的更具体，优先
+    if (hit) return hit.name;
+  } catch {}
+  return pad;
 }
 
 // 确定性归档：把根目录下平铺的正文 .txt/.md（排除元文件）批量移进 chapters/卷01/。
@@ -315,7 +339,7 @@ export function archiveFlatChapters(dir, volume = '卷01') {
   if (!dir || !fs.existsSync(dir)) return { moved: 0, names: [] };
   let ents = [];
   try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return { moved: 0, names: [] }; }
-  const flats = ents.filter(e => e.isFile() && /\.(txt|md)$/i.test(e.name) && !META_FILES.has(e.name.toLowerCase()));
+  const flats = ents.filter(e => e.isFile() && /\.(txt|md)$/i.test(e.name) && looksLikeChapterFile(e.name));
   if (!flats.length) return { moved: 0, names: [] };
   const volDir = path.join(dir, 'chapters', volume);
   try { fs.mkdirSync(volDir, { recursive: true }); } catch {}

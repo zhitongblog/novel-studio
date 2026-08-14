@@ -16,7 +16,7 @@ import { spawn } from 'node:child_process';
 import { getModel } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { lastChapterTail, recentChapterNames } from './contextpack.mjs';
-import { currentVolume, getBook, bookStats } from './books.mjs';
+import { currentVolume, getBook, bookStats, volumeDirName } from './books.mjs';
 import { parseChapters, saveChapter, appendIndex, hanziCount } from './webwriter.mjs';
 import { startWriting } from './writer.mjs';
 import { sendToBook, sessionAgentAlive } from './attach.mjs';
@@ -182,7 +182,7 @@ export async function writeChapterFromIntent({ book, model, intent, useLastEndin
   if (!ch) throw new Error('AI 未按格式产出本章（可能被截断或跑偏）。可重试，或把要求写得更具体。');
 
   const volNum = currentVolume(book) || 1;
-  const volDir = '卷' + String(volNum).padStart(2, '0');
+  const volDir = volumeDirName(book.dir, volNum);   // 复用已存在的卷目录（可能带卷名），别硬拼「卷NN」分叉出第二个
   const rel = saveChapter(book, volDir, num, ch.title, ch.body);
   const row = { num, title: ch.title, volDir, rel, words: hanziCount(ch.body) };
   try { appendIndex(book, [row]); } catch (e) { onLog({ level: 'warn', msg: '更新 chapter_index.md 失败：' + e.message }); }
@@ -200,7 +200,7 @@ function buildWindowChapterInstruction(book, num, intent, useLastEnding) {
   const hi = book?.standards?.targetCharsHi || 3600;
   const last = useLastEnding ? lastChapterTail(book, 1200) : { tail: '' };
   const volNum = currentVolume(book) || 1;
-  const volDir = '卷' + String(volNum).padStart(2, '0');
+  const volDir = volumeDirName(book.dir, volNum);   // 复用已存在的卷目录（可能带卷名），别硬拼「卷NN」分叉出第二个
   const s = `这是【作者主导·共创】：作者掌控人物关系与全局逻辑，你只按作者对这一章的要求忠实执行，绝不自作主张改方向。` +
     `请【只写第 ${num} 章这一章正文】并落盘，然后【立即停下、不要写下一章、不要写下一批、不要问是否继续】。` +
     `【作者对第 ${num} 章的要求（最高优先，务必照做）】：${intent} 。` +
@@ -286,7 +286,7 @@ function buildPlotBatchInstruction(book, startNum, plot, useLastEnding) {
   const hi = book?.standards?.targetCharsHi || 3600;
   const last = useLastEnding ? lastChapterTail(book, 1200) : { tail: '' };
   const volNum = currentVolume(book) || 1;
-  const volDir = '卷' + String(volNum).padStart(2, '0');
+  const volDir = volumeDirName(book.dir, volNum);   // 复用已存在的卷目录（可能带卷名），别硬拼「卷NN」分叉出第二个
   const endNum = startNum + BATCH_MAX - 1;
   const s = `这是【作者主导·探索式】：本书没有任何大纲，剧情由作者一段一段给你，你只负责拆章执笔。` +
     `动笔前先读 novel_bible.md 的【写作手法】（整本照这个手法写）与 continuity_ledger.md 的【人物名册】（已出场人物一律沿用名册里的名字，绝不改名、绝不串名）。` +
