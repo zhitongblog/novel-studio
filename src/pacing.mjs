@@ -105,6 +105,7 @@ export function inspectChapter(fp, num, std = {}) {
     payoff: PAYOFF.some(w => raw.includes(w)),
     overlong: chars > (std.hardMax || 6000),
     over: chars > Math.round((std.targetCharsHi || 3600) * 1.2),
+    under: chars < (std.minChars || std.targetCharsLo || 3000),
   };
 }
 
@@ -133,6 +134,18 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
       kind: 'over', level: 'warn', chapters: over.map(c => c.num),
       msg: `第 ${over.map(c => c.num).join('、')} 章偏长（${over.map(c => c.chars).join('/')} 字，目标 ${tgtLo}–${tgtHi}）`,
       fix: `下一批把单章压回 ${tgtLo}–${tgtHi} 字：一章只写一个小事件，写满就收在钩子上，别把三个场景塞进一章。`,
+    });
+  }
+
+  // 1b) 章太短——bible 写的是【硬下限】。注意退回时要说清补的是戏不是字：
+  // 让模型「写够字数」最容易招来注水（复述、绕圈、拉长对话），那比短章更难治。
+  const under = fresh.filter(c => c.under);
+  if (under.length) {
+    const min = std.minChars || tgtLo;
+    issues.push({
+      kind: 'under', level: 'error', chapters: under.map(c => c.num),
+      msg: `第 ${under.map(c => c.num).join('、')} 章不足硬下限（${under.map(c => c.chars).join('/')} 字，下限 ${min}）`,
+      fix: `把这些章补到 ${tgtLo}–${tgtHi} 字。**补的是戏，不是字**：加一个具体场景、一次交锋、一个转折或一处代价浮现，让这一章多推进一件事。严禁靠复述前情、拉长对话、加形容词、原地绕圈凑字数——那比短章更糟。`,
     });
   }
 

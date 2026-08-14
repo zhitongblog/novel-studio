@@ -43,6 +43,18 @@ const kinds = (scan) => scan.issues.map(i => i.kind);
   console.log('✓ 章长超标 → 事故 + 拆章指令');
 }
 
+// ①b 章不足硬下限 → 事故 + 「补戏不补字」的指令
+{
+  const short = '“这活儿我接了。”\n\n' + '他把搪瓷缸往桌上一磕。\n\n'.repeat(20);   // ~2000 字以下
+  const dir = makeBook([{ num: 1, title: '洗五回就发毛', body: short }]);
+  const scan = pacingScan(dir, 1, 1, { std: { ...STD, minChars: 3000 } });
+  assert.ok(kinds(scan).includes('under'), '短于硬下限应判 under');
+  const ins = buildPacingFixInstruction(scan);
+  assert.match(ins, /补的是戏，不是字/, '退回指令必须挡住注水');
+  assert.match(ins, /严禁靠复述前情/);
+  console.log('✓ 章不足硬下限 → 事故 + 补戏不补字');
+}
+
 // ② 连续 ≥2 章事务流程 → 事故（章名命中是强信号；正文密度兜住口语章名）
 {
   // 一章满是单据词的走账正文：真实病灶长这样（《重生94》023「抬头先空着」整章在谈报价单怎么填）
