@@ -1,0 +1,225 @@
+// 节奏闸（确定性、不靠模型自觉）：治「章越写越长、事务流程当主线、量级不换挡、章末假钩子」。
+//
+// 病根：skill.mjs 里那几条——「单章 3000–3600 字」「严禁把办手续/对账当章节主线」「禁止连续 ≥2 章
+// 事务流程」「格局必须随卷可感升级」——全是写给模型看的说教。长程写作里模型会稳定漂移，而且
+// 越漂越顺手：《重生94，我让爸妈替我当首富》11–39 章实测平均 9919 字（规定 3000–3600，超 2.8 倍）、
+// 连续 29 章以单据/账目/手续为主线、29 章里主角自有现金 0.62 元 → 10.34 元、书名承诺的「首富」
+// 一次都没兑现。每一条都踩了 skill.mjs 白纸黑字的红线，但没有任何东西拦得住它。
+//
+// 教训跟当初「……」雪球一模一样：规则写在 prompt 里是建议，量在代码里才是闸。
+//
+// 与 deslop 的分工：排版能机械矫正（deslop 直接改字，改完就干净了）；节奏不能——拆章要起章名、
+// 补爽点要写情节，只有模型自己动笔。所以本闸只做两件事：
+//   ① 用确定性指标量出病灶（章长/流程密度/量级曲线/钩子类型）
+//   ② 生成一条「退回自纠」指令交给上层注入，让模型在【本批还没变成下一批上下文之前】就改掉。
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { chapterFilesInRange } from './deslop.mjs';
+
+// —— 事务流程词表：这些东西当背景质感可以，当整章主线就是流水账 ——
+const PAPERWORK = ['单据', '抬头', '报价', '比价', '执照', '验收', '结款', '备案', '发票', '收据',
+  '对账', '盘点', '清点', '登记', '手续', '批文', '公文', '卷宗', '账本', '账目', '存根', '凭据',
+  '采购单', '介绍信', '盖章', '签字', '经手人', '工商', '税务', '报销'];
+
+// 章名另有一份更宽的词表：章名只有几个字，口语说法（「这单得挂我妈名下」「这活能不能走厂里的账」）
+// 用正式词表扫不出来，但章名叫这个就说明整章主线是那张单子。章名短，放宽不易误伤。
+const PAPERWORK_TITLE = [...PAPERWORK, '名下', '单子', '这单', '那单', '走账', '入账', '账上', '抵账', '上单'];
+
+// —— 假钩子词表：章末总结/抒情/预告，skill.mjs 明令判废 ——
+const FAKE_HOOK = ['才刚刚开始', '拉开了序幕', '等待着他', '等待着我', '命运', '注定', '谁也没想到',
+  '未来的日子', '从此以后', '不知道的是', '殊不知', '一切都变了', '悄然', '暗流'];
+
+// —— 对手服软/打脸信号（弱信号，只做提示不判事故）——
+const PAYOFF = ['脸一下子白', '脸色变了', '说不出话', '没敢再', '服软', '认了', '服了', '道歉',
+  '低头', '闭嘴', '没想到你', '刮目', '拿下', '签了字', '点了头', '答应了', '认输', '让开'];
+
+const clean = (s) => String(s || '').replace(/\s/g, '');
+
+// 中文数目 → 阿拉伯数（覆盖「一百五十六块八」「两千二百六十七」「三万八」这类口语写法；解析不了返回 NaN）
+const CN_DIGIT = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+const CN_UNIT = { 十: 10, 百: 100, 千: 1000, 万: 10000, 亿: 100000000 };
+function cnNum(s) {
+  if (!s) return NaN;
+  let total = 0, section = 0, cur = 0, seen = false;
+  for (const ch of s) {
+    if (ch in CN_DIGIT) { cur = CN_DIGIT[ch]; seen = true; continue; }
+    const u = CN_UNIT[ch];
+    if (!u) continue;
+    seen = true;
+    if (u >= 10000) { total += (section + (cur || 0)) * u; section = 0; cur = 0; }
+    else { section += (cur || 1) * u; cur = 0; }
+  }
+  const n = total + section + cur;
+  return seen ? n : NaN;
+}
+
+// 前世/未来标记：重生文里主角常拿上辈子的数目作对照（「上辈子我做过的最小一个单子是三十七万」），
+// 那是前世的钱，不是本世的战果。量级曲线必须把这类句子剔掉，否则每本重生文开篇就被自己污染。
+const PASTLIFE = /上辈子|上一世|前世|重生前|三十年后|后来我才|那时候我/;
+
+// 抽出一章里出现的最大「钱数」——量级换挡的度量衡。同时认阿拉伯数字与中文数目。
+// 按句切分后逐句取数：含前世标记的句子整句跳过。
+function maxMoney(text) {
+  let max = 0;
+  for (const sent of String(text).split(/[。！？\n]/)) {
+    if (!sent || PASTLIFE.test(sent)) continue;
+    for (const m of sent.matchAll(/(\d+(?:\.\d+)?)\s*(万元|万块|万|元|块钱|块)/g)) {
+      let v = parseFloat(m[1]);
+      if (/^万/.test(m[2])) v *= 10000;
+      if (v > max) max = v;
+    }
+    for (const m of sent.matchAll(/([零〇一二两三四五六七八九十百千万亿]{2,})\s*(万元|万块|万|元|块钱|块)/g)) {
+      let v = cnNum(m[1]);
+      if (!Number.isFinite(v)) continue;
+      if (/^万/.test(m[2])) v *= 10000;
+      if (v > max) max = v;
+    }
+  }
+  return max;
+}
+
+// 单章体检
+export function inspectChapter(fp, num, std = {}) {
+  const raw = fs.readFileSync(fp, 'utf8');
+  const title = path.basename(fp).replace(/\.txt$/, '').replace(/^\d+/, '');
+  const chars = clean(raw).length;
+  const paras = raw.split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
+  const last = paras[paras.length - 1] || '';
+
+  // 事务流程密度：章名命中是强信号（整章就叫这个名字），正文按每千字命中数算
+  const inTitle = PAPERWORK_TITLE.filter(w => title.includes(w));
+  let hits = 0;
+  for (const w of PAPERWORK) hits += (raw.split(w).length - 1);
+  const per1k = chars ? (hits / chars) * 1000 : 0;
+  const paperwork = inTitle.length > 0 || per1k >= 3;
+
+  // 章末钩子：有对话/具体事件才算真钩子；纯叙述又命中假钩子词表 = 判废
+  const hasDialogue = /[「」『』“”]/.test(last);
+  const fake = FAKE_HOOK.filter(w => last.includes(w));
+  const hookOk = hasDialogue || (fake.length === 0 && last.length <= 120);
+
+  return {
+    num, title, chars, paperwork, paperworkWords: inTitle, paperworkPer1k: +per1k.toFixed(1),
+    money: maxMoney(raw), hookOk, fakeHookWords: fake,
+    payoff: PAYOFF.some(w => raw.includes(w)),
+    overlong: chars > (std.hardMax || 6000),
+    over: chars > Math.round((std.targetCharsHi || 3600) * 1.2),
+  };
+}
+
+// 扫一段章号区间，出体检结论。lookback：往前多看几章，用来判断「连续」类问题与量级曲线。
+export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {}) {
+  const files = chapterFilesInRange(bookDir, Math.max(1, from - lookback), to);
+  const all = [];
+  for (const { num, path: fp } of files) {
+    try { all.push(inspectChapter(fp, num, std)); } catch { /* 读不了就跳过，闸不阻断写作 */ }
+  }
+  const fresh = all.filter(c => c.num >= from);
+  const issues = [];
+  const tgtLo = std.targetCharsLo || 3000, tgtHi = std.targetCharsHi || 3600;
+
+  // 1) 章长——最硬的一条，也是最好修的一条（拆章几乎不用改正文）
+  const overlong = fresh.filter(c => c.overlong);
+  const over = fresh.filter(c => c.over && !c.overlong);
+  if (overlong.length) {
+    issues.push({
+      kind: 'overlong', level: 'error', chapters: overlong.map(c => c.num),
+      msg: `第 ${overlong.map(c => c.num).join('、')} 章超长（${overlong.map(c => c.chars).join('/')} 字，上限 ${std.hardMax || 6000}）`,
+      fix: `把这些章按场景拆成每章 ${tgtLo}–${tgtHi} 字的独立章：一章一个完整小事件 + 一个未解钩子，每个新章按 bible 的取名口味起台词体/疑问体章名（先在 chapter_index.md 全表查重），重排后续章号并更新 chapter_index.md。正文尽量不动，只拆不重写。`,
+    });
+  } else if (over.length) {
+    issues.push({
+      kind: 'over', level: 'warn', chapters: over.map(c => c.num),
+      msg: `第 ${over.map(c => c.num).join('、')} 章偏长（${over.map(c => c.chars).join('/')} 字，目标 ${tgtLo}–${tgtHi}）`,
+      fix: `下一批把单章压回 ${tgtLo}–${tgtHi} 字：一章只写一个小事件，写满就收在钩子上，别把三个场景塞进一章。`,
+    });
+  }
+
+  // 2) 事务流程当主线——skill.mjs 明令「禁止连续 ≥2 章」，这里量出来
+  let run = 0, runs = [];
+  for (const c of all) {
+    if (c.paperwork) { run++; if (run >= 2) runs.push(c.num); }
+    else run = 0;
+  }
+  const freshRuns = runs.filter(n => n >= from);
+  if (freshRuns.length) {
+    const names = fresh.filter(c => c.paperwork).map(c => `${c.num}${c.title}`);
+    issues.push({
+      kind: 'paperwork', level: 'error', chapters: freshRuns,
+      msg: `连续 ≥2 章以事务流程为主线（${names.join('、')}）`,
+      fix: `办手续/对账/比价/验收/开单这些只能当障碍、筹码或背景质感，压成段落带过，绝不能占据整章、更不能连着两章。把这几章改写成有对手、有攻防、有代价的场景——流程是那场戏的赌注，不是那场戏本身。`,
+    });
+  }
+
+  // 3) 量级换挡——重生/经商/升级类的命脉：读者要看见数字往上走
+  const moneys = all.filter(c => c.money > 0);
+  if (moneys.length >= 6) {
+    const half = Math.ceil(moneys.length / 2);
+    const earlyMax = Math.max(...moneys.slice(0, half).map(c => c.money));
+    const lateMax = Math.max(...moneys.slice(half).map(c => c.money));
+    if (lateMax <= earlyMax * 1.5) {
+      issues.push({
+        kind: 'scale', level: 'warn', chapters: fresh.map(c => c.num),
+        msg: `量级没换挡：前半段最大 ${earlyMax}，后半段最大 ${lateMax}（应至少上一个台阶）`,
+        fix: `主角的处境——钱数、人手、地盘、对手层级——必须随章节可感升级。若已连写十几章还在同一量级的小事上打转，这是节奏事故：收束当前阶段、跳过过程、把舞台推大，让读者看见数字/层级往上走一格。`,
+      });
+    }
+  }
+
+  // 4) 章末假钩子
+  const badHook = fresh.filter(c => !c.hookOk);
+  if (badHook.length) {
+    issues.push({
+      kind: 'hook', level: 'warn', chapters: badHook.map(c => c.num),
+      msg: `第 ${badHook.map(c => c.num).join('、')} 章章末不是具体钩子（疑似总结/抒情/预告）`,
+      fix: `章末钩子必须是具体事件或具体台词：新人物进门／一句挑衅／一个没接的电话／一句「这下麻烦了」。绝不在章末总结、抒情、预告。`,
+    });
+  }
+
+  // 5) 爽点节拍（弱信号，只提示）——长期只铺不发＝劝退
+  if (fresh.length >= 5 && !fresh.some(c => c.payoff)) {
+    issues.push({
+      kind: 'payoff', level: 'warn', chapters: fresh.map(c => c.num),
+      msg: `本批 ${fresh.length} 章没有一次可感的兑现（打脸／服软／拿下／扳回一城）`,
+      fix: `每隔几章要给读者一次担心之后的兑现：先让读者替主角捏把汗，再打脸一次、收服一个人、上一个台阶。全程都是讲道理的好人、没有人被顶回去，读者没有理由追下去。`,
+    });
+  }
+
+  return { chapters: fresh, all, issues };
+}
+
+// 把体检结论写成给模型的「退回自纠」指令。无 error 级问题时返回 null（不打扰）。
+export function buildPacingFixInstruction(scan, { warnAlso = false } = {}) {
+  const items = scan.issues.filter(i => warnAlso || i.level === 'error');
+  if (!items.length) return null;
+  const body = items.map((i, k) => `${k + 1}. 【${i.level === 'error' ? '事故' : '偏差'}】${i.msg}\n   → ${i.fix}`).join('\n');
+  return `本批刚写完的章节没过【节奏体检】，请先就地修掉下面的问题，再继续写下一批：\n\n${body}\n\n改完把 chapter_index.md 与 continuity_ledger.md 同步更新。不要新写章节，先把这几条改干净。`;
+}
+
+// 体检报告落盘到 reviews/，便于人工回看（不阻断）。
+export function writePacingReport(bookDir, scan, tag = '') {
+  const dir = path.join(bookDir, 'reviews');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  const lines = ['# 节奏体检' + (tag ? `（${tag}）` : ''), '',
+    '| 章 | 字数 | 流程主线 | 最大钱数 | 钩子 |', '|---|---|---|---|---|'];
+  for (const c of scan.chapters) {
+    lines.push(`| ${c.num}${c.title} | ${c.chars} | ${c.paperwork ? '是' : ''} | ${c.money || ''} | ${c.hookOk ? 'ok' : '假钩子'} |`);
+  }
+  lines.push('', '## 结论', '');
+  if (!scan.issues.length) lines.push('全部通过。');
+  for (const i of scan.issues) lines.push(`- **${i.level === 'error' ? '事故' : '偏差'}｜${i.kind}**：${i.msg}\n  - ${i.fix}`);
+  const fp = path.join(dir, `节奏体检${tag ? '-' + tag : ''}.md`);
+  try { fs.writeFileSync(fp, lines.join('\n') + '\n', 'utf8'); } catch {}
+  return fp;
+}
+
+// 写后节奏闸：给 statelessWriter / cowrite 用。返回 { issues, instruction }；instruction 非空则上层注入退回自纠。
+export function pacingGate(bookDir, from, to, onLog = () => {}, { std = {}, warnAlso = false, report = true } = {}) {
+  const scan = pacingScan(bookDir, from, to, { std });
+  for (const i of scan.issues) {
+    onLog({ level: i.level === 'error' ? 'warn' : 'info', msg: `${i.level === 'error' ? '⛔ 节奏事故' : '⚠ 节奏偏差'}：${i.msg}` });
+  }
+  if (report && scan.chapters.length) writePacingReport(bookDir, scan, `${from}-${to}`);
+  return { issues: scan.issues, instruction: buildPacingFixInstruction(scan, { warnAlso }), scan };
+}

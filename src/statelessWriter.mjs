@@ -16,6 +16,7 @@ import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, parseReviewItems } from './editor.mjs';   // 卷边界大纲审稿门复用长驻那套主编无头审稿
 import { setPending, takeResume } from './pending.mjs';   // 参与模式：卷口挂起等用户逐条挑 / 用户拍板后恢复
 import { deslopRange } from './deslop.mjs';   // 写后强制排版矫正闸：治「……」雪球+逐句换行，断掉自我模仿的滚雪球
+import { pacingGate } from './pacing.mjs';   // 写后节奏闸：治章长超标/事务流程当主线/量级不换挡/章末假钩子
 
 // 各模型"无头 + 自动批准文件读写"的参数。
 function writeArgs(model) {
@@ -126,6 +127,26 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
     const dr = deslopRange(book.dir, (before.maxChapter || 0) + 1, after.maxChapter || 0, onLog);
     if (dr.touched) onLog({ level: 'act', msg: `🧹 排版矫正闸：本批 ${dr.touched}/${dr.files} 章已矫正（防「……」雪球）` });
   } catch (e) { onLog({ level: 'warn', msg: '排版矫正闸异常（不阻断）：' + (e.message || e) }); }
+
+  // ⏱ 写后节奏闸：排版能用代码直接改（deslop），节奏不能——拆章要起章名、补爽点要写情节，只有作者自己动笔。
+  // 所以这里只量指标，量出事故就【当批退回自纠】：趁本批还没变成下一批的上下文，先把病章改干净，
+  // 否则模型下一批照着自己上一批的流水账继续写，跟当初「……」雪球一个滚法。只自纠一轮，避免死循环。
+  if (cfg?.pacing?.enabled !== false) {
+    try {
+      const std = { ...(book.standards || {}), hardMax: cfg?.pacing?.hardMax || 6000 };
+      const from = (before.maxChapter || 0) + 1;
+      const g = pacingGate(book.dir, from, after.maxChapter || 0, onLog, { std, warnAlso: cfg?.pacing?.strict === true });
+      if (g.instruction) {
+        onLog({ level: 'act', msg: '⛔ 节奏闸未过 → 本批退回作者就地自纠（不写新章）' });
+        await runHeadless(model, g.instruction, { cwd: book.dir, cfg, timeoutMs: cfg?.stateless?.batchTimeoutMs || 900000 });
+        after = bookStats(book); grew = (after.chapters || 0) - (before.chapters || 0);
+        const g2 = pacingGate(book.dir, from, after.maxChapter || 0, onLog, { std, report: false });
+        onLog(g2.instruction
+          ? { level: 'warn', msg: '节奏闸复检仍未过 → 放行本批（请人工留意，详见 reviews/节奏体检）' }
+          : { level: 'act', msg: '✅ 节奏闸复检通过' });
+      }
+    } catch (e) { onLog({ level: 'warn', msg: '节奏闸异常（不阻断）：' + (e.message || e) }); }
+  }
 
   onLog({ level: 'act', msg: `本批完成：新增 ${grew} 章（最高章号 ${before.maxChapter}→${after.maxChapter}），用时 ${secs}s` });
   return { ok: true, wrote: grew, maxFrom: before.maxChapter, maxTo: after.maxChapter, secs, before, after };

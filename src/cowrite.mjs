@@ -21,6 +21,7 @@ import { parseChapters, saveChapter, appendIndex, hanziCount } from './webwriter
 import { startWriting } from './writer.mjs';
 import { sendToBook, sessionAgentAlive } from './attach.mjs';
 import { deslopRange } from './deslop.mjs';
+import { pacingGate } from './pacing.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { closeWindow } from './unterm.mjs';
 
@@ -396,6 +397,12 @@ export async function writeChaptersFromPlot({ book, model, plot, useLastEnding =
     const dr = deslopRange(book.dir, startNum, endNum, onLog);
     if (dr && dr.touched) { for (const c of chapters) { try { c.body = fs.readFileSync(path.join(book.dir, c.rel), 'utf8').trim(); } catch {} } }
   } catch (e) { onLog({ level: 'warn', msg: '排版矫正跳过：' + e.message }); }
+  // 写后节奏体检：共创模式下作者本来就在逐段把关，所以这里只量指标 + 出报告，不自动退回改稿——
+  // 要不要重写这一段由作者当场定（结论同时落到 reviews/节奏体检-*.md）。
+  try {
+    const std = { ...(book.standards || {}), hardMax: cfg?.pacing?.hardMax || 6000 };
+    pacingGate(book.dir, startNum, endNum, onLog, { std });
+  } catch (e) { onLog({ level: 'warn', msg: '节奏体检跳过：' + e.message }); }
   onLog({ level: 'act', msg: `  ✓ 这一段已写成 ${chapters.length} 章（第 ${startNum}–${endNum} 章，约 ${chapters.reduce((s, c) => s + c.words, 0)} 字）` });
   return { chapters, startNum, endNum, count: chapters.length, model, windowMode: true };
 }
