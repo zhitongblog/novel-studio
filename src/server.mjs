@@ -1247,7 +1247,7 @@ async function api(p, req, res, u) {
         const model = body.model || book.model || cfg.defaultModel;
         if (!isCowriteModel(model)) return json(res, 400, { error: '共创模式请用 claude 或 codex（也可 gemini/qwen）。当前模型：' + model });
         const r = await writeChapterInWindow({
-          book, model, intent: body.intent, useLastEnding: body.useLastEnding !== false, redoLast: !!body.redoLast, cfg,
+          book, model, intent: body.intent, useLastEnding: body.useLastEnding !== false, redoLast: !!body.redoLast, romance: body.romance || null, cfg,
           onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
         });
         return json(res, 200, { ok: true, ...r });
@@ -1259,7 +1259,7 @@ async function api(p, req, res, u) {
         const model = body.model || book.model || cfg.defaultModel;
         if (!isCowriteModel(model)) return json(res, 400, { error: '请用 claude 或 codex（也可 gemini/qwen）。当前模型：' + model });
         const r = await writeChaptersFromPlot({
-          book, model, plot: body.plot, useLastEnding: body.useLastEnding !== false, cfg,
+          book, model, plot: body.plot, useLastEnding: body.useLastEnding !== false, romance: body.romance || null, cfg,
           onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
         });
         return json(res, 200, { ok: true, ...r });

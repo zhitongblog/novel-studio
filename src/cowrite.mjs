@@ -22,6 +22,7 @@ import { startWriting } from './writer.mjs';
 import { sendToBook, sessionAgentAlive } from './attach.mjs';
 import { deslopRange } from './deslop.mjs';
 import { pacingGate } from './pacing.mjs';
+import { chapterRomanceSection } from './romance.mjs';   // 单章级感情线尺度（可临时覆盖全书档位）
 import { getSession, removeSession } from './sessions.mjs';
 import { closeWindow } from './unterm.mjs';
 
@@ -144,7 +145,7 @@ export function removeLastChapter(book) {
 
 // ② 按作者本章要求写这一章：严格照作者的 intent 写，AI 不得自作主张改方向。落盘一章。
 // redoLast=true：先删掉刚写的最后一章，再用（可能改过的）要求重写同一章号。
-export async function writeChapterFromIntent({ book, model, intent, useLastEnding = true, redoLast = false, cfg, onLog = () => {} }) {
+export async function writeChapterFromIntent({ book, model, intent, useLastEnding = true, redoLast = false, romance = null, cfg, onLog = () => {} }) {
   book = getBook(book.slug) || book;
   const it = String(intent || '').trim();
   if (!it) throw new Error('请先写「本章我的要求」——这一模式以你的主意为主，AI 按你的要求写。');
@@ -165,6 +166,7 @@ export async function writeChapterFromIntent({ book, model, intent, useLastEndin
     useLastEnding && last.tail ? `【上一章结尾（衔接用，保持文笔与语气连续）】：\n${last.tail}\n` : '',
     names.length ? `【近期已用章名（新章名别与这些重复）】：${names.slice(-30).join('、')}\n` : '',
     STYLE_GUARD,
+    chapterRomanceSection(book.romance, romance),
     ``,
     `输出要求：`,
     `1. 只写【第 ${num} 章】这一章，约 ${lo}–${hi} 字，情节靠推进与细节写足，不重复凑字。`,
@@ -233,7 +235,7 @@ function readNewestChapter(book) {
 }
 
 // 窗口模式写一章：开/复用可见 Unterm 窗口 → 注入本章要求 → 轮询"章数增加=写完" → 读回新章。
-export async function writeChapterInWindow({ book, model, intent, useLastEnding = true, redoLast = false, cfg, onLog = () => {} }) {
+export async function writeChapterInWindow({ book, model, intent, useLastEnding = true, redoLast = false, romance = null, cfg, onLog = () => {} }) {
   book = getBook(book.slug) || book;
   const it = String(intent || '').trim();
   if (!it) throw new Error('请先写「本章我的要求」——共创以你的主意为主。');
@@ -243,6 +245,7 @@ export async function writeChapterInWindow({ book, model, intent, useLastEnding 
   const before = bookStats(book).chapters;
   const num = (lastChapterTail(book, 0).num || 0) + 1;
   const instruction = buildWindowChapterInstruction(book, num, it, useLastEnding);
+  const instrWithRomance = instruction + '\n\n' + chapterRomanceSection(book.romance, romance);
 
   // 开窗或复用已开窗口（AI 还在跑就注入；否则开一个新的可见窗口，autopilot 关掉=只写这一章）
   const alive = await sessionAgentAlive(book.slug, cfg).catch(() => false);
@@ -253,7 +256,7 @@ export async function writeChapterInWindow({ book, model, intent, useLastEnding 
     onLog({ level: 'act', msg: `共创窗口：打开可见 Unterm 窗口（${getModel(model)?.name || model}）并注入第 ${num} 章要求（你能看着它写）…` });
     // attachAutopilot + autopilotConfirmOnly：挂一个【只自动确认提问、绝不自动续写】的极简 autopilot，
     // 这样 AI 遇到"是否/信任目录/审批"等提问会被自动确认、不会卡住，但写完这一章就停、不自动写下一章。
-    await startWriting({ book, model, instruction, cfg, attachAutopilot: true, autopilotConfirmOnly: true, onLog: (e) => onLog({ ...e }) });
+    await startWriting({ book, model, instruction: instrWithRomance, cfg, attachAutopilot: true, autopilotConfirmOnly: true, onLog: (e) => onLog({ ...e }) });
   }
 
   // 轮询：章数比开写前多了 = 这一章写完落盘了。给足超时（claude 慢）。
@@ -329,7 +332,7 @@ function readChaptersFrom(book, fromNum) {
 }
 
 // 按作者这一段情节连写 3–5 章（可见窗口模式）：开/复用窗口 → 注入 → 轮询到"写完不再增加" → 排版矫正 → 读回。
-export async function writeChaptersFromPlot({ book, model, plot, useLastEnding = true, cfg, onLog = () => {} }) {
+export async function writeChaptersFromPlot({ book, model, plot, useLastEnding = true, romance = null, cfg, onLog = () => {} }) {
   book = getBook(book.slug) || book;
   const pt = String(plot || '').trim();
   if (!pt) throw new Error('请先写「这一段的故事情节」——本书没有大纲，剧情以你给的这段为准。');
@@ -337,7 +340,9 @@ export async function writeChaptersFromPlot({ book, model, plot, useLastEnding =
 
   const before = bookStats(book).chapters;
   const startNum = (lastChapterTail(book, 0).num || 0) + 1;
-  const instruction = buildPlotBatchInstruction(book, startNum, pt, useLastEnding);
+  let instruction = buildPlotBatchInstruction(book, startNum, pt, useLastEnding);
+  // 本批的感情线尺度：作者可临时提高/降低，不改全书档位（初吻、独处那一夜这类章需要临场拿捏）
+  instruction += '\n\n' + chapterRomanceSection(book.romance, romance);
 
   const alive = await sessionAgentAlive(book.slug, cfg).catch(() => false);
   if (alive) {

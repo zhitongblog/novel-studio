@@ -3,7 +3,7 @@
 // 背景：《重生94》053–118 那 66 章里何艳出现 95 次，却一次真正的心动都没有——写作规范里
 // 没有感情线这一节，AI 就把它写成了背景板。所以档位必须进 skill，且【任何档位都注入红线】。
 import assert from 'node:assert';
-import { ROMANCE_LEVELS, getRomance, resolveRomance, romanceVoice, ROMANCE_REDLINE, DEFAULT_ROMANCE } from '../src/romance.mjs';
+import { ROMANCE_LEVELS, getRomance, resolveRomance, romanceVoice, ROMANCE_REDLINE, DEFAULT_ROMANCE, chapterRomanceSection } from '../src/romance.mjs';
 import { skillBody } from '../src/skill.mjs';
 
 // ① 四档齐全且规则互不相同
@@ -54,6 +54,32 @@ import { skillBody } from '../src/skill.mjs';
   }
   assert.match(ROMANCE_REDLINE, /物化异性的招徕语/, '简介措辞的风险也要提示（比正文更容易触发审核）');
   console.log('✓ 红线在所有档位注入');
+}
+
+// ⑥ 单章级覆盖：写这一章时可临时改尺度，不动全书档位
+{
+  const sec = chapterRomanceSection('warm', 'bold');
+  assert.match(sec, /本章感情线尺度/, '覆盖时要标明这是本章的临时档位');
+  assert.match(sec, /本书基线是/, '要点出跟全书档位的差异');
+  assert.match(sec, /色而不淫/);
+  assert.match(sec, /写感官，不写器官/);
+  assert.ok(sec.includes('未成年角色（不满 18 岁）'), '单章覆盖同样注入红线');
+
+  const same = chapterRomanceSection('warm', 'warm');
+  assert.ok(!/本章感情线尺度/.test(same), '跟基线一样时不必强调"本章"');
+  const none = chapterRomanceSection('warm', null);
+  assert.match(none, /暧昧/, '不覆盖时用全书档位');
+  console.log('✓ 单章级尺度覆盖');
+}
+
+// ⑦ bold 档必须是「写而不露」，不是「回避」
+{
+  const bold = getRomance('bold');
+  assert.match(bold.rules, /该发生的要发生/, '不能写成回避');
+  assert.match(bold.rules, /写事后，不写事中/);
+  assert.match(bold.rules, /仅限成年角色/);
+  assert.match(bold.rules, /不写露骨过程/);
+  console.log('✓ bold = 色而不淫（写而不露，非回避）');
 }
 
 console.log('\n全部通过 ✅  感情线档位与红线正确');
