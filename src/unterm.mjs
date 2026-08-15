@@ -80,8 +80,14 @@ export function killProcess(pid, { tree = false } = {}) {
   if (pid == null) return false;
   if (IS_WIN) {
     const args = tree ? ['/PID', String(pid), '/T', '/F'] : ['/PID', String(pid), '/F'];
-    try { spawnSync('taskkill', args, { encoding: 'utf8' }); return true; }
-    catch { return false; }
+    // ⚠️ spawnSync 不会因为 taskkill 失败而抛异常——它只把失败写进 status（128=找不到该进程、
+    // 1=权限不足…）。原来这里 try/catch 后无条件 return true，于是【杀没杀掉都报成功】，
+    // 上层照着打「已收起窗口」的日志，实际窗口还活着 → 下一批发现没有活会话就再开一个，
+    // 窗口越堆越多（实测本书同时开着 bravo+charlie 两个）。所以必须看 status。
+    try {
+      const r = spawnSync('taskkill', args, { encoding: 'utf8' });
+      return r.status === 0;
+    } catch { return false; }
   }
   const sig = (target, s) => { try { process.kill(target, s); return true; } catch { return false; } };
   // tree 时才杀进程组（负 pid，spawnInstance 用 detached 起的是新进程组）
@@ -108,8 +114,31 @@ export async function closeWindow({ id, mcp_port, auth_token, pid, pane }) {
     } catch {}
     finally { try { mcp?.close?.(); } catch {} }
   }
-  try { killProcess(pid); } catch {}
-  return true;
+  // 杀完【核实一遍】：窗口进程真的不在了才算收窗成功。
+  // 不核实的代价见上：一次假成功就多留一个空窗口，而上层还以为收干净了。
+  let killed = false;
+  try { killed = killProcess(pid); } catch {}
+  if (pid != null) {
+    await new Promise(r => setTimeout(r, 500));
+    if (processAlive(pid)) {
+      try { killed = killProcess(pid); } catch {}          // 再补一刀
+      await new Promise(r => setTimeout(r, 500));
+      killed = !processAlive(pid);
+    } else killed = true;
+  }
+  return killed;
+}
+
+// 进程还在不在（收窗核实用）。Windows 走 tasklist 过滤，POSIX 用 signal 0 探活。
+export function processAlive(pid) {
+  if (pid == null) return false;
+  if (IS_WIN) {
+    try {
+      const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { encoding: 'utf8' });
+      return (r.stdout || '').includes(String(pid));
+    } catch { return false; }
+  }
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 // 同步跑一条 unterm-cli 子命令，返回 {ok, stdout, stderr}

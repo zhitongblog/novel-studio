@@ -386,9 +386,12 @@ export async function writeChaptersFromPlot({ book, model, plot, useLastEnding =
       const s = getSession(book.slug);
       // 先关 pane 再杀窗口进程：0.65 起 agent 不是窗口进程的子进程，只杀窗口会留下一个还在接着写的 agent
       if (s?.pid) {
-        await closeWindow({ id: s.instanceId, mcp_port: s.mcp_port, auth_token: s.auth_token, pid: s.pid, pane: s.pane });
+        const closed = await closeWindow({ id: s.instanceId, mcp_port: s.mcp_port, auth_token: s.auth_token, pid: s.pid, pane: s.pane });
         removeSession(book.slug);
-        onLog({ level: 'act', msg: '这一批写完 → 已收起窗口（下一段情节会重新开窗，避免它自己接着写）' });
+        // 据实报告：收窗失败要说出来，别让作者以为窗口收干净了（假成功会让空窗口一直堆积）
+        onLog(closed
+          ? { level: 'act', msg: '这一批写完 → 已收起窗口（下一段情节会重新开窗，避免它自己接着写）' }
+          : { level: 'warn', msg: `⚠ 收窗未成功：窗口进程 ${s.pid} 仍在（unterm 版本/权限问题）。请手动关掉它，否则会越开越多。` });
       }
     } catch (e) { onLog({ level: 'warn', msg: '收窗失败（不影响已写的章）：' + e.message }); }
   }
@@ -404,12 +407,27 @@ export async function writeChaptersFromPlot({ book, model, plot, useLastEnding =
   } catch (e) { onLog({ level: 'warn', msg: '排版矫正跳过：' + e.message }); }
   // 写后节奏体检：共创模式下作者本来就在逐段把关，所以这里只量指标 + 出报告，不自动退回改稿——
   // 要不要重写这一段由作者当场定（结论同时落到 reviews/节奏体检-*.md）。
+  let pacingFix = null;
   try {
     const std = { ...(book.standards || {}), hardMax: cfg?.pacing?.hardMax || 6000 };
-    pacingGate(book.dir, startNum, endNum, onLog, { std });
+    const g = pacingGate(book.dir, startNum, endNum, onLog, { std });
+    pacingFix = g.instruction;
+    // 事故级（章长/文风机械等）就地退回自纠：原来这里只出报告不退回，理由是"共创模式作者会把关"——
+    // 实测那等于没人管。《重生94》053–054 是补完文风上限后写的第一批，短句 0.48、数目每 85 字一个、
+    // 把字句 0.091，比旧规范还差。**比例类要求靠 prompt 天生无效**（模型没法边写边统计自己的短句占比），
+    // 只有写完量出来、带着具体条数退回，才改得动。窗口还活着就直接注入。
+    if (pacingFix && cfg?.pacing?.autofix !== false) {
+      const alive = await sessionAgentAlive(book.slug, cfg).catch(() => false);
+      if (alive) {
+        onLog({ level: 'act', msg: '⛔ 本批未过节奏/文风闸 → 已把【带具体条数的】自纠指令注入窗口，改完再继续' });
+        await sendToBook(book.slug, pacingFix, cfg);
+      } else {
+        onLog({ level: 'warn', msg: '⛔ 本批未过节奏/文风闸，但写作窗口已关——自纠指令见 reviews/节奏体检-*.md' });
+      }
+    }
   } catch (e) { onLog({ level: 'warn', msg: '节奏体检跳过：' + e.message }); }
   onLog({ level: 'act', msg: `  ✓ 这一段已写成 ${chapters.length} 章（第 ${startNum}–${endNum} 章，约 ${chapters.reduce((s, c) => s + c.words, 0)} 字）` });
-  return { chapters, startNum, endNum, count: chapters.length, model, windowMode: true };
+  return { chapters, startNum, endNum, count: chapters.length, model, windowMode: true, pacingFix: pacingFix || null };
 }
 
 // 清洗“出主意”文本：去 CLI 回显的 prompt/元信息，保留建议正文。

@@ -114,9 +114,13 @@ const kinds = (scan) => scan.issues.map(i => i.kind);
   assert.ok(st.numPer < 150, `数目应过密，实得每 ${st.numPer} 字一个`);
   assert.ok(kinds(scan).includes('style'), '应判出 style 机械');
   const ins = buildPacingFixInstruction(scan, { warnAlso: true });
-  assert.match(ins, /短句压到四成以下/);
-  assert.match(ins, /数目大幅删减/);
-  console.log('✓ 堆短句 + 砸数字 → 判文风机械');
+  // 【关键】退回指令必须给出【具体要改几处】。「压到四成以下」模型执行不了——它没法边写边统计
+  // 自己的短句占比（实测把上限写进 skill 后指标毫无改善，数目密度还从 95 掉到 85 字一个）。
+  assert.match(ins, /至少合并掉 \d+ 句/, '必须给出要合并的具体句数');
+  assert.match(ins, /删到 \d+ 处以内/, '必须给出数目要删到多少');
+  assert.match(ins, /留不超过 3 句/, '把字句要给出保留上限');
+  assert.match(ins, /只调语言/, '要挡住"顺手重写情节"');
+  console.log('✓ 堆短句 + 砸数字 → 判文风机械，且给出可执行的条数');
 }
 
 // ⑦ 长短交错、数目克制的正文 → 不误报

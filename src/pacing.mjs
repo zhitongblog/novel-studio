@@ -238,20 +238,47 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
   if (bad.num.length) styleBits.push(`数目堆砌：${bad.num.join('、')}——密到读者记不住，实锚就不再是实锚，是账本`);
   if (bad.ba.length) styleBits.push(`「X把Y…」句式扎堆：${bad.ba.join('、')}`);
   if (bad.flat.length) styleBits.push(`全章没有长句把节奏拉开：${bad.flat.join('、')}`);
+  // 【关键】给出【这一章具体要改几处】。模型没法在写的时候统计自己的短句占比——
+  // 比例类要求靠 prompt 天生无效（实测：把上限写进 skill 后，短句 0.488→0.480、
+  // 数目 95→85 字一个、把字句 0.066→0.091，全无改善甚至更差）。必须换算成可执行的条数。
+  const todo = [];
+  for (const c of fresh) {
+    const m = c.style || {}; const bits = [];
+    const sents = Math.round(c.chars / Math.max(1, m.avgLen || 14));
+    if (m.shortRatio > LIM.shortRatio) {
+      const now = Math.round(sents * m.shortRatio), want = Math.floor(sents * LIM.shortRatio);
+      bits.push(`短句约 ${now} 句（全章约 ${sents} 句），**至少合并掉 ${Math.max(1, now - want)} 句**——把相邻的两三个短句并成一个带从句的长句`);
+    }
+    if (m.numPer < LIM.numPer) {
+      const now = Math.round(c.chars / Math.max(1, m.numPer)), want = Math.floor(c.chars / LIM.numPer);
+      bits.push(`出现数目约 ${now} 处，**删到 ${Math.max(1, want)} 处以内**（只留改变局面的那几笔，其余换成"块把钱""小半麻袋""一沓"）`);
+    }
+    if (m.baRatio > LIM.baRatio) {
+      const now = Math.round(sents * m.baRatio);
+      bits.push(`「把…」动作句约 ${now} 句，**留不超过 3 句**，其余换写法或直接删掉动作`);
+    }
+    if (m.longRatio < LIM.longRatio) bits.push(`全章几乎没有 25 字以上的长句，**至少补 ${Math.max(2, Math.round(sents * 0.1))} 个**`);
+    if (bits.length) todo.push(`  · **第 ${c.num} 章**：` + bits.join('；'));
+  }
   if (styleBits.length) {
     const heavy = bad.short.length + bad.num.length >= Math.max(2, Math.ceil(fresh.length * 0.6));
     issues.push({
       kind: 'style', level: heavy ? 'error' : 'warn', chapters: fresh.map(c => c.num),
       msg: '文风机械：' + styleBits.join('；'),
-      fix: `这不是没守规范，是【太守规范】——每条单独看都对，叠加执行就成了模板。就地改：
-`
-        + `  · **句长真正拉开**：短句压到四成以下，每隔几段给一个二十五字以上的长句（带从句的那种），让节奏有起伏，不要靠堆短句制造"不均匀"。
-`
-        + `  · **数目大幅删减**：只在【这一笔钱/这个数改变了局面】时报数字，其余一律换成"块把钱""小半麻袋""一沓"这类说法。实锚的密度指的是物件、身体感觉、具体动作，不是让你每段砸一个数目。
-`
-        + `  · **动作小节拍不要每句都挂**：三句对白最多一句带动作；同一种句式（把…往…一磕/一撂/一扔）全章不超过三次，换别的写法或者干脆不写动作。
-`
-        + `  · **别每章开头都报"某月某日礼拜几下午几点，某地"**——那是场景切换的写法，不是章节开头的公式。`,
+      fix: [
+        '这不是没守规范，是【太守规范】——每条单独看都对，叠加执行就成了模板。',
+        '',
+        '**逐章要改的量（照着数改，别凭感觉）**：',
+        todo.join('\n'),
+        '',
+        '就地改：',
+        '  · **句长真正拉开**：把相邻的两三个短句并成一个带从句的长句，让节奏有起伏；不要靠堆短句制造"不均匀"——那是另一种单调。',
+        '  · **数目大幅删减**：只在【这一笔钱/这个数改变了局面】时报数字，其余一律换成"块把钱""小半麻袋""一沓"。实锚的主力是物件、身体感觉、具体动作，不是每段砸一个数目。',
+        '  · **动作小节拍不要每句都挂**：三句对白最多一句带动作；「把…往…一磕/一撂/一扔」全章不超过三次，其余换写法或干脆不写。',
+        '  · **别每章开头都报"某月某日礼拜几下午几点，某地"**——那是场景切换的写法，不是章节开头的公式。',
+        '',
+        '改完不要重写情节、不要改章名、不要动人物和台词的意思，只调语言。',
+      ].join('\n'),
     });
   }
 
