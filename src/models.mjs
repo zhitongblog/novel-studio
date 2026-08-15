@@ -92,6 +92,13 @@ export const MODELS = {
     adapterId: 'claude',
     note: '驱动 claude.ai 网页版写作。需先在 Unzoo 里用一个已登录 Claude 的账号（profilePath），选择器待对真实页面校准。',
   },
+  'web-grok': {
+    id: 'web-grok',
+    name: 'Grok 网页版',
+    kind: 'web',
+    adapterId: 'grok',
+    note: '驱动 grok.com 网页版写作（xAI 没有本地 CLI，只能走网页）。需先在 Unzoo 里用一个【已登录 Grok 且有正常浏览历史】的账号——干净 profile 直连 grok.com 会被 Cloudflare 判为机器人并拦截。选择器待对真实页面校准。',
+  },
   // —— API 写作模型（kind:'api'）——
   // 直连中文大模型的 OpenAI 兼容接口写小说（apiwriter.mjs）：稳、能写文件、连续跑，不碰浏览器。
   // 「可用性」= 是否配了该家 API Key（detectModel 里对 kind:'api' 直接返回 available:true，真正校验在写作端/设置里）。

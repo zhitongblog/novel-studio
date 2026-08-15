@@ -24,6 +24,7 @@ import { qwenAdapter } from './webchat/qwen.mjs';
 import { chatgptAdapter } from './webchat/chatgpt.mjs';
 import { claudeAdapter } from './webchat/claude.mjs';
 import { doubaoAdapter } from './webchat/doubao.mjs';
+import { grokAdapter } from './webchat/grok.mjs';
 
 // 适配器注册表：adapterId → 适配器对象。
 export const WEB_ADAPTERS = {
@@ -31,6 +32,7 @@ export const WEB_ADAPTERS = {
   chatgpt: chatgptAdapter,
   claude: claudeAdapter,
   doubao: doubaoAdapter,
+  grok: grokAdapter,
 };
 export function getAdapter(id) {
   return WEB_ADAPTERS[id] || WEB_ADAPTERS[String(id || '').toLowerCase()] || null;
@@ -237,7 +239,7 @@ export async function runWebWrite({
   book, adapterId, batches = 1, profilePath = null, onLog = () => {}, cfg = null, control = null,
 } = {}) {
   const adapter = getAdapter(adapterId);
-  if (!adapter) throw new Error('未知网页适配器：' + adapterId + '（可选 qwen|doubao|chatgpt|claude）');
+  if (!adapter) throw new Error('未知网页适配器：' + adapterId + '（可选 qwen|doubao|chatgpt|claude|grok）');
   if (!profilePath) throw new Error('网页版写作需要 profilePath（绑定已登录该聊天站点的 Unzoo 账号）');
 
   const count = book?.standards?.batchSize || 3;
