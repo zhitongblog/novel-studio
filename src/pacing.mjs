@@ -79,6 +79,32 @@ function maxMoney(text) {
   return max;
 }
 
+// —— 文风机械度：治「规范执行到极致 = 公式」——
+//
+// 病根跟前面几条不一样：不是不守规范，是【太守规范】。bible 里每条单独看都对，叠加执行就成了模板。
+// 《重生94》实测（52 章 17.5 万字）：短句(≤10字)占 49%、数目每 92 字一个（规范要求 250–400 字
+// 一个实锚，超标 3–4 倍）、「X把Y…」句式 702 句。单看每句都是好细节，连着读三十章就是节拍器。
+// 作者的原话：「你不觉得很机械吗」——而闸当时全绿，因为它只量结构不量语言。
+//
+// 这几样恰好能量化，所以能建闸。量不到的部分（好不好看）仍然只能靠人读。
+function styleMetrics(text) {
+  const sents = String(text).split(/[。！？\n]/).map(s => s.trim()).filter(s => s.length > 2);
+  const n = sents.length || 1;
+  const lens = sents.map(s => s.length);
+  const short = lens.filter(l => l <= 10).length;
+  const long = lens.filter(l => l > 25).length;
+  const chars = clean(text).length || 1;
+  const nums = (text.match(/[零〇一二两三四五六七八九十百千万]{2,}|\d+(?:\.\d+)?/g) || []).length;
+  const ba = sents.filter(s => /[他她我你][^，。]{0,6}把/.test(s)).length;
+  return {
+    shortRatio: +(short / n).toFixed(3),          // 短句(≤10字)占比
+    longRatio: +(long / n).toFixed(3),            // 长句(>25字)占比——太低说明节奏没被拉开
+    avgLen: +(lens.reduce((a, b) => a + b, 0) / n).toFixed(1),
+    numPer: nums ? Math.round(chars / nums) : 9999,   // 多少字出现一个数目
+    baRatio: +(ba / n).toFixed(3),                // 「X把Y…」句式占比
+  };
+}
+
 // 单章体检
 export function inspectChapter(fp, num, std = {}) {
   const raw = fs.readFileSync(fp, 'utf8');
@@ -101,6 +127,7 @@ export function inspectChapter(fp, num, std = {}) {
 
   return {
     num, title, chars, paperwork, paperworkWords: inTitle, paperworkPer1k: +per1k.toFixed(1),
+    style: styleMetrics(raw),
     money: maxMoney(raw), hookOk, fakeHookWords: fake,
     payoff: PAYOFF.some(w => raw.includes(w)),
     overlong: chars > (std.hardMax || 6000),
@@ -190,6 +217,44 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
     });
   }
 
+  // 4b) 文风机械度——太守规范反而写成模板。阈值按《重生94》实测基线定，留出题材差异的余量。
+  const S = std.styleLimits || {};
+  const LIM = {
+    shortRatio: S.shortRatio ?? 0.45,   // 短句(≤10字)占比上限（实测 0.49 已明显节拍器化）
+    numPer: S.numPer ?? 150,            // 至少多少字才出现一个数目（实测 92，规范本意是 250–400）
+    baRatio: S.baRatio ?? 0.05,         // 「X把Y…」单一句式占比上限（实测 0.063）
+    longRatio: S.longRatio ?? 0.08,     // 长句(>25字)占比下限——低于此说明节奏全程没被拉开
+  };
+  const bad = { short: [], num: [], ba: [], flat: [] };
+  for (const c of fresh) {
+    const m = c.style || {};
+    if (m.shortRatio > LIM.shortRatio) bad.short.push(`${c.num}(${Math.round(m.shortRatio * 100)}%)`);
+    if (m.numPer < LIM.numPer) bad.num.push(`${c.num}(每${m.numPer}字)`);
+    if (m.baRatio > LIM.baRatio) bad.ba.push(`${c.num}(${Math.round(m.baRatio * 100)}%)`);
+    if (m.longRatio < LIM.longRatio) bad.flat.push(`${c.num}`);
+  }
+  const styleBits = [];
+  if (bad.short.length) styleBits.push(`短句(≤10字)过半：${bad.short.join('、')}——一半句子不到十个字，读起来像节拍器`);
+  if (bad.num.length) styleBits.push(`数目堆砌：${bad.num.join('、')}——密到读者记不住，实锚就不再是实锚，是账本`);
+  if (bad.ba.length) styleBits.push(`「X把Y…」句式扎堆：${bad.ba.join('、')}`);
+  if (bad.flat.length) styleBits.push(`全章没有长句把节奏拉开：${bad.flat.join('、')}`);
+  if (styleBits.length) {
+    const heavy = bad.short.length + bad.num.length >= Math.max(2, Math.ceil(fresh.length * 0.6));
+    issues.push({
+      kind: 'style', level: heavy ? 'error' : 'warn', chapters: fresh.map(c => c.num),
+      msg: '文风机械：' + styleBits.join('；'),
+      fix: `这不是没守规范，是【太守规范】——每条单独看都对，叠加执行就成了模板。就地改：
+`
+        + `  · **句长真正拉开**：短句压到四成以下，每隔几段给一个二十五字以上的长句（带从句的那种），让节奏有起伏，不要靠堆短句制造"不均匀"。
+`
+        + `  · **数目大幅删减**：只在【这一笔钱/这个数改变了局面】时报数字，其余一律换成"块把钱""小半麻袋""一沓"这类说法。实锚的密度指的是物件、身体感觉、具体动作，不是让你每段砸一个数目。
+`
+        + `  · **动作小节拍不要每句都挂**：三句对白最多一句带动作；同一种句式（把…往…一磕/一撂/一扔）全章不超过三次，换别的写法或者干脆不写动作。
+`
+        + `  · **别每章开头都报"某月某日礼拜几下午几点，某地"**——那是场景切换的写法，不是章节开头的公式。`,
+    });
+  }
+
   // 5) 爽点节拍（弱信号，只提示）——长期只铺不发＝劝退
   if (fresh.length >= 5 && !fresh.some(c => c.payoff)) {
     issues.push({
@@ -215,9 +280,11 @@ export function writePacingReport(bookDir, scan, tag = '') {
   const dir = path.join(bookDir, 'reviews');
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   const lines = ['# 节奏体检' + (tag ? `（${tag}）` : ''), '',
-    '| 章 | 字数 | 流程主线 | 最大钱数 | 钩子 |', '|---|---|---|---|---|'];
+    '| 章 | 字数 | 流程主线 | 最大钱数 | 钩子 | 短句占比 | 几字一个数 | 均句长 |',
+    '|---|---|---|---|---|---|---|---|'];
   for (const c of scan.chapters) {
-    lines.push(`| ${c.num}${c.title} | ${c.chars} | ${c.paperwork ? '是' : ''} | ${c.money || ''} | ${c.hookOk ? 'ok' : '假钩子'} |`);
+    const m = c.style || {};
+    lines.push(`| ${c.num}${c.title} | ${c.chars} | ${c.paperwork ? '是' : ''} | ${c.money || ''} | ${c.hookOk ? 'ok' : '假钩子'} | ${Math.round((m.shortRatio || 0) * 100)}% | ${m.numPer || ''} | ${m.avgLen || ''} |`);
   }
   lines.push('', '## 结论', '');
   if (!scan.issues.length) lines.push('全部通过。');

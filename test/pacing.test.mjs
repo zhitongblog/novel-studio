@@ -103,4 +103,36 @@ const kinds = (scan) => scan.issues.map(i => i.kind);
   console.log('✓ 合规批次不打扰');
 }
 
+// ⑥ 文风机械度：堆短句 + 砸数字 → 判 style（治「太守规范 = 公式」）
+{
+  let body = '“三块二。”\n\n他点头。\n\n“四毛五呢。”\n\n“一百二十个。”\n\n他把缸子往桌上一磕。\n\n';
+  while (body.replace(/\s/g, '').length < 3200) body += '“八十六。”\n\n她说。\n\n“三十七块。”\n\n他把本子往前一推。\n\n';
+  const dir = makeBook([{ num: 1, title: '一百五十六块八', body }]);
+  const scan = pacingScan(dir, 1, 1, { std: STD });
+  const st = scan.chapters[0].style;
+  assert.ok(st.shortRatio > 0.45, `短句占比应超标，实得 ${st.shortRatio}`);
+  assert.ok(st.numPer < 150, `数目应过密，实得每 ${st.numPer} 字一个`);
+  assert.ok(kinds(scan).includes('style'), '应判出 style 机械');
+  const ins = buildPacingFixInstruction(scan, { warnAlso: true });
+  assert.match(ins, /短句压到四成以下/);
+  assert.match(ins, /数目大幅删减/);
+  console.log('✓ 堆短句 + 砸数字 → 判文风机械');
+}
+
+// ⑦ 长短交错、数目克制的正文 → 不误报
+{
+  const good = '“这活儿我接了。”\n\n'
+    + '他把搪瓷缸往桌上一磕，水溅出来一点，顺着桌沿往下滴，滴在那张已经泛黄的登记表上，把最后一栏的字洇开了。\n\n'
+    + '“你说的那个数，我记着呢。”\n\n'
+    + '我没接话，先把布袋子摊开给他看，让他自己去摸那道边——针脚是斜的，可布身是整的，这一点他不会看不出来。\n\n';
+  let body = good;
+  while (body.replace(/\s/g, '').length < 3200) body += good;
+  const dir = makeBook([{ num: 1, title: '这活儿我接了', body }]);
+  const scan = pacingScan(dir, 1, 1, { std: STD });
+  const st = scan.chapters[0].style;
+  assert.ok(st.longRatio > 0.08, `应有长句拉开节奏，实得 ${st.longRatio}`);
+  assert.ok(st.numPer >= 150, `数目不该过密，实得每 ${st.numPer} 字一个`);
+  console.log('✓ 长短交错 + 数目克制 → 不误报');
+}
+
 console.log('\n全部通过 ✅  节奏闸判定正确');
