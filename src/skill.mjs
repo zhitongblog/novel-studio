@@ -3,6 +3,7 @@
 // 内容是同一套标准，确保换模型不换文风与流程。
 
 import { styleVoice } from './styles.mjs';
+import { romanceVoice, ROMANCE_REDLINE } from './romance.mjs';
 
 export const SKILL_NAME = 'longform-webnovel-writer';
 
@@ -15,6 +16,7 @@ export function skillBody(book) {
   const tgtLo = std.targetCharsLo || 3000;
   const tgtHi = std.targetCharsHi || 3600;
   const sv = styleVoice(b.style || std.style);
+  const rv = romanceVoice(b.romance);   // 感情线档位：建书时选，缺省走推荐档
   // tweak 仅在“真有内容”时注入：过滤空串与占位符（如自动填充的“本书专属微调建议”），
   // 否则会把一句废话当成写作指令注进规范（这是早期一处 leak）。
   const tweak = (sv && sv.tweak || '').trim();
@@ -39,6 +41,14 @@ export function skillBody(book) {
 - 本书专属微调：${realTweak}` : ''}
 - 全书保持这一文风的腔调、句式节奏与用词基线；它优先于个人习惯，但仍要满足下面的"反 AI 味"硬标准。
 ` : '';
+  const romanceSection = `
+
+## 感情线（本书档位：${rv ? rv.name : '暧昧'}）
+
+- 怎么写：${rv ? rv.rules : ''}
+
+${ROMANCE_REDLINE}
+`;
   return `# 长篇网文写作规范（${SKILL_NAME}）
 
 > 本文件由 Novel Studio 自动生成，等同 codex 的 longform-webnovel-writer skill。
@@ -52,7 +62,7 @@ export function skillBody(book) {
 - 卷数 / 每卷章数：${freehand ? '不预设（探索式：全书无大纲，卷目录只作归档）' : `${std.volumes || '?'} 卷 / 约 ${std.chaptersPerVolume || '?'} 章`}
 - 默认批次：每次 ${batch} 章，写完自检
 - 单章目标：${tgtLo}–${tgtHi} 字；硬下限：文件 > 4KB 且正文 > ${minChars} 字
-${styleSection}
+${styleSection}${romanceSection}
 ## 核心原则
 
 - 先读本地文件再动笔：开写前必须读 ${readSources}。

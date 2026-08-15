@@ -4,11 +4,12 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { ROMANCE_LEVELS } from './romance.mjs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol } from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance} from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll, getModel } from './models.mjs';
@@ -377,6 +378,7 @@ async function api(p, req, res, u) {
     }
     if (p === '/api/models') return json(res, 200, detectAll());
     if (p === '/api/styles') return json(res, 200, STYLES);
+    if (p === '/api/romance-levels') return json(res, 200, ROMANCE_LEVELS);   // 建书表单用：感情线档位表
     if (p === '/api/config') return json(res, 200, maskConfig(cfg));
     if (p === '/api/logs') { const slug = u.searchParams.get('book'); return json(res, 200, rtOf(slug).logs); }
     return json(res, 404, { error: 'not found' });
@@ -746,6 +748,10 @@ async function api(p, req, res, u) {
       try { const b = setBookStyle(body.book, body.style); return json(res, 200, { ok: true, style: b.style }); }
       catch (e) { return json(res, 400, { error: e.message }); }
     }
+    if (p === '/api/book/set-romance') {   // 设定该书感情线档位（none|light|warm|bold），改完当场刷新写作规范
+      try { const b = setBookRomance(body.book, body.romance); return json(res, 200, { ok: true, romance: b.romance }); }
+      catch (e) { return json(res, 400, { error: e.message }); }
+    }
     if (p === '/api/book/analyze-style') {
       // 对标书风格学习 → {name, rules} 文风指南（不落库，前端展示/可编辑后再 set-style 保存）。
       // 来源：body.sample=贴的文本；body.bookUrl / body.bookUrls[] / body.multi=番茄链接(Unzoo截图+claude视觉，可多本融合)。
@@ -777,7 +783,7 @@ async function api(p, req, res, u) {
       // 探索式(freehand)：只给写作手法、全书不出任何大纲，剧情由作者逐段给。必须在建书前定下来——
       // scaffold 要据它决定 bible 模板、是否铺卷01大纲模板、AGENTS.md 里的大纲闸。
       const freehand = body.freehand === true || body.discovery === true || body.planMode === 'discovery' || body.planMode === 'freehand';
-      try { book = createBook({ title: body.title, genre: body.theme || body.genre, model: body.model, totalWords: body.words, volumes: body.volumes || '', style: styleInput, planMode: freehand ? 'freehand' : 'compass' }, cfg); }
+      try { book = createBook({ title: body.title, genre: body.theme || body.genre, model: body.model, totalWords: body.words, volumes: body.volumes || '', style: styleInput, planMode: freehand ? 'freehand' : 'compass', romance: body.romance }, cfg); }
       catch (e) { return json(res, 400, { error: e.message }); }
       // 立项时选择参与度；startWriting 会据 book.writeMode/reviewEvery 播种运行时审核开关
       if (body.participation != null) {

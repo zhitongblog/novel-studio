@@ -2255,9 +2255,25 @@ $('#dlConfirm').addEventListener('click', async () => {
 // ---------- 新建书 · AI 立项 ----------
 let NB_TITLES = [], NB_SEL = -1;
 let NB_REF_STYLE = null;   // 对标分析出的 {name,rules}；有则立项前设为本书文风
-let NB_PLAN_MODE = 'compass';   // compass=全书粗罗盘(默认) | freehand=探索式·只给手法(全书无大纲，情节作者逐段给)
+let NB_PLAN_MODE = 'compass';
+let NB_ROMANCE = 'warm';   // 感情线档位：none|light|warm|bold（建书表单，默认推荐档）   // compass=全书粗罗盘(默认) | freehand=探索式·只给手法(全书无大纲，情节作者逐段给)
 // 开局架构切换：探索式时罗盘卷数无意义 → 置灰
 (function initNbPlanSeg() {
+  const rseg0 = document.getElementById('nbRomance');
+  if (rseg0) rseg0.addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn'); if (!btn) return;
+    NB_ROMANCE = btn.dataset.rom || 'warm';
+    rseg0.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('on', b === btn));
+    const h = document.getElementById('nbRomanceHint');
+    const TXT = {
+      none: '🚫 不写感情线：异性角色按功能人物写（对手、伙伴、客户），不给暧昧笔墨。适合纯权谋/悬疑/事业流。',
+      light: '🌤 淡：有感情线但克制，几十章推进一小步，靠一两个细节维持，不设三角、不做感情高潮。',
+      warm: '💗 暧昧（推荐）：走留白路线——写距离不写身体、未完成的动作、让旁人点破、用物件承载。每 3–5 章一个暧昧节拍。',
+      bold: '🔥 浓：感情戏是主线之一，可写亲密但止于门口（场景转换带过），仅限成年角色，不写露骨过程。',
+    };
+    const RED = ' 红线（任何档位都不放宽）：未成年角色只到少年心动，不写身体；不写露骨性描写。越线整本书会被下架。';
+    if (h) h.innerHTML = (TXT[NB_ROMANCE] || '') + '<b>' + RED + '</b>';
+  });
   const seg = document.getElementById('nbPlanMode'); if (!seg) return;
   seg.addEventListener('click', (e) => {
     const btn = e.target.closest('.seg-btn'); if (!btn) return;
@@ -2287,6 +2303,9 @@ function openModal() {
   NB_PLAN_MODE = 'compass';
   const pseg = document.getElementById('nbPlanMode');
   if (pseg) pseg.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('on', b.dataset.plan === 'compass'));
+  const rseg = $('#nbRomance');
+  if (rseg) rseg.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('on', b.dataset.rom === 'warm'));
+  NB_ROMANCE = 'warm';
   const pvc = document.getElementById('nbVolCount'); if (pvc) { pvc.disabled = false; pvc.style.opacity = ''; }
   if ($('#nbRefPanel')) $('#nbRefPanel').classList.add('hidden');
   if ($('#nbrsUrl')) $('#nbrsUrl').value = '';
@@ -2429,6 +2448,7 @@ $('#nbLaunch').addEventListener('click', async () => {
       volumes: $('#nbVolCount') ? $('#nbVolCount').value : '',   // 罗盘卷数（只出粗走向）
       characters: $('#nbChars') ? $('#nbChars').value.trim() : '',   // 作者指定的角色（AI 原样采用）
       planMode: NB_PLAN_MODE,   // freehand=探索式：只给写作手法，全书不出任何大纲，情节作者逐段给
+      romance: NB_ROMANCE,      // 感情线档位：写进该书写作规范，全程约束分寸（含未成年红线）
     });
     $('#modal').classList.add('hidden');
     await refresh();

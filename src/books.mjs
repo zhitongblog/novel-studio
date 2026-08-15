@@ -6,6 +6,7 @@ import { scaffoldBook, refreshContext } from './scaffold.mjs';
 import { ensureProfile, cli, closeWindow } from './unterm.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { getStyle } from './styles.mjs';
+import { resolveRomance, DEFAULT_ROMANCE } from './romance.mjs';
 
 // 删除一本书：停会话、删 profile、移出书架；可选连磁盘文件夹一起删（危险）
 export function deleteBook(slugOrId, { deleteFiles = false } = {}) {
@@ -268,6 +269,17 @@ export function setBookStyle(slugOrId, styleInput) {
   return b;
 }
 
+// 设定/更换一本书的感情线档位（none | light | warm | bold，或自定义 {name,rules}）。
+// 改完立刻 refreshContext——写作规范(AGENTS.md 等)要当场跟上，否则下一批还按旧档位写。
+export function setBookRomance(slugOrId, romanceInput) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  b.romance = resolveRomance(romanceInput);
+  upsertBook(b);
+  refreshContext(b);
+  return b;
+}
+
 // 从文件夹已有文件里探测书名：优先 novel_bible.md / chapter_index.md 里的《书名》，否则用文件夹名
 export function detectTitleFromDir(dir) {
   for (const f of ['novel_bible.md', 'chapter_index.md']) {
@@ -498,6 +510,9 @@ export function createBook(opts, cfg) {
     genre: opts.genre || '',
     model: opts.model || cfg.defaultModel,
     style: resolveStyle(opts.style),   // { id, name, short, rules, tweak } 或 null
+    // 感情线档位（none/light/warm/bold）：建书时选一次，之后每次生成写作规范都带着。
+    // 不选就走推荐档 warm——留空等于把分寸交给模型自由裁量，那正是感情线被写丢的原因。
+    romance: resolveRomance(opts.romance || DEFAULT_ROMANCE),
     // 规划模式要在 scaffold 之前定下来：freehand 的骨架不铺大纲模板、bible 模板也只有手法三节
     planMode: ['discovery', 'freehand'].includes(opts.planMode) ? opts.planMode : 'compass',
     createdAt: new Date().toISOString(),
