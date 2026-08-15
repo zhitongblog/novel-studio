@@ -1,5 +1,6 @@
 // 番茄发布编排：把 Novel Studio 已写章节，按【全局章号】与番茄后台对齐，只发"番茄还没有的新章"
 // （重写过的旧章用 edit 模式去番茄找到对应章覆盖）。底层发布/编辑流程在 src/fanqie.mjs（移植自番茄发布器）。
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { publishBook, getFanqieMaxChapter, getFanqieVolumes, createFanqieVolumes, numToCn } from './fanqie.mjs';
@@ -167,6 +168,46 @@ export function cleanChapterText(raw, title) {
 }
 
 // 读 book.dir/chapters/ 的全局编号正文章节 → [{num,title,content,vol}]，按 num 升序。可选 fromNum 起。
+// —— 已发布内容指纹：判断"这一章跟线上那版是不是同一个东西" ——
+//
+// 病根：原来用 mtime > lastPublishAt 判定"这章被重写过，要同步覆盖线上"。但 mtime 太脆——
+// deslop 排版矫正、git checkout、文件移动、甚至只是重存一次，都会让 mtime 变新而内容一个字没改。
+// 实证：《重生94》001–010 从没重写过，却因 deslop 跑过而在一次发布里被整批 edit 覆盖上线
+// （线上 6–9 章的发布时间因此变成了矫正当晚）。每次 edit 都是一次线上写操作，白吃审核风险。
+// 改法：存正文内容的 hash，只有 hash 变了才算真重写。
+function contentHash(text) {
+  return crypto.createHash('sha1').update(String(text || ''), 'utf8').digest('hex').slice(0, 16);
+}
+
+// 指纹存在书目录 .studio/published-hashes.json（跟书走，不污染全局 books.json）。
+// 结构：{ "11": "a1b2…", "12": "…" }
+function hashStorePath(book) { return path.join(book.dir, '.studio', 'published-hashes.json'); }
+
+export function loadPublishedHashes(book) {
+  try { return JSON.parse(fs.readFileSync(hashStorePath(book), 'utf8')) || {}; } catch { return {}; }
+}
+
+export function savePublishedHashes(book, map) {
+  try {
+    fs.mkdirSync(path.dirname(hashStorePath(book)), { recursive: true });
+    fs.writeFileSync(hashStorePath(book), JSON.stringify(map, null, 0), 'utf8');
+  } catch {}
+}
+
+// 挑出"真被重写过"的已发布章：有基线指纹且对不上的才算。
+// 【没有基线的一律不算重写】——老书第一次跑到这段时指纹库是空的，若把"缺基线"当成"变了"，
+// 会把整本已发布的书重发一遍。宁可漏一次同步，也不能误覆盖线上。
+function pickRewritten(all, fanqieMax, hashes) {
+  const out = [];
+  for (const c of all) {
+    if (c.num > fanqieMax) continue;
+    const base = hashes[String(c.num)];
+    if (!base) continue;
+    if (base !== c.hash) out.push(c);
+  }
+  return out;
+}
+
 export function loadPublishChapters(book, { fromNum = 1 } = {}) {
   const cdir = path.join(book.dir, 'chapters');
   const out = [];
@@ -186,7 +227,8 @@ export function loadPublishChapters(book, { fromNum = 1 } = {}) {
       try { content = fs.readFileSync(fp, 'utf8'); } catch {}
       try { mtime = fs.statSync(fp).mtimeMs; } catch {}
       const title = `第${num}章 ${name}`;
-      out.push({ num, title, content: cleanChapterText(content, title), vol: v, mtime });
+      const cleaned = cleanChapterText(content, title);
+      out.push({ num, title, content: cleaned, vol: v, mtime, hash: contentHash(cleaned) });
     }
   }
   out.sort((a, b) => a.num - b.num);
@@ -220,7 +262,7 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
   const newCh = all.filter(c => c.num > fanqieMax);
   // 重写章：番茄已有(num≤fanqieMax)但本地正文在上次发布之后被改动 → 需 edit 同步
   const lastAt = pc.lastPublishAt || 0;
-  const rewritten = lastAt ? all.filter(c => c.num <= fanqieMax && c.mtime > lastAt) : [];
+  const rewritten = pickRewritten(all, fanqieMax, loadPublishedHashes(book));   // 按内容指纹判定，不看 mtime
   // 多卷预览：matchVolumes 开时给出 图书卷→番茄卷 映射；本批新章涉及的缺卷会【自动新建】
   let volumes = null;
   if (pc.matchVolumes) {
@@ -257,11 +299,17 @@ export async function republishRange(book, { from, to, limit = 0, onLog = () => 
   onLog({ level: 'act', msg: `编辑替换番茄第 ${chs[0].num}–${chs[chs.length - 1].num} 章（共 ${chs.length} 章，用清洗后正文）…` });
   const config = { editMode: true, bookId: pc.bookId, intervalSeconds: pc.intervalSeconds || 3 };
   const r = await publishBook({ profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title, chapters: chs, config, onLog });
+  // 手工重发过的章要刷新指纹基线，否则下一次自动同步会把它们当成"又被重写"再覆盖一遍。
+  if (r.ok) {
+    const hs = loadPublishedHashes(book);
+    for (const c of chs) if (c && c.num && c.hash) hs[String(c.num)] = c.hash;
+    savePublishedHashes(book, hs);
+  }
   return { ok: !!r.ok, attempted: chs.length, ...r };
 }
 
 // 真发：把番茄还没有的新章发到番茄（按 per-book 配置：账号/书/卷开关/每日数/预约）。limit 可只发前 N 章（首测用）。
-export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}) {
+export async function publishToFanqie(book, { limit = 0, confirmRewrites = false, onLog = () => {} } = {}) {
   const pc = book.publish || {};
   if (!pc.profilePath) throw new Error('未配置番茄账号(Unzoo profilePath)');
   if (!pc.bookId) throw new Error('未配置番茄 bookId');
@@ -285,10 +333,20 @@ export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}
   onLog({ level: 'info', msg: `番茄已发到第 ${fanqieMax} 章${fm.approx ? '(近似)' : ''}` });
   let newCh = all.filter(c => c.num > fanqieMax).map(c => ({ ...c, mode: 'new' }));
   // 重写章同步(可选)：把上次发布后改动过的旧章，用 edit 模式找番茄对应章覆盖。
-  const lastAt = pc.lastPublishAt || 0;
-  let editCh = (pc.syncRewrites && lastAt)
-    ? all.filter(c => c.num <= fanqieMax && c.mtime > lastAt).map(c => ({ ...c, mode: 'edit' }))
+  const hashes = loadPublishedHashes(book);
+  let editCh = pc.syncRewrites
+    ? pickRewritten(all, fanqieMax, hashes).map(c => ({ ...c, mode: 'edit' }))
     : [];
+  // 🛡️覆盖已发布内容是不可逆的（读者已经在看），所以给一道量的闸：一次同步超过 rewriteSyncLimit 章
+  // 就中止并把清单摆出来，等人点头。默认 3 章——正常的错字修订就一两章，一次要覆盖几十章
+  // 说明是整段重写，那种事必须作者自己知情。传 confirmRewrites=true 放行。
+  const rwLimit = Number.isFinite(Number(pc.rewriteSyncLimit)) ? Number(pc.rewriteSyncLimit) : 3;
+  if (editCh.length > rwLimit && !confirmRewrites) {
+    const nums = editCh.map(c => c.num);
+    onLog({ level: 'error', msg: `⛔ 已中止：本次要覆盖线上 ${editCh.length} 章已发布内容（第 ${nums.slice(0, 12).join('、')}${nums.length > 12 ? '…' : ''} 章）。`
+      + `这会改掉读者已经看过的剧情。确认无误请带 confirmRewrites 再发，或把 syncRewrites 关掉只发新章。` });
+    return { ok: false, blocked: true, reason: `重写同步 ${editCh.length} 章超过上限 ${rwLimit}，需确认`, rewriteNums: nums, published: 0 };
+  }
   if (limit > 0) { newCh = newCh.slice(0, limit); editCh = []; }   // 试发只走新章
   if (!newCh.length && !editCh.length) { onLog({ level: 'info', msg: '番茄已是最新，无新章/无重写章可发' }); return { ok: true, published: 0, fanqieMax }; }
   // 多卷映射(matchVolumes 开)：把每章按其图书卷映射到番茄对应卷名；番茄缺卷则【自动新建】(只建恰好缺的、绝不多建)
@@ -387,6 +445,11 @@ export async function publishToFanqie(book, { limit = 0, onLog = () => {} } = {}
       const patch = { lastPublishAt: Date.now() };
       if (Number.isFinite(newMax) && newMax > 0) patch.publishedMax = newMax;   // 只写正有限数；绝不写 null/NaN、绝不降
       setBookPublish(book.slug, patch);
+      // 指纹基线：把这次真正发上去的章记下来，作为下次"有没有被重写"的比对基准。
+      // 只记发成功的那些，没发的不动——否则会把没发的章误标成"线上已是这版"。
+      const hs = loadPublishedHashes(book);
+      for (const c of chapters) if (c && c.num && c.hash) hs[String(c.num)] = c.hash;
+      savePublishedHashes(book, hs);
     } catch {}
   }
   return { ok: !!r.ok, fanqieMax, attempted: chapters.length, edited: editCh.length, ...r };

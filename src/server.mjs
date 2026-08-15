@@ -1194,7 +1194,7 @@ async function api(p, req, res, u) {
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
         const limit = Number(body.limit) || 0;
-        publishToFanqie(book, { limit, onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie' }) })
+        publishToFanqie(book, { limit, confirmRewrites: body.confirmRewrites === true, onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie' }) })
           .then(r => pushLog(book.slug, { level: 'act', source: 'fanqie', msg: `番茄发布结束：已发 ${r.published || 0} 章，状态 ${r.status || '-'}${r.error ? '，错误 ' + r.error : ''}` }))
           .catch(e => pushLog(book.slug, { level: 'error', source: 'fanqie', msg: '番茄发布异常：' + e.message }));
         return json(res, 200, { ok: true, started: true, limit });
