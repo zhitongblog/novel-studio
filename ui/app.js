@@ -725,7 +725,20 @@ async function openPublish(book) {
     // 选好账号后，自动读取该账号的番茄书籍并匹配当前书
     if ($('#pbProfile').value) pbLoadBooks($('#pbProfile').value);
   } catch (e) { $('#pbErr').textContent = '取账号失败：' + e.message; PB_PROFILES = []; pbRenderProfiles(''); }
+
+  // 打开弹窗就自动预览一次：发布按钮默认是灰的、必须先预览才亮，这个前置步骤很反直觉——
+  // 作者实测就卡在这儿（「点了发布没反应」其实是按钮 disabled）。账号与书籍都配好了才自动跑，
+  // 没配好就维持原样等用户手动点，避免无谓地驱动浏览器。
+  try {
+    const pc = (getBookBySlug(book.slug) || book).publish || {};
+    if (pc.profilePath && pc.bookId && $('#pbPreview') && !$('#pbPreview').disabled) {
+      $('#pbPreview').click();
+    }
+  } catch {}
 }
+
+// 取书架里最新的那份 book 记录（publish 配置可能刚被保存过）
+function getBookBySlug(slug) { return (STATE.books || []).find(b => b.slug === slug) || null; }
 $('#btnPublish').addEventListener('click', () => openPublish(CUR));
 $('#pbProfile').addEventListener('change', () => pbLoadBooks($('#pbProfile').value));
 $('#pbBook').addEventListener('change', () => { $('#pbBookId').value = $('#pbBook').value; });
@@ -927,7 +940,13 @@ $('#pbVolList').addEventListener('click', async (ev) => {
 });
 $('#pbPreview').addEventListener('click', async () => {
   $('#pbErr').textContent = ''; $('#pbGo').disabled = true; $('#pbGo').textContent = '🔍 请先点「预览将发」';
-  const btn = $('#pbPreview'); const old = btn.textContent; btn.disabled = true; btn.textContent = '读取番茄中…';
+  const btn = $('#pbPreview'); const old = btn.textContent; btn.disabled = true;
+  // 读番茄要 30–60s（多卷书更久）。原来只显示一个静止的「读取番茄中…」，用户以为卡死了就去点别的。
+  // 这里跑秒 + 提示预期耗时，让等待可见。
+  let t0 = Date.now(), tick = null;
+  const paint = () => { btn.textContent = `读取番茄中… ${Math.round((Date.now() - t0) / 1000)}s（通常 30–60 秒）`; };
+  paint(); tick = setInterval(paint, 1000);
+  const stopTick = () => { if (tick) { clearInterval(tick); tick = null; } };
   try {
     if (!await pbSave()) return;
     // 预览要驱动浏览器读番茄（多卷书还要逐卷扫最大章号），常需 60s+；给足 150s，别让"读得慢"被当超时、
@@ -972,7 +991,7 @@ $('#pbPreview').addEventListener('click', async () => {
       $('#pbGo').textContent = canEditOnly ? `📤 同步 ${r.rewrittenCount} 个重写章 ▶` : '📤 发布全部新章 ▶';
     }
   } catch (e) { $('#pbErr').textContent = '预览失败：' + e.message; }
-  finally { btn.disabled = false; btn.textContent = old; }
+  finally { stopTick(); btn.disabled = false; btn.textContent = old; }
 });
 let PB_STREAM = null;      // 发布进度的 SSE（弹窗内实时滚日志）
 let PB_STREAM_SLUG = null; // 当前 SSE 属于哪本书（用于弹窗重开时判断是否已挂着）
