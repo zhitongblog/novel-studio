@@ -109,7 +109,7 @@ export function runServer(port = 8787) {
     try {
       if (p === '/api/stream') return sseStream(u, res);
       if (p.startsWith('/api/')) return await api(p, req, res, u);
-      return serveStatic(p, res);
+      return serveStatic(p, res, req);
     } catch (e) {
       json(res, 500, { error: e.message });
     }
@@ -1600,13 +1600,30 @@ function sseStream(u, res) {
 }
 
 // 静态文件（前端）
-function serveStatic(p, res) {
+// 静态资源：必须【每次回源验证】。
+// 病根：原来一个缓存头都不发，浏览器就按启发式缓存把 index.html / app.js 存下来——
+// 改完前端用户那边还在跑旧的，表现成「点了按钮没反应」（实测：发布弹窗在新代码里能正常打开，
+// 用户浏览器里点却没动静，因为加载的是缓存里的旧 app.js）。这种 bug 最坑人的地方在于
+// 开发机上永远复现不出来。
+// 修法：no-cache（不是 no-store——仍允许缓存，但每次必须带 ETag 回来问一次）+ 基于
+// mtime/size 的弱 ETag；没变就 304 空响应，几乎不费流量；变了立刻拿到新文件。
+function serveStatic(p, res, req) {
   let rel = p === '/' ? '/index.html' : p;
   const file = path.join(UI_DIR, path.normalize(rel).replace(/^(\.\.[\/\\])+/, ''));
   if (!file.startsWith(UI_DIR) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
     res.writeHead(404); return res.end('not found');
   }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+  const st = fs.statSync(file);
+  const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+  const headers = {
+    'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+    'Cache-Control': 'no-cache',
+    'ETag': etag,
+  };
+  if (req && req.headers && req.headers['if-none-match'] === etag) {
+    res.writeHead(304, headers); return res.end();
+  }
+  res.writeHead(200, headers);
   fs.createReadStream(file).pipe(res);
 }
 
