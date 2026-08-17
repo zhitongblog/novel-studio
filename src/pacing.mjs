@@ -282,6 +282,41 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
     });
   }
 
+  // 4c) 台账体积——只增不减会拖垮往后每一批（模型每批都要读它）。
+  // 实测：某 27 章的书台账已 6.5 万字符（每章 2400 字，快赶上正文）；《重生94》一度 10.2 万字符，
+  // 其中 76,823 是已废弃剧情的分章条目（占 75%）——推倒重写时只加了句「以下不作数」却没删。
+  // 跟文风一条同理：写「保持精简」没用，得量出来并给出【删到多少】。
+  try {
+    const lf = path.join(bookDir, 'continuity_ledger.md');
+    const cap = std.ledgerMaxChars || 30000;
+    const txt = fs.readFileSync(lf, 'utf8');
+    const n = txt.length;
+    if (n > cap) {
+      // 找出「分章条目」类小节（#### 开头），它们是滚动窗口层，最该被压缩
+      // 边界要认【所有层级】的标题：只认 ###/#### 会跨过中间的 ## 节，把一节算成十节那么大
+      // （实测风水那本因此把某节报成 104,348 字符，虚高十倍，压缩指令就会指错地方）
+      const secs = [...txt.matchAll(/\n#{2,4} ([^\n]{2,60})/g)];
+      const sized = secs.map((m, i) => ({
+        title: m[1].trim().slice(0, 30),
+        size: (i + 1 < secs.length ? secs[i + 1].index : txt.length) - m.index,
+      })).sort((a, b) => b.size - a.size);
+      const top = sized.slice(0, 5).map(x => `「${x.title}」${x.size} 字符`).join('、');
+      issues.push({
+        kind: 'ledger', level: 'error', chapters: fresh.map(c => c.num),
+        msg: `台账已 ${n} 字符（上限 ${cap}），最大的几节：${top}`,
+        fix: [
+          `先压缩 \`continuity_ledger.md\`，**至少砍掉 ${n - cap} 字符**（压到 ${cap} 以内）再往下写。`,
+          '按这个顺序砍，砍完为止：',
+          '  1. **已废弃剧情的分章条目**——推倒重写过的那些段落，整段删掉，别留「以下不作数」的说明；',
+          '  2. **已回收的伏笔/欠债**——删掉整条，不要留「已于 XX 章兑现」的尸体；',
+          '  3. **超出最近 20 章的细节条目**——每 10 章压成一段摘要，只留还会影响后文的（谁欠谁、什么没了结、哪个数字还要用）；',
+          '  4. **人物名册里同一个人的历史流水**——只留「当前处境」一行，就地覆盖，不追加。',
+          '**不许动**：人物名册的人名与身份、时间锚、还没回收的伏笔。压缩的是篇幅，不是事实。',
+        ].join('\n'),
+      });
+    }
+  } catch { /* 没有台账文件就不管 */ }
+
   // 5) 爽点节拍（弱信号，只提示）——长期只铺不发＝劝退
   if (fresh.length >= 5 && !fresh.some(c => c.payoff)) {
     issues.push({
