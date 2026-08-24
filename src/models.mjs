@@ -124,6 +124,50 @@ export const MODELS = {
     provider: 'dashscope',
     note: '通义 DashScope API（阿里云）。qwen-plus/qwen-max，有免费额度。在「设置 · API 模型」填 API Key 即用。',
   },
+  'api-bailian': {
+    id: 'api-bailian',
+    name: '百炼订阅（多家旗舰·订阅制）',
+    kind: 'api',
+    provider: 'bailian',
+    note: '阿里云百炼 Token Plan / Coding Plan：一个 sk-sp- 开头的 key 拿到多家旗舰模型'
+      + '（qwen3.8-max / qwen3.7-plus / glm-5.2 / deepseek-v4-pro …），订阅制不按 token 计费。'
+      + '实测写中文网文 deepseek-v4-pro 文笔最好。⚠️ 端点与模型名都跟按量付费的通义 API 不同，别混填。',
+  },
+  'api-doubao': {
+    id: 'api-doubao',
+    name: '豆包（API·中文语感最对路）',
+    kind: 'api',
+    provider: 'doubao',
+    note: '字节火山方舟。最懂中文语境、口语和网络梗，写网文的"网感"是几家里最对路的。'
+      + '⚠️ 模型名要填【推理接入点 ID】(ep-xxxx)，不是模型名——在方舟控制台「在线推理」里建。',
+  },
+  'api-moonshot': {
+    id: 'api-moonshot',
+    name: 'Kimi（API·长文本/润色）',
+    kind: 'api',
+    provider: 'moonshot',
+    note: '月之暗面。长文本处理强，适合当【挑刺/润色】那一轮，而不是打初稿。platform.moonshot.cn 拿 Key。',
+  },
+  'api-ernie': {
+    id: 'api-ernie',
+    name: '文心一言（API·中式表达）',
+    kind: 'api',
+    provider: 'ernie',
+    note: '百度千帆。中式表达自然，对文言、网络梗理解到位。console.bce.baidu.com/qianfan 拿 Key。',
+  },
+  // —— 本地模型（kind:'api' + provider:'local'）——
+  // 走同一条 OpenAI 兼容通道，只是指向 127.0.0.1 上自己跑的 Ollama / LM Studio / llama.cpp。
+  // 不要 key、不要额度、不要联网，写多少章都不花钱，稿子也不出本机。
+  // 代价是速度：12G 卡跑 14B 出一章 3000 字约 2–4 分钟（云端 20–40 秒），适合挂着长跑。
+  'api-local': {
+    id: 'api-local',
+    name: '本地模型（Ollama·免费·离线）',
+    kind: 'api',
+    provider: 'local',
+    note: '跑在本机，零成本零额度、断网可写、内容不出本机。中文网文选 Qwen 系（qwen3:14b 是 12G 显存的甜点档）；'
+      + 'Gemma 中文有明显翻译腔、且不能出图，不建议用来写网文。先 `ollama pull qwen3:14b`，'
+      + '再在「设置 · 本地模型」确认地址与模型名。跑 `novel local` 可按你的显卡出建议并体检。',
+  },
 };
 
 export function getModel(id) {

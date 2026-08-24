@@ -19,8 +19,9 @@ import { startWriting } from './writer.mjs';
 import { runStateless } from './statelessWriter.mjs';
 import { runWebWrite, getAdapter } from './webwriter.mjs';
 import { runApiWrite, isApiProvider } from './apiwriter.mjs';
-import { API_PROVIDERS, providerConfigured } from './apichat.mjs';
-import { brainstorm, writeChapterInWindow, writeChaptersFromPlot, isCowriteModel, COWRITE_MODELS } from './cowrite.mjs';
+import { API_PROVIDERS, providerConfigured, isKeylessProvider } from './apichat.mjs';
+import { localHealth, probeText, probeImage } from './localai.mjs';
+import { brainstorm, writeChapterInWindow, writeChapterFromIntent, writeChaptersFromPlot, rewriteChapter, reflowChapter, isCowriteModel, isCowriteWindowModel, COWRITE_MODELS, STYLE_SLANTS } from './cowrite.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
@@ -35,7 +36,7 @@ import { generateVolumeName, existingVolName } from './volname.mjs';
 import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment } from './fanqie.mjs';
 import { getCompletionReport, runFinaleClosure, locateCompletion, buildCompletionNote } from './finale.mjs';
 import { previewFanqieImport, importFromFanqie } from './import_fanqie.mjs';
-import { generateCoverBg, buildArtPrompt } from './imagegen.mjs';
+import { generateCoverBg, buildArtPromptAuto } from './imagegen.mjs';
 import { generateNameExperiment, readNameExperiment } from './nameexp.mjs';
 import { generateCoverViaChatGPT, grabCoverFromChatGPT, buildChatGptCoverPrompt } from './covergen_web.mjs';
 
@@ -43,6 +44,11 @@ const UI_DIR = path.resolve(fileURLToPath(import.meta.url), '..', '..', 'ui');
 
 // ChatGPT 网页版生成封面是慢活（2~4 分钟）→ 后台跑，前端轮询状态。slug -> {status,url,error,msg}
 const coverJobs = new Map();
+// 单章重写的后台任务表。为什么必须后台跑：一次重写要 1–8 分钟，
+// 若把生成压在 HTTP 请求里，中间任何一环断掉（webview 超时 / 用户关弹窗 / 应用重启）
+// 整个活就白干且不留痕迹——实测就是这么丢的。改成"起任务→立刻返回→前端轮询"，
+// 关掉弹窗、切去别的页面都不影响它写完。
+const rewriteJobs = new Map();
 // 推送封面到番茄（换封面）后台任务。slug -> {status,submitted,error,msg}
 const fanqieCoverJobs = new Map();
 const fanqieCreateJobs = new Map();
@@ -511,14 +517,14 @@ async function api(p, req, res, u) {
     if (p === '/api/book/gen-cover-bg') {   // 调 Imagen 生成 AI 封面底图（落 cover_bg.png），返回 url 给前端 canvas
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
-        const r = generateCoverBg(book, { prompt: body.prompt });
+        const r = await generateCoverBg(book, { prompt: body.prompt, onLog: (e) => pushLog(book.slug, { ...e, source: 'cover' }) });
         return json(res, 200, { ok: true, url: '/api/book/cover-bg?book=' + encodeURIComponent(book.slug) + '&t=' + Date.now(), prompt: r.prompt, w: r.w, h: r.h });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/art-prompt') {   // 仅生成英文出图提示词（让用户可先看/改）
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
-        return json(res, 200, { ok: true, prompt: buildArtPrompt(book) });
+        return json(res, 200, { ok: true, prompt: await buildArtPromptAuto(book) });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/gen-cover-chatgpt') {   // 用【已登录的 ChatGPT(Pro)】网页版生成封面底图（免费、慢，后台跑）
@@ -1219,8 +1225,12 @@ async function api(p, req, res, u) {
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
         const provider = body.provider || (book.model || '').replace(/^api-/, '') || 'zhipu';
-        if (!isApiProvider(provider)) return json(res, 400, { error: '未知 API 提供方：' + provider + '（可选 zhipu|deepseek|dashscope）' });
-        if (!providerConfigured(provider, cfg)) {
+        if (!isApiProvider(provider)) return json(res, 400, { error: '未知 API 提供方：' + provider + '（可选 ' + Object.keys(API_PROVIDERS).join('|') + '）' });
+        // 本地模型没有 key——改成探服务在不在，缺什么直接说清楚（别让用户点了没反应）。
+        if (isKeylessProvider(provider)) {
+          const probe = await probeText(cfg.api?.local?.baseUrl || 'http://127.0.0.1:11434/v1');
+          if (!probe.ok) return json(res, 400, { error: '本地模型不可用：' + probe.error });
+        } else if (!providerConfigured(provider, cfg)) {
           const nm = API_PROVIDERS[provider]?.name || provider;
           return json(res, 400, { error: `未配置 ${nm} 的 API Key。请在「设置 · API 模型」里填入后再写。` });
         }
@@ -1229,6 +1239,77 @@ async function api(p, req, res, u) {
           .then(r => pushLog(book.slug, { level: 'act', source: 'api', msg: `API 写作结束：共 ${r.batches || 0} 批、新增 ${r.totalWrote || 0} 章` }))
           .catch(e => pushLog(book.slug, { level: 'error', source: 'api', msg: 'API 写作异常：' + e.message }));
         return json(res, 200, { ok: true, started: true, provider, batches });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/local/health') {   // 本地模型体检：显卡 + 文本服务 + 出图服务 + 按显存的选型建议
+      try { return json(res, 200, { ok: true, ...(await localHealth(cfg)) }); }
+      catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/local/probe-image') {   // 单独探出图服务（设置页点「测试连接」用）
+      try {
+        const backend = body.backend === 'a1111' ? 'a1111' : 'comfy';
+        const url = body.baseUrl || (backend === 'a1111' ? 'http://127.0.0.1:7860' : 'http://127.0.0.1:8188');
+        return json(res, 200, { ok: true, ...(await probeImage(backend, url)) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/craft-options') {   // 重写弹窗要用的选项：侧重项 + 感情线档位（定义在后端，前端不重复维护一份）
+      try {
+        return json(res, 200, {
+          ok: true,
+          slants: Object.entries(STYLE_SLANTS).map(([id, v]) => ({ id, name: v.name, tip: v.tip })),
+          romance: ROMANCE_LEVELS.map(r => ({ id: r.id, name: r.name, short: r.short })),
+        });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/reflow-chapter') {   // 只重排段落，一个字不改（存量章节多半只是分得太碎）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const model = body.model || book.model || cfg.defaultModel;
+        if (!isCowriteModel(model)) return json(res, 400, { error: `「${model}」不能用于重排` });
+        if (!body.rel) return json(res, 400, { error: '缺少章节路径' });
+        const r = await reflowChapter({ book, rel: body.rel, model, cfg,
+          onLog: (e) => pushLog(book.slug, { ...e, source: 'reflow' }) });
+        return json(res, 200, { ok: true, ...r });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/rewrite-chapter') {   // 单章重写（后台跑）：换模型 / 改章名 / 重新指定情节；原文备份为同名 .bak
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const model = body.model || book.model || cfg.defaultModel;
+        if (!isCowriteModel(model)) return json(res, 400, { error: `「${model}」不能用于重写。可用 claude/codex/gemini/qwen 这类 CLI，或任一 API 模型（含本地 Ollama）。` });
+        if (!body.rel) return json(res, 400, { error: '缺少章节路径' });
+        const key = book.slug;
+        const cur = rewriteJobs.get(key);
+        if (cur && cur.status === 'running') {
+          return json(res, 200, { ok: true, started: true, already: true, rel: cur.rel, msg: cur.msg });
+        }
+        rewriteJobs.set(key, { status: 'running', rel: body.rel, model, msg: '准备中…', startedAt: Date.now() });
+        const onLog = (e) => { const j = rewriteJobs.get(key); if (j) j.msg = e.msg; pushLog(key, { ...e, source: 'rewrite' }); };
+        rewriteChapter({
+          book, rel: body.rel, model, note: body.note || '', plot: body.plot || '',
+          newTitle: body.newTitle || '', titleMode: body.titleMode || 'keep',
+          slant: body.slant || '', romance: body.romance || null,
+          polish: body.polish === true, critic: body.critic || '', cfg, onLog,
+        })
+          .then((r) => {
+            rewriteJobs.set(key, { status: 'done', ...r, msg: `第 ${r.num} 章已重写（${r.before} → ${r.words} 字）` });
+            pushLog(key, { level: 'act', source: 'rewrite', msg: `✅ 第 ${r.num} 章《${r.title}》重写完成（${r.before} → ${r.words} 字）` });
+          })
+          .catch((e) => {
+            rewriteJobs.set(key, { status: 'error', error: e.message, msg: e.message });
+            pushLog(key, { level: 'error', source: 'rewrite', msg: '重写失败：' + e.message });
+          });
+        return json(res, 200, { ok: true, started: true, rel: body.rel, model });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/rewrite-chapter-status') {   // 轮询单章重写进度
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const j = rewriteJobs.get(book.slug);
+        if (!j) return json(res, 200, { ok: true, status: 'idle' });
+        // 取走结果后清掉，避免下次打开还看到上一次的完成态
+        if (j.status === 'done' || j.status === 'error') rewriteJobs.delete(book.slug);
+        return json(res, 200, { ok: true, ...j });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/cowrite-idea') {   // 共创模式·出主意：AI 据作者的问题给建议（不落盘，直接返回）
@@ -1245,8 +1326,10 @@ async function api(p, req, res, u) {
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
         const model = body.model || book.model || cfg.defaultModel;
-        if (!isCowriteModel(model)) return json(res, 400, { error: '共创模式请用 claude 或 codex（也可 gemini/qwen）。当前模型：' + model });
-        const r = await writeChapterInWindow({
+        if (!isCowriteModel(model)) return json(res, 400, { error: '共创模式请用 claude 或 codex（也可 gemini/qwen），或任一 API 模型（含本地 Ollama）。当前模型：' + model });
+        // API/本地模型开不了可见窗口 → 走无头模式：同样按作者要求写这一章并落盘，只是没有实时窗口。
+        const writeOne = isCowriteWindowModel(model) ? writeChapterInWindow : writeChapterFromIntent;
+        const r = await writeOne({
           book, model, intent: body.intent, useLastEnding: body.useLastEnding !== false, redoLast: !!body.redoLast, romance: body.romance || null, cfg,
           onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
         });
@@ -1435,7 +1518,9 @@ async function api(p, req, res, u) {
       rt.delete(slug);
       return json(res, 200, { ...r, mode: 'stopped' });
     }
-    if (p === '/api/config') { const out = updateConfig(body.patch || body); return json(res, 200, out); }
+    // ⚠️ 保存后回传的也必须遮蔽。以前这里直接返回 updateConfig 的结果，
+    // 于是【每次在设置页点保存，所有 API key 都明文回到前端】——GET 那条早就遮了，POST 这条漏了。
+    if (p === '/api/config') { const out = updateConfig(body.patch || body); return json(res, 200, maskConfig(out)); }
     return json(res, 404, { error: 'not found' });
   }
   json(res, 405, { error: 'method not allowed' });
@@ -1632,7 +1717,9 @@ function slugOf(idOrSlug) { const b = getBook(idOrSlug); return b ? b.slug : idO
 function maskConfig(cfg) {
   const api = cfg.api || {};
   const maskApi = {};
-  for (const prov of ['zhipu', 'deepseek', 'dashscope']) {
+  // ⚠️ 这份名单必须覆盖所有【需要 key】的 provider，漏一个那家的 key 就会明文回传前端。
+  // 从 API_PROVIDERS 推导，避免以后加 provider 时又漏（local 无 key，跳过）。
+  for (const prov of Object.keys(API_PROVIDERS).filter(k => k !== 'local')) {
     const one = api[prov] || {};
     maskApi[prov] = { ...one, apiKey: one.apiKey ? '***已设置***' : '', hasKey: !!one.apiKey };
   }

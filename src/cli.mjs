@@ -1,13 +1,16 @@
 // 非交互式 CLI 命令
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { loadConfig, updateConfig } from './config.mjs';
 import { createBook, listBooksWithStats, getBook } from './books.mjs';
 import { detectAll, getModel } from './models.mjs';
-import { findUntermExe, findUntermCli, untermVersion, listInstances, readProxyConfig, resolveProxyNode, sharesGlobalPaneNamespace } from './unterm.mjs';
+import { findUntermExe, findUntermCli, untermVersion, listInstances, readProxyConfig, resolveProxyNode, sharesGlobalPaneNamespace, versionMismatch } from './unterm.mjs';
 import { startWriting } from './writer.mjs';
 import { listSessions, sendToBook, streamBook, stopBook, attachAutopilot, sampleTokens } from './attach.mjs';
 import { loadUsage, bookUsage, fmtTokens } from './usage.mjs';
+import { localHealth, buildModelfile, resolveOllamaBin } from './localai.mjs';
 import { c, logLine, hr } from './ui.mjs';
 
 function parseFlags(argv) {
@@ -31,7 +34,7 @@ export async function runCli(argv) {
 
   switch (cmd) {
     case 'doctor': return doctor();
-    case 'models': return models();
+    case 'models': return f.list ? listProviderModels(String(f.list)) : models();
     case 'book': return bookCmd(rest, cfg);
     case 'books': return bookList(cfg);
     case 'write': return writeCmd(f, cfg);
@@ -41,17 +44,18 @@ export async function runCli(argv) {
     case 'watch': return watchCmd(f, cfg);
     case 'autopilot': return autopilotCmd(f, cfg);
     case 'usage': return usageCmd(f, cfg);
+    case 'local': return localCmd(f, cfg);
     case 'stop': return stopCmd(f);
     case 'config': return configCmd(f, cfg);
     case 'reference': return reference();
     default:
       console.log('未知命令：' + cmd);
-      console.log('可用：doctor | models | book new|list | write | stateless | sessions | send | watch | stop | config | reference | mcp | tui');
+      console.log('可用：doctor | models | local [import] | book new|list | write | stateless | sessions | send | watch | stop | config | reference | mcp | tui');
       process.exitCode = 1;
   }
 }
 
-function doctor() {
+async function doctor() {
   console.log(c.bold('\n🩺 环境自检\n') + hr());
   const exe = findUntermExe(), cli = findUntermCli();
   const exeV = exe ? untermVersion(exe) : '';
@@ -62,14 +66,183 @@ function doctor() {
   // Unterm ≥0.65：所有窗口共用一个 MCP 端口，pane 编号是全机器的 —— 出问题时这一行最能说明状况
   const shared = sharesGlobalPaneNamespace();
   if (shared !== null) line('pane 命名空间', shared ? '全机器共用（0.65+）：按 shell.cwd 认本书的 pane' : '按窗口独立（旧版）', true);
+  // 版本错配：装了多份 Unterm 时，自动找到的可能不是你实际在用的那个
+  const mm = versionMismatch();
+  if (mm) {
+    line('⚠ 版本错配', `将启动 ${mm.binVersion}（${mm.exe}），但运行中的实例是 ${mm.runningVersions.join('/')}`, false);
+    console.log(c.gray('   开写作窗口会用上面那个旧二进制。若要改用你实际在跑的那份：'));
+    console.log(c.gray('   novel config set --unterm-exe "<新版 unterm.exe 的完整路径>"'));
+  }
   const proxy = readProxyConfig();
   line('代理配置', proxy ? `${proxy.enabled ? '启用' : '禁用'} ${proxy.http_proxy || ''} 节点=${proxy.current_node}` : '无', !!proxy);
   console.log(hr());
   for (const m of detectAll()) line('模型 ' + m.name, m.available ? m.path : `不可用（${m.bin} 不在 PATH）`, m.available);
   console.log(hr());
+  // 本地模型：可用性不看 PATH、也不看 key，只看那两个本地服务在不在（起没起）。
+  try {
+    const h = await localHealth(loadConfig());
+    line('显卡', h.gpu.ok ? `${h.gpu.name}  ${(h.gpu.totalMb / 1024).toFixed(0)}G 显存（已用 ${(h.gpu.usedMb / 1024).toFixed(1)}G）` : h.gpu.reason, h.gpu.ok);
+    line('本地文本服务', h.text.ok
+      ? `${h.text.kind === 'ollama' ? 'Ollama' + (h.text.version ? ' v' + h.text.version : '') : 'OpenAI 兼容'} @ ${h.text.baseUrl}｜已装 ${h.text.models.length} 个模型`
+      : h.text.error, h.text.ok);
+    line('本地出图服务', h.image.ok ? `${h.image.backend === 'a1111' ? 'SD WebUI' : 'ComfyUI'} @ ${h.image.baseUrl}｜${h.image.info}` : h.image.error, h.image.ok);
+  } catch (e) { line('本地模型', '体检失败：' + e.message, false); }
+  console.log(hr());
   const books = listBooksWithStats();
   line('已登记书目', books.length + ' 本', true);
   console.log('');
+}
+
+function localImport(f, cfg) {
+  const file = f.file || f._[1];
+  if (!file) {
+    console.log(c.red('\n用法：') + 'novel local import --file <模型.gguf> [--name qwen3:14b] [--ctx 16384]\n');
+    console.log(c.gray('  用途：Ollama 的模型放在 Cloudflare R2，国内常见直连被墙、走代理也持续 EOF，'));
+    console.log(c.gray('        `ollama pull` 卡在某个百分比下不完。此时从魔搭下 GGUF 再用这条命令导入。'));
+    console.log(c.gray('  魔搭：https://modelscope.cn/models/Qwen/Qwen3-14B-GGUF （选 Q4_K_M）\n'));
+    process.exitCode = 1; return;
+  }
+  if (!fs.existsSync(file)) { console.log(c.red('找不到文件：') + file); process.exitCode = 1; return; }
+
+  const name = f.name || (cfg.api?.local?.model) || 'qwen3:14b';
+  const numCtx = Number(f.ctx) || cfg.api?.local?.numCtx || 16384;
+  const content = buildModelfile({ ggufPath: path.resolve(file), name, numCtx });
+  const mf = path.join(os.tmpdir(), 'novel-Modelfile-' + Date.now());
+  fs.writeFileSync(mf, content, 'utf8');
+
+  console.log(c.bold('\n生成的 Modelfile：\n') + hr());
+  console.log(c.gray(content) + hr());
+  console.log(`导入为 ${c.bold(name)}（要算一遍摘要，约 1–3 分钟）…\n`);
+
+  // 不能只写 'ollama'——Windows 上装完 Ollama，已运行的进程拿不到新 PATH（见 resolveOllamaBin）
+  const bin = resolveOllamaBin();
+  if (!bin) {
+    console.log(c.red('\n找不到 ollama。') + c.gray('先装：winget install Ollama.Ollama；装完若仍报此错，重开一个终端再试。\n'));
+    try { fs.unlinkSync(mf); } catch {}
+    process.exitCode = 1; return;
+  }
+  const r = spawnSync(bin, ['create', name, '-f', mf], { encoding: 'utf8', stdio: 'inherit', windowsHide: true });
+  try { fs.unlinkSync(mf); } catch {}
+  if (r.status !== 0) {
+    console.log(c.red('\n导入失败。'));
+    console.log(c.gray('  ① 确认 `ollama serve` 已启动（' + bin + '）；'));
+    // GGUF 校验失败最常见的原因是【文件下坏了】，而下载工具的断点续传出错时
+    // 文件大小往往【分毫不差】——只有逐字节的哈希能发现。所以这里直接给算哈希的命令。
+    console.log(c.gray('  ② 若报 GGUF 校验/解析失败，多半是【文件下坏了】。'));
+    console.log(c.gray('     ⚠️ 大小对不代表文件对——续传出错时大小常常正好凑对，只有哈希能发现：'));
+    console.log('     ' + c.green(`certutil -hashfile "${path.resolve(file)}" SHA256`));
+    console.log(c.gray('     跟模型页上的 SHA256 比对，不一致就重新下载。\n'));
+    process.exitCode = 1; return;
+  }
+  console.log(c.green('\n✔ 导入完成。') + c.gray(' 跑 `novel local` 确认，然后在写作台选「本地模型」即可开写。\n'));
+}
+
+// novel local —— 本地模型体检 + 按你这块卡的选型建议 + 照着抄的安装命令。
+// 存在的意义：本地部署最劝退的不是装，是「装哪个/装多大/为什么这么慢」。这条命令把它一次答完。
+async function localCmd(f, cfg) {
+  // novel local import --file <x.gguf> [--name qwen3:14b] —— 把手动下来的 GGUF 导进 Ollama。
+  // 给「ollama pull 在国内拉不动」这个常见死局用：从魔搭下 GGUF，一条命令导入，效果与 pull 等价。
+  if (f._[0] === 'import') return localImport(f, cfg);
+
+  const h = await localHealth(cfg);
+  console.log(c.bold('\n🖥️  本地模型体检\n') + hr());
+
+  if (h.gpu.ok) {
+    console.log(`${c.green('✔')} 显卡：${c.bold(h.gpu.name)}  ${(h.gpu.totalMb / 1024).toFixed(0)}G 显存（当前空闲 ${(h.gpu.freeMb / 1024).toFixed(1)}G）`);
+  } else {
+    console.log(`${c.red('✖')} 显卡：${h.gpu.reason}（无独显只能用 CPU 跑，长篇写作会慢到不可用）`);
+  }
+
+  const t = h.text;
+  if (t.ok) {
+    console.log(`${c.green('✔')} 文本服务：${t.kind === 'ollama' ? 'Ollama' + (t.version ? ' v' + t.version : '') : 'OpenAI 兼容服务'} @ ${t.baseUrl}`);
+    if (t.models.length) {
+      console.log('   已装模型：');
+      for (const m of t.models.slice(0, 12)) console.log('     · ' + m.name + (m.sizeText ? c.gray('  ' + m.sizeText) : ''));
+    } else console.log(c.gray('   （还没装任何模型）'));
+  } else {
+    console.log(`${c.red('✖')} 文本服务：${t.error}`);
+  }
+
+  const im = h.image;
+  console.log(im.ok
+    ? `${c.green('✔')} 出图服务：${im.backend === 'a1111' ? 'SD WebUI' : 'ComfyUI'} @ ${im.baseUrl}｜${im.info}`
+    : `${c.red('✖')} 出图服务：${im.error}`);
+
+  // —— 选型建议 ——
+  console.log(hr());
+  const rt = h.recommend.text, ri = h.recommend.image;
+  console.log(c.bold('📝 写中文网文该用哪个模型'));
+  console.log('   ' + c.gray('结论：选 Qwen 系，不要 Gemma。Gemma 中文有明显翻译腔（正是本项目 deslop 闸在治的东西），'));
+  console.log('   ' + c.gray('且 Gemma 只能看图不能出图，出图那半边它根本接不上。'));
+  console.log(`   ${c.bold('推荐')}：${c.green(rt.pick.model)}（${rt.pick.q}，${rt.pick.size}）`);
+  console.log('   ' + c.gray(rt.pick.note));
+  console.log('   ' + c.gray('装：') + `ollama pull ${rt.pick.model}`);
+  console.log('');
+  console.log(c.bold('🎨 出封面底图该用哪个模型'));
+  console.log(`   ${c.bold('推荐')}：${c.green(ri.pick)}`);
+  console.log('   ' + c.gray(ri.note));
+  if (ri.alt) console.log('   ' + c.gray('备选：' + ri.alt));
+  // —— 显存实测优先于估算 ——
+  const ld = h.loaded;
+  if (ld) {
+    const tag = ld.verdict === 'full-gpu' ? c.green('全部在显存 ✔')
+      : ld.verdict === 'mostly-gpu' ? c.yellow('大部分在显存')
+      : c.red('已溢出到内存，会明显变慢');
+    console.log(c.bold('⚡ 显存实测') + `（${ld.name} 已加载）`);
+    console.log(`   ${ld.vramGb}G 在显存 / ${ld.cpuGb}G 在内存 = ${ld.gpuPct}% 上卡 —— ${tag}`);
+    if (ld.verdict === 'spilled') {
+      console.log('   ' + c.gray('处理：① setx OLLAMA_FLASH_ATTENTION 1 且 setx OLLAMA_KV_CACHE_TYPE q8_0；'));
+      console.log('   ' + c.gray('      ② 或把「本地上下文长度」从 16384 降到 12288；③ 或换小一档模型'));
+    }
+    console.log('');
+  }
+  // —— 显存预算：本地写作最容易吃暗亏的地方（模型没加载时只能估算）——
+  const tu = ld ? null : h.tuning;
+  if (tu && tu.need) {
+    console.log(c.bold('⚡ 显存调优（重要）'));
+    console.log('   ' + c.red('⚠ ') + tu.why);
+    console.log('   ' + c.gray('设这两个环境变量后重启 ollama serve：'));
+    for (const [k, v] of tu.env) console.log('     ' + c.green(`setx ${k} ${v}`));
+    if (tu.suggestCtx) {
+      console.log('   ' + c.gray('开完 KV 量化后，能全量入显存的最大上下文长度：')
+        + c.green(String(tu.suggestCtx)) + c.gray('（设置页「本地上下文长度」填这个）'));
+    }
+    console.log('');
+  } else if (tu) {
+    console.log(c.bold('⚡ 显存预算') + c.gray(`：权重+KV ≈ ${tu.f16.totalGb}G / 可用 ${tu.f16.usableGb}G —— 放得下，无需调优`));
+    console.log('');
+  }
+  console.log(c.gray('详细部署步骤见 docs/本地模型.md；配好后在写作台选「本地模型（Ollama·免费·离线）」即可开写。'));
+  console.log('');
+}
+
+// novel models --list <provider>：向该家的 /models 端点问一句"你有哪些模型"。
+// 订阅制平台的模型名跟按量付费那套完全不同（qwen-plus vs qwen3.8-max），
+// 没有这条命令，用户只能对着 404 Model not exist 猜。
+async function listProviderModels(provider) {
+  const { API_PROVIDERS, resolveProviderCfg } = await import('./apichat.mjs');
+  if (!API_PROVIDERS[provider]) {
+    console.log(c.red('未知提供方：') + provider);
+    console.log(c.gray('可选：' + Object.keys(API_PROVIDERS).join(' / ')));
+    process.exitCode = 1; return;
+  }
+  const pc = resolveProviderCfg(provider, loadConfig());
+  if (!pc.keyless && !pc.apiKey) { console.log(c.red('还没配 ' + pc.name + ' 的 API Key')); process.exitCode = 1; return; }
+  console.log(c.gray('  ' + pc.baseUrl + '/models'));
+  try {
+    const r = await fetch(pc.baseUrl + '/models', {
+      headers: { Authorization: 'Bearer ' + (pc.apiKey || 'local') },
+      signal: AbortSignal.timeout(20000),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok) { console.log(c.red('  HTTP ' + r.status + '：') + JSON.stringify(j?.error || j).slice(0, 200)); process.exitCode = 1; return; }
+    const ids = (j?.data || j?.models || []).map(x => x.id || x.name).filter(Boolean);
+    if (!ids.length) { console.log(c.gray('  （该端点没返回模型列表）')); return; }
+    console.log(c.bold(`\n  ${pc.name} 可用模型 ${ids.length} 个：`));
+    for (const id of ids) console.log('    ' + (id === pc.model ? c.green(id + '  ← 当前') : id));
+    console.log(c.gray('\n  改用哪个：novel config set 里改 api.' + provider + '.model，或在设置页填\n'));
+  } catch (e) { console.log(c.red('  请求失败：') + (e.message || e)); process.exitCode = 1; }
 }
 
 function models() {
@@ -293,6 +466,15 @@ function configCmd(f, cfg) {
     if (f.proxy && f.proxy !== 'off') { patch.enableProxy = true; patch.proxyNode = f.proxy; }
     if (f.autopilot === 'off') patch.autopilot = { enabled: false };
     if (f.autopilot === 'on') patch.autopilot = { enabled: true };
+    // 手动指定 Unterm 二进制（机器上装了多份时用）。传 'auto' 清空、回到自动查找。
+    for (const [flag, key] of [['unterm-exe', 'untermExe'], ['unterm-cli', 'untermCli']]) {
+      const v = f[flag];
+      if (!v || v === true) continue;
+      if (v === 'auto') { patch[key] = ''; continue; }
+      const abs = path.resolve(String(v));
+      if (!fs.existsSync(abs)) { console.log(c.red('找不到文件：') + abs); process.exitCode = 1; return; }
+      patch[key] = abs;
+    }
     const out = updateConfig(patch);
     console.log(c.green('✔ 已更新配置'));
     console.log(JSON.stringify(out, null, 2));

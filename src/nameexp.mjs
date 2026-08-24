@@ -2,17 +2,14 @@
 // 供番茄「多书名实验 / 多封面推荐」配实验用。产物落在 book.dir/experiment/（NN.png + manifest.json）。
 import fs from 'node:fs';
 import path from 'node:path';
-import { chatComplete, providerConfigured } from './apichat.mjs';
+import { chatComplete, pickProvider } from './apichat.mjs';
 import { generateCoverBg, ART_ENFORCE } from './imagegen.mjs';
 
 function readSafe(p) { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } }
 // 中国国风强制后缀（复用 imagegen 的 ART_ENFORCE，保持一致）：避免画成西方人/西式场景，且【画面内绝不出文字】。
 const ENFORCE = ART_ENFORCE;
 
-function pickProvider(cfg) {
-  for (const p of ['zhipu', 'deepseek', 'dashscope']) if (providerConfigured(p, cfg)) return p;
-  return null;
-}
+// 挑模型的逻辑收到 apichat.pickProvider 了（含本地模型），这里不再自己维护一份名单。
 
 // 从 bible 抽卖点/主角/时代，喂给出题模型
 function bibleDigest(book) {
@@ -29,7 +26,19 @@ function bibleDigest(book) {
 export async function generateNameExperiment(book, { count = 6, cfg, onLog = () => {} } = {}) {
   const log = (msg, level = 'info') => { try { onLog({ level, msg }); } catch {} };
   const provider = pickProvider(cfg);
-  if (!provider) throw new Error('未配置任何 API 文本模型（智谱/DeepSeek/通义），无法生成书名——请在「设置」里填一个 API Key。');
+  if (!provider) throw new Error('没有可用的文本模型。要么在「设置 · API 模型」填一个云端 Key（智谱/DeepSeek/通义），'
+    + '要么在「设置 · 本地模型」配好本地 Ollama。');
+
+  // 本地出图很慢（Qwen-Image 在 12G 卡上单张 5–9 分钟），而这个功能要出 count 张。
+  // 不提前说清楚，用户会以为卡死了 —— 这不是错误，是本来就要这么久。
+  const localImg = (cfg?.image?.backend === 'local');
+  if (localImg) {
+    const preset = cfg?.image?.comfy?.preset || 'sdxl';
+    const per = preset === 'qwen-image' ? 8 : 1;      // 分钟/张，实测量级
+    log(`⏳ 本地出图：${count} 张封面预计约 ${count * per} 分钟`
+      + (preset === 'qwen-image' ? '（Qwen-Image 单张 5–9 分钟；想快很多可在设置里把 preset 换成 sdxl）' : '')
+      + '。任务在后台跑，关掉这个弹窗也不影响。', 'act');
+  }
   count = Math.max(2, Math.min(10, Number(count) || 6));
   const digest = bibleDigest(book);
   const genre = book.genre || book.style?.name || '';
@@ -70,7 +79,7 @@ export async function generateNameExperiment(book, { count = 6, cfg, onLog = () 
     try {
       log(`(${i + 1}/${arr.length}) 出封面：《${it.title}》…`);
       const prompt = String(it.cover_prompt || '').trim();
-      generateCoverBg(book, { prompt: prompt ? (prompt + ENFORCE) : undefined, outFile: path.join(expDir, bgName) });
+      await generateCoverBg(book, { prompt: prompt ? (prompt + ENFORCE) : undefined, outFile: path.join(expDir, bgName), onLog: (e) => log(e.msg, e.level) });
       bg = bgName;
     } catch (e) { bgErr = e.message; log(`《${it.title}》封面失败：${e.message}`, 'warn'); }
     items.push({ i: i + 1, title: String(it.title).trim(), hook: String(it.hook || '').trim(), cover_prompt: String(it.cover_prompt || '').trim(), bg, bgErr });

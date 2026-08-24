@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   UNTERM_EXE_CANDIDATES, UNTERM_CLI_CANDIDATES,
-  UNTERM_INSTANCES_DIR, UNTERM_PROXY_FILE,
+  UNTERM_INSTANCES_DIR, UNTERM_PROXY_FILE, CONFIG_FILE,
 } from './paths.mjs';
 
 const IS_WIN = process.platform === 'win32';
@@ -43,8 +43,20 @@ export function untermVersion(bin) {
 // 旧版行为不同（pane 复用 / lua 报错）。故从所有存在的候选里挑【版本最新】的，避免误连旧版。
 // 可用 UNTERM_EXE 强制指定（如指向自编译的 dev build）。结果缓存，避免每次都跑 --version。
 let _exeCache;
+// 配置里手动指定的路径优先级最高——机器上有多份 Unterm 时，只有用户自己知道该用哪个。
+// 直接读配置文件而不是 import config.mjs：这里只需要两个字符串，用不着整套默认值合并，
+// 也就顺带避开了 unterm ↔ config 之间任何潜在的加载顺序问题。
+function cfgOverride(key) {
+  try {
+    const v = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))[key];
+    return v && fs.existsSync(v) ? v : '';
+  } catch { return ''; }
+}
+
 export function findUntermExe() {
   if (_exeCache !== undefined) return _exeCache;
+  const ov = cfgOverride('untermExe');
+  if (ov) return (_exeCache = ov);
   if (process.env.UNTERM_EXE && fs.existsSync(process.env.UNTERM_EXE)) return (_exeCache = process.env.UNTERM_EXE);
   const cands = UNTERM_EXE_CANDIDATES.filter(c => c && fs.existsSync(c));
   const viaPath = whichBin(IS_WIN ? 'unterm.exe' : 'unterm');
@@ -61,6 +73,8 @@ export function findUntermExe() {
 let _cliCache;
 export function findUntermCli() {
   if (_cliCache !== undefined) return _cliCache;
+  const ov = cfgOverride('untermCli');
+  if (ov) return (_cliCache = ov);
   if (process.env.UNTERM_CLI && fs.existsSync(process.env.UNTERM_CLI)) return (_cliCache = process.env.UNTERM_CLI);
   const exe = findUntermExe();
   if (exe) {
@@ -208,6 +222,21 @@ export function listInstances() {
 // （实测 instance.info{id} 也忽略 id）。meta.surface 自陈 "pane location metadata is synthetic until
 // next-core owns real GUI tabs/windows" —— 即当前【没有 pane→窗口的映射】。
 // 凡是"这个窗口里的 pane"这类假设，都必须改成按 pane 自身属性（shell.cwd / pane id 差集）来认。
+// 比对【将要启动的二进制版本】与【当前运行中实例的版本】。
+// 这是最容易藏住的一类环境问题：机器上装了多份 Unterm，程序自动找到的是标准位置的旧版，
+// 而用户实际在用的是别处的新版。表现不是"报错"，而是开出来的窗口行为不对、autopilot 认不到 pane，
+// 排查时根本想不到是版本不一样。所以主动比一下，不一致就明说。
+export function versionMismatch() {
+  const exe = findUntermExe();
+  if (!exe) return null;
+  const binV = untermVersion(exe);
+  const running = listInstances().map(i => i.version).filter(Boolean);
+  if (!binV || !running.length) return null;
+  const others = [...new Set(running.filter(v => v !== binV))];
+  if (!others.length) return null;
+  return { exe, binVersion: binV, runningVersions: others };
+}
+
 export function sharesGlobalPaneNamespace() {
   const list = listInstances();
   if (list.length < 2) return null;                     // 只有一个窗口时无从判断

@@ -370,7 +370,11 @@ function rvRange() {
 $('#btnReview').addEventListener('click', openReview);
 
 // ---------- 🤝 共创模式（你出主意 · AI 逐章）----------
-const CW_MODELS = ['claude', 'codex', 'gemini', 'qwen'];   // 只允许强 CLI
+const CW_MODELS = ['claude', 'codex', 'gemini', 'qwen'];   // 能开【可见窗口】的强 CLI
+// 共创里两类活对模型要求不同：出主意/写一章只要能出文本（API 与本地模型都行），
+// 只有「连写 3–5 章」要开可见窗口、非 CLI 不可。所以下拉不能只列 CLI。
+const cwIsWindowModel = (id) => CW_MODELS.includes(id);
+const cwIsApiModel = (id) => (STATE.models || []).find(m => m.id === id)?.kind === 'api';
 function cwNextNum() {
   const b = STATE.books.find(x => x.slug === CUR?.slug) || CUR || {};
   const st = b.stats || {};
@@ -378,10 +382,11 @@ function cwNextNum() {
 }
 function openCowrite() {
   if (!CUR) return;
-  // 模型下拉：只列可用的强 CLI（claude/codex/gemini/qwen）
-  const avail = (STATE.models || []).filter(m => CW_MODELS.includes(m.id) && m.available);
-  if (!avail.length) { toast('共创模式需要 claude 或 codex（也可 gemini/qwen）CLI，但一个都没装'); return; }
-  const prefer = CW_MODELS.find(id => avail.some(m => m.id === id));
+  // 模型下拉：能开窗口的 CLI + 能出文本的 API/本地模型（后者走无头模式，见下方按钮提示）
+  const avail = (STATE.models || []).filter(m => (CW_MODELS.includes(m.id) || m.kind === 'api') && m.available);
+  if (!avail.length) { toast('共创模式需要 claude/codex 这类 CLI，或任一 API 模型（含本地 Ollama），但一个都没有'); return; }
+  // 优先选 CLI（能看见窗口，体验更好）；没有 CLI 时退到 API/本地
+  const prefer = CW_MODELS.find(id => avail.some(m => m.id === id)) || avail[0].id;
   $('#cwModel').innerHTML = avail.map(m => `<option value="${m.id}" ${m.id === prefer ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
   $('#cwChapInfo').textContent = '下一章：第 ' + cwNextNum() + ' 章';
   // 探索式(freehand)：本书没有任何大纲，剧情由作者一段段给 → 主按钮换成「连写 3–5 章」，文案跟着换
@@ -390,6 +395,8 @@ function openCowrite() {
     ? '✍️ 这一段的故事情节（AI 会自己判断该拆成 3–5 章连着写；写得越具体越不跑偏）'
     : '✍️ 本章我的要求（人物、情节、走向、结尾——你说了算，写得越具体 AI 越不跑偏）';
   $('#cwBatchBtn').classList.toggle('primary', free);
+  cwSyncModelHint();
+  $('#cwModel').onchange = cwSyncModelHint;
   $('#cwWriteBtn').classList.toggle('primary', !free);
   $('#cwAsk').value = ''; $('#cwIntent').value = '';
   $('#cwIdeaBox').classList.add('hidden'); $('#cwIdeaBox').textContent = '';
@@ -401,6 +408,26 @@ function openCowrite() {
 $('#btnCowrite').addEventListener('click', openCowrite);
 $('#cwClose').addEventListener('click', () => $('#cowriteModal').classList.add('hidden'));
 // [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#cowriteModal').addEventListener('click', (e) => { if (e.target === $('#cowriteModal')) $('#cowriteModal').classList.add('hidden'); });
+
+// 按当前选的模型调整界面：API/本地模型开不了可见窗口 →「连写 3–5 章」不可用，
+// 单章改走无头模式（照样落盘，只是看不见窗口）。把这件事在界面上说清楚，别让用户点了才知道。
+function cwSyncModelHint() {
+  const id = $('#cwModel').value;
+  const api = cwIsApiModel(id);
+  const bBtn = $('#cwBatchBtn');
+  if (bBtn) {
+    bBtn.disabled = api;
+    bBtn.title = api ? '「连写 3–5 章」需要能开可见窗口的 CLI 模型（claude/codex/gemini/qwen）' : '';
+    bBtn.style.opacity = api ? '.45' : '';
+  }
+  const tip = $('#cwModelTip');
+  if (tip) {
+    tip.textContent = api
+      ? '本地/API 模型走【无头模式】：照样按你的要求写这一章并落盘，只是没有实时窗口可看。「连写 3–5 章」需要 CLI 模型。'
+      : '';
+    tip.classList.toggle('hidden', !api);
+  }
+}
 
 $('#cwIdeaBtn').addEventListener('click', async () => {
   if (!CUR) return;
@@ -433,10 +460,15 @@ async function cwDoWrite(redoLast) {
   const oldW = wBtn.textContent; wBtn.disabled = true; rBtn.disabled = true;
   wBtn.textContent = redoLast ? '重写中…' : '写作中…';
   $('#cwErr').textContent = '';
-  const slowModel = /claude|gemini/i.test($('#cwModel').value);
+  const mid = $('#cwModel').value;
+  const isApi = cwIsApiModel(mid);
+  const slowModel = /claude|gemini/i.test(mid);
   $('#cwSaved').textContent = (redoLast ? '🔄 正在重写这一章' : '⏳ AI 正在创作这一章')
-    + '——会弹出一个终端窗口，你可以【在窗口里实时看它写】。'
-    + (slowModel ? '（Claude/Gemini 较慢，可能 5–15 分钟；想更快可换 codex）' : '（约 1–5 分钟）')
+    + (isApi
+        ? '——本地/API 模型走无头模式，没有窗口可看，写完直接落盘。'
+          + (/^api-local$/.test(mid) ? '（本地 14B 单章约 3–6 分钟）' : '（约 1–3 分钟）')
+        : '——会弹出一个终端窗口，你可以【在窗口里实时看它写】。'
+          + (slowModel ? '（Claude/Gemini 较慢，可能 5–15 分钟；想更快可换 codex）' : '（约 1–5 分钟）'))
     + ' 写完这里会显示正文供你阅读。App 不会卡，可先干别的。';
   try {
     const r = await api('/api/book/cowrite-chapter', 'POST', {
@@ -1725,7 +1757,12 @@ $('#cvGenAI').addEventListener('click', async () => {
     $('#cvTheme').value = 'ai'; drawCover();
     if (r.prompt && !$('#cvPrompt').value.trim()) $('#cvPrompt').value = r.prompt;
     toast('AI 封面插画已生成');
-  } catch (e) { $('#cvErr').textContent = '生成失败：' + e.message + '（需在设置里填 Gemini key，且代理可用）'; }
+  } catch (e) {
+    const local = STATE.config?.image?.backend === 'local';
+    $('#cvErr').textContent = '生成失败：' + e.message
+      + (local ? '（本地出图：确认 ComfyUI/SD WebUI 已启动，且设置里的模型文件名与实际一致）'
+               : '（Imagen：需在设置里填 Gemini key，且代理可用）');
+  }
   finally { btn.disabled = false; btn.textContent = old; }
 });
 // ===== ChatGPT 网页版生成封面（免费·慢：后台跑 + 轮询状态）=====
@@ -2164,6 +2201,7 @@ async function openReader(book) {
   $('#rdTitle').textContent = '《' + book.title + '》';
   $('#rdFileName').textContent = '加载中…'; $('#rdContent').innerHTML = '<div class="rd-empty">加载中…</div>'; $('#rdNav').innerHTML = '';
   exitEdit(); $('#rdEdit').classList.add('hidden');
+  $('#rdRewrite') && $('#rdRewrite').classList.add('hidden');
   try {
     const t = await api('/api/book/files?book=' + encodeURIComponent(book.slug));
     renderReaderNav(t);
@@ -2196,6 +2234,8 @@ async function loadReaderFile(rel) {
   $('#rdNav').querySelectorAll('.rd-item').forEach(el => el.classList.toggle('active', el.dataset.rel === rel));
   $('#rdFileName').textContent = rel; $('#rdContent').innerHTML = '<div class="rd-empty">加载中…</div>';
   $('#rdEdit').classList.remove('hidden');
+  // 只有【章节正文】能重写；设定圣经/大纲/审稿报告走「编辑」就行
+  $('#rdRewrite') && $('#rdRewrite').classList.toggle('hidden', !rdIsChapter(rel));
   try {
     const r = await api('/api/book/read?book=' + encodeURIComponent(RD_BOOK.slug) + '&rel=' + encodeURIComponent(rel));
     RD_RAW = r.content || '';
@@ -2208,10 +2248,12 @@ function enterEdit() {
   $('#rdEditor').value = RD_RAW;
   $('#rdEditor').classList.remove('hidden'); $('#rdContent').classList.add('hidden');
   $('#rdEdit').classList.add('hidden'); $('#rdSave').classList.remove('hidden'); $('#rdCancel').classList.remove('hidden');
+  $('#rdRewrite') && $('#rdRewrite').classList.add('hidden');
 }
 function exitEdit() {
   $('#rdEditor').classList.add('hidden'); $('#rdContent').classList.remove('hidden');
   $('#rdEdit').classList.toggle('hidden', !RD_REL); $('#rdSave').classList.add('hidden'); $('#rdCancel').classList.add('hidden');
+  $('#rdRewrite') && $('#rdRewrite').classList.toggle('hidden', !rdIsChapter(RD_REL));
 }
 $('#rdEdit').addEventListener('click', enterEdit);
 $('#rdCancel').addEventListener('click', exitEdit);
@@ -2242,6 +2284,137 @@ $('#rdRenumber').addEventListener('click', async () => {
 $('#btnReadFromWrite').addEventListener('click', () => { if (CUR) openReader(CUR); });
 $('#btnRead').addEventListener('click', () => { if (CUR) openReader(CUR); });
 // 打开阅读器并直接跳到某一章（rel）——共创/写作后"直接读刚写的这一章"用。
+// ---------- 单章重写：换模型 / 改章名 / 重新给情节 ----------
+// 放在阅读页：作者读到哪一章不满意，当场就能重写那一章，不用回写作台绕一圈。
+const rdIsChapter = (rel) => /^chapters\//.test(rel || '') && /\.txt$/i.test(rel || '');
+
+let CRAFT_OPTS = null;
+async function loadCraftOpts() {
+  if (CRAFT_OPTS) return CRAFT_OPTS;
+  try { CRAFT_OPTS = await api('/api/craft-options', 'POST', {}); } catch { CRAFT_OPTS = { slants: [], romance: [] }; }
+  return CRAFT_OPTS;
+}
+function crRenderOptions(o) {
+  $('#crSlants').innerHTML = (o.slants || []).map(sl =>
+    `<label class="chip" title="${esc(sl.tip || '')}"><input type="checkbox" value="${esc(sl.id)}">`
+    + `<span>${esc(sl.name)}</span><span class="chip-tip">${esc(sl.tip || '')}</span></label>`).join('');
+  // 点了就高亮，一眼看得出选了几项
+  $('#crSlants').querySelectorAll('.chip input').forEach(cb => {
+    cb.addEventListener('change', () => cb.closest('.chip').classList.toggle('on', cb.checked));
+  });
+  $('#crRomance').innerHTML = '<option value="">（用本书基线档）</option>'
+    + (o.romance || []).map(r => `<option value="${esc(r.id)}">${esc(r.name)} — ${esc(r.short)}</option>`).join('');
+}
+const crPickedSlants = () =>
+  [...$('#crSlants').querySelectorAll('.chip input:checked')].map(cb => cb.value).join(',');
+
+function crSyncTip() {
+  const id = $('#crModel').value;
+  const m = (STATE.models || []).find(x => x.id === id);
+  const tip = $('#crModelTip');
+  if (!tip) return;
+  tip.textContent = id === 'api-local'
+    ? '本地模型免费但慢（单章约 3–6 分钟），文笔弱于云端强模型——这一章要质量的话建议选 codex / claude。'
+    : (m && m.kind === 'api') ? '直连接口，无窗口，约 1–3 分钟。'
+    : 'CLI 无头调用，约 1–8 分钟。';
+}
+
+function openChapterRewrite() {
+  if (!RD_BOOK || !rdIsChapter(RD_REL)) return;
+  const base = RD_REL.split('/').pop().replace(/\.txt$/i, '');
+  const num = (base.match(/^(\d{1,4})/) || [])[1] || '?';
+  const title = base.replace(/^\d{1,4}/, '');
+  $('#crWhich').innerHTML = `正在重写：<b>第 ${num} 章《${esc(title)}》</b>`;
+  // 模型下拉：CLI + API（含本地）都能重写——重写本质就是"喂 prompt 拿正文"
+  const avail = (STATE.models || []).filter(m => (CW_MODELS.includes(m.id) || m.kind === 'api') && m.available);
+  const prefer = CW_MODELS.find(id => avail.some(m => m.id === id)) || (avail[0] || {}).id;
+  $('#crModel').innerHTML = avail.map(m => `<option value="${m.id}" ${m.id === prefer ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
+  $('#crModel').onchange = crSyncTip; crSyncTip();
+  $('#crTitle').value = ''; $('#crPlot').value = ''; $('#crNote').value = '';
+  $('#crTitleMode').value = 'keep'; $('#crTitleWrap').classList.add('hidden');
+  $('#crPolish').checked = false; $('#crPolish').closest('.chip').classList.remove('on');
+  $('#crCriticWrap').classList.add('hidden');
+  // 挑刺模型下拉：跟主模型同一批候选，默认留空=用同一个模型（但会提示换一个更好）
+  const cav = (STATE.models || []).filter(m => (CW_MODELS.includes(m.id) || m.kind === 'api') && m.available);
+  $('#crCritic').innerHTML = '<option value="">（用同一个模型，效果打折）</option>'
+    + cav.map(m => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('');
+  loadCraftOpts().then(crRenderOptions);
+  $('#crErr').textContent = ''; $('#crStatus').textContent = '';
+  $('#crGo').disabled = false;
+  $('#chRewriteModal').classList.remove('hidden');
+  // 已有重写在后台跑 → 直接进等待态并接上轮询，别让用户重复提交
+  api('/api/book/rewrite-chapter-status', 'POST', { book: RD_BOOK.slug }).then((s) => {
+    if (s && s.status === 'running') {
+      $('#crGo').disabled = true;
+      $('#crStatus').textContent = '⏳ ' + (s.msg || '上一次的重写还在跑…');
+      crStartPoll(RD_BOOK);
+    }
+  }).catch(() => {});
+}
+$('#rdRewrite') && $('#rdRewrite').addEventListener('click', openChapterRewrite);
+// 只有「我自己指定」才需要输入框，其余两种模式藏起来，别让人以为必须填
+$('#crTitleMode') && $('#crTitleMode').addEventListener('change', () => {
+  $('#crTitleWrap').classList.toggle('hidden', $('#crTitleMode').value !== 'manual');
+});
+$('#crPolish') && $('#crPolish').addEventListener('change', () => {
+  const on = $('#crPolish').checked;
+  $('#crPolish').closest('.chip').classList.toggle('on', on);
+  $('#crCriticWrap').classList.toggle('hidden', !on);
+});
+// 关弹窗【只关界面，不停任务】——后台照写。轮询留着，写完照样 toast 并刷新目录。
+$('#crClose') && $('#crClose').addEventListener('click', () => $('#chRewriteModal').classList.add('hidden'));
+$('#crCancel') && $('#crCancel').addEventListener('click', () => $('#chRewriteModal').classList.add('hidden'));
+// 重写在【后台】跑：起任务后立刻返回，前端轮询。关掉弹窗、切去别的页面都不会打断它——
+// 之前做成同步请求，中途任何一环断掉（webview 超时/关弹窗/应用重启）整个活就白干且不留痕迹。
+let crPoll = null;
+function crStopPoll() { if (crPoll) { clearInterval(crPoll); crPoll = null; } }
+function crStartPoll(book) {
+  crStopPoll();
+  crPoll = setInterval(async () => {
+    let s;
+    try { s = await api('/api/book/rewrite-chapter-status', 'POST', { book: book.slug }); }
+    catch { return; }                       // 网络抖一下不算失败，下一拍再看
+    if (s.status === 'running') { $('#crStatus').textContent = '⏳ ' + (s.msg || '重写中…'); return; }
+    crStopPoll();
+    $('#crGo').disabled = false;
+    if (s.status === 'done') {
+      $('#chRewriteModal').classList.add('hidden');
+      $('#crStatus').textContent = '';
+      toast(`第 ${s.num} 章已重写（${s.before} → ${s.words} 字）`
+        + (s.title && s.oldTitle && s.title !== s.oldTitle ? `，章名 → 《${s.title}》` : ''));
+      try { await openReaderAt(book, s.rel); } catch {}   // 章名可能变了→刷新目录并停在新文件上
+    } else if (s.status === 'error') {
+      $('#crStatus').textContent = '';
+      $('#crErr').textContent = s.error || '重写失败';
+    }
+  }, 3000);
+}
+
+$('#crGo') && $('#crGo').addEventListener('click', async () => {
+  if (!RD_BOOK || !RD_REL) return;
+  const book = RD_BOOK, model = $('#crModel').value;
+  $('#crGo').disabled = true; $('#crErr').textContent = '';
+  const pol = $('#crPolish').checked;
+  $('#crStatus').textContent = '⏳ 正在重写…'
+    + (model === 'api-local' ? '（本地模型约 3–6 分钟）' : '（约 1–8 分钟）')
+    + (pol ? '＋打磨两轮，总时长约翻倍。' : '')
+    + ' 在后台跑，关掉这个弹窗也不会中断。';
+  try {
+    await api('/api/book/rewrite-chapter', 'POST', {
+      book: book.slug, rel: RD_REL, model,
+      titleMode: $('#crTitleMode').value, newTitle: $('#crTitle').value.trim(),
+      plot: $('#crPlot').value.trim(), note: $('#crNote').value.trim(),
+      slant: crPickedSlants(), romance: $('#crRomance').value || null,
+      polish: $('#crPolish').checked, critic: $('#crCritic').value || '',
+    });
+    crStartPoll(book);                       // 起好了就开始轮询，不再占着这个请求
+  } catch (e) {
+    $('#crStatus').textContent = '';
+    $('#crErr').textContent = e.message;
+    $('#crGo').disabled = false;
+  }
+});
+
 async function openReaderAt(book, rel) {
   await openReader(book);
   if (rel) { try { await loadReaderFile(rel); } catch {} }
@@ -2550,8 +2723,63 @@ async function renderSettings() {
         <input id="setZhipuModel" value="${esc(c.api?.zhipu?.model || 'glm-4-flash')}" placeholder="glm-4-flash / glm-4.5-flash（免费）"></label>
       <label class="field"><span>DeepSeek Key（platform.deepseek.com）</span>
         <input id="setDsKey" type="password" autocomplete="off" placeholder="${c.api?.deepseek?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
-      <label class="field"><span>通义 DashScope Key（阿里云）</span>
+      <label class="field"><span>通义 DashScope Key（dashscope.console.aliyun.com，有免费额度）</span>
         <input id="setDashKey" type="password" autocomplete="off" placeholder="${c.api?.dashscope?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+      <label class="field"><span>百炼订阅 Key（<b>sk-sp-</b> 开头 · Token Plan / Coding Plan · 订阅制不按 token 计费）</span>
+        <input id="setBlKey" type="password" autocomplete="off" placeholder="${c.api?.bailian?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+      <label class="field"><span>百炼订阅用哪个模型（<code>novel models --list bailian</code> 可查全部）</span>
+        <input id="setBlModel" value="${esc(c.api?.bailian?.model || 'deepseek-v4-pro')}" placeholder="deepseek-v4-pro / qwen3.8-max / glm-5.2"></label>
+      <div class="modal-hint" style="margin:-4px 0 8px">⚠️ 这条与按量付费的通义 API <b>完全隔离</b>，端点和模型名都不同，两个 key 不能互填。实测写网文 <code>deepseek-v4-pro</code> 文笔最好。</div>
+      <label class="field"><span>豆包 / 火山方舟 Key（console.volcengine.com/ark）</span>
+        <input id="setArkKey" type="password" autocomplete="off" placeholder="${c.api?.doubao?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+      <label class="field"><span>豆包<b>接入点 ID</b>（⚠️ 填 ep-xxxx，不是模型名；在方舟「在线推理」里建）</span>
+        <input id="setArkEp" value="${esc(c.api?.doubao?.model || '')}" placeholder="ep-20260101xxxxxx"></label>
+      <label class="field"><span>Kimi Key（platform.moonshot.cn）</span>
+        <input id="setKimiKey" type="password" autocomplete="off" placeholder="${c.api?.moonshot?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+      <label class="field"><span>文心 / 千帆 Key（console.bce.baidu.com/qianfan）</span>
+        <input id="setErnieKey" type="password" autocomplete="off" placeholder="${c.api?.ernie?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+    </fieldset>
+    <fieldset class="field" style="border:1px solid var(--border,#333);border-radius:8px;padding:10px 12px">
+      <legend style="padding:0 6px;font-size:13px;opacity:.8">🖥️ 本地模型（跑在本机 · 免费 · 离线 · 稿子不出本机）</legend>
+      <div class="modal-hint" style="margin:0 0 8px">
+        先装 <b>Ollama</b> 并 <code>ollama pull qwen3:14b</code>，然后在写作台选「本地模型（Ollama·免费·离线）」。
+        中文网文<b>选 Qwen 系不要 Gemma</b>——Gemma 中文有翻译腔，而且不能出图。
+      </div>
+      <label class="field"><span>服务地址（Ollama 默认 11434；LM Studio 用 :1234/v1）</span>
+        <input id="setLocalUrl" value="${esc(c.api?.local?.baseUrl || 'http://127.0.0.1:11434/v1')}" placeholder="http://127.0.0.1:11434/v1"></label>
+      <label class="field"><span>模型名</span>
+        <input id="setLocalModel" value="${esc(c.api?.local?.model || 'qwen3:14b')}" placeholder="qwen3:14b"></label>
+      <label class="field"><span>上下文长度 num_ctx（本项目喂料 8–15K token，太小会被<b>静默截断</b>→跑题复读）</span>
+        <input id="setLocalCtx" type="number" value="${c.api?.local?.numCtx ?? 16384}"></label>
+      <div class="btn-row" style="margin-top:6px"><button class="btn ghost" id="setLocalTest" type="button" style="flex:0;padding:8px 16px">🩺 体检（探服务 + 按显卡给建议）</button></div>
+      <div id="setLocalOut" class="modal-hint" style="margin:8px 0 0;white-space:pre-wrap"></div>
+    </fieldset>
+    <fieldset class="field" style="border:1px solid var(--border,#333);border-radius:8px;padding:10px 12px">
+      <legend style="padding:0 6px;font-size:13px;opacity:.8">🎨 出图后端（封面底图 / 书名实验）</legend>
+      <div class="modal-hint" style="margin:0 0 8px">
+        本项目封面的书名是后期叠上去的、底图要求<b>干净无字</b>，所以本地用 SDXL 系就够，
+        不必为「中文文字渲染」去上 20B 的 Qwen-Image（那项优势这里恰好用不到，却要多占十几 G 磁盘）。
+      </div>
+      <label class="field"><span>后端</span><select id="setImgBackend">
+        <option value="gemini" ${(c.image?.backend || 'gemini') === 'gemini' ? 'selected' : ''}>Google Imagen（要 key + 代理 · 按张计费）</option>
+        <option value="local" ${c.image?.backend === 'local' ? 'selected' : ''}>本机出图（免费 · 断网可用 · 不限张数）</option>
+      </select></label>
+      <label class="field"><span>本地出图服务</span><select id="setImgLocal">
+        <option value="comfy" ${(c.image?.localBackend || 'comfy') === 'comfy' ? 'selected' : ''}>ComfyUI（推荐）</option>
+        <option value="a1111" ${c.image?.localBackend === 'a1111' ? 'selected' : ''}>SD WebUI / Forge（启动要带 --api）</option>
+      </select></label>
+      <label class="field"><span>ComfyUI 地址</span>
+        <input id="setComfyUrl" value="${esc(c.image?.comfy?.baseUrl || 'http://127.0.0.1:8188')}" placeholder="http://127.0.0.1:8188"></label>
+      <label class="field"><span>出图模型 preset</span><select id="setComfyPreset">
+        <option value="sdxl" ${(c.image?.comfy?.preset || 'sdxl') === 'sdxl' ? 'selected' : ''}>SDXL 系（≈6.5GB · 省盘 · 够用）</option>
+        <option value="qwen-image" ${c.image?.comfy?.preset === 'qwen-image' ? 'selected' : ''}>Qwen-Image（≈20GB · 画面最强 · 吃中文提示词）</option>
+      </select></label>
+      <label class="field"><span>SDXL 大模型文件名（要与 ComfyUI/models/checkpoints 下一致）</span>
+        <input id="setComfyCkpt" value="${esc(c.image?.comfy?.ckpt || 'sd_xl_base_1.0.safetensors')}"></label>
+      <label class="field"><span>自定义工作流 JSON（可选 · ComfyUI「导出(API)」· 用 %prompt% %negative% %seed% %width% %height% 占位）</span>
+        <input id="setComfyWf" value="${esc(c.image?.comfy?.workflowFile || '')}" placeholder="留空=用上面的 preset"></label>
+      <div class="btn-row" style="margin-top:6px"><button class="btn ghost" id="setImgTest" type="button" style="flex:0;padding:8px 16px">🔌 测试出图服务连接</button></div>
+      <div id="setImgOut" class="modal-hint" style="margin:8px 0 0;white-space:pre-wrap"></div>
     </fieldset>
     <label class="field"><span>代理</span><select id="setProxy">
       <option value="on" ${c.enableProxy ? 'selected' : ''}>开（用 unterm 当前代理）</option>
@@ -2581,9 +2809,62 @@ async function renderSettings() {
     if (zk || zm) { apiPatch.zhipu = {}; if (zk) apiPatch.zhipu.apiKey = zk; if (zm) apiPatch.zhipu.model = zm; }
     const dk = $('#setDsKey').value.trim(); if (dk) apiPatch.deepseek = { apiKey: dk };
     const ak = $('#setDashKey').value.trim(); if (ak) apiPatch.dashscope = { apiKey: ak };
+    // 豆包：key 和接入点 ID 分开填（接入点是明文，可以直接看见和改）
+    const blK = $('#setBlKey').value.trim(); const blM = $('#setBlModel').value.trim();
+    if (blK || blM) { apiPatch.bailian = {}; if (blK) apiPatch.bailian.apiKey = blK; if (blM) apiPatch.bailian.model = blM; }
+    const arkK = $('#setArkKey').value.trim(); const arkE = $('#setArkEp').value.trim();
+    if (arkK || arkE) { apiPatch.doubao = {}; if (arkK) apiPatch.doubao.apiKey = arkK; apiPatch.doubao.model = arkE; }
+    const kk = $('#setKimiKey').value.trim(); if (kk) apiPatch.moonshot = { apiKey: kk };
+    const ek = $('#setErnieKey').value.trim(); if (ek) apiPatch.ernie = { apiKey: ek };
+    // 本地模型：没有 key 的概念，地址/模型/上下文都是明文，直接整块提交
+    apiPatch.local = {
+      baseUrl: $('#setLocalUrl').value.trim() || 'http://127.0.0.1:11434/v1',
+      model: $('#setLocalModel').value.trim() || 'qwen3:14b',
+      numCtx: Math.max(2048, Number($('#setLocalCtx').value) || 16384),
+    };
     if (Object.keys(apiPatch).length) patch.api = apiPatch;
+    patch.image = {
+      backend: $('#setImgBackend').value,
+      localBackend: $('#setImgLocal').value,
+      comfy: {
+        baseUrl: $('#setComfyUrl').value.trim() || 'http://127.0.0.1:8188',
+        preset: $('#setComfyPreset').value,
+        ckpt: $('#setComfyCkpt').value.trim(),
+        workflowFile: $('#setComfyWf').value.trim(),
+      },
+    };
     try { STATE.config = await api('/api/config', 'POST', { patch }); fillModels(); toast('设置已保存'); }
     catch (e) { toast(e.message); }
+  });
+  // 🩺 本地模型体检：探服务在不在、装了哪些模型，并按这块卡给出选型建议+安装命令。
+  // 本地部署最劝退的不是装，是「装哪个/装多大/为什么这么慢」——这个按钮把它一次答完。
+  $('#setLocalTest')?.addEventListener('click', async () => {
+    const out = $('#setLocalOut'); out.textContent = '⏳ 体检中…';
+    try {
+      const h = await api('/api/local/health', 'POST', {});
+      const L = [];
+      L.push(h.gpu?.ok ? `✅ 显卡：${h.gpu.name} ${(h.gpu.totalMb / 1024).toFixed(0)}G 显存（空闲 ${(h.gpu.freeMb / 1024).toFixed(1)}G）`
+                       : `❌ 显卡：${h.gpu?.reason || '未检测到'}`);
+      if (h.text?.ok) {
+        L.push(`✅ 文本服务：${h.text.kind === 'ollama' ? 'Ollama' : 'OpenAI 兼容'} @ ${h.text.baseUrl}`);
+        L.push(h.text.models?.length ? `   已装：${h.text.models.map(m => m.name + (m.sizeText ? '(' + m.sizeText + ')' : '')).slice(0, 8).join('、')}`
+                                     : '   （还没装任何模型）');
+      } else L.push(`❌ 文本服务：${h.text?.error || '不可用'}`);
+      L.push(h.image?.ok ? `✅ 出图服务：${h.image.info}` : `❌ 出图服务：${h.image?.error || '不可用'}`);
+      const rt = h.recommend?.text?.pick, ri = h.recommend?.image;
+      if (rt) L.push(`\n📝 写作推荐：${rt.model}（${rt.size}）— ${rt.note}\n   装：ollama pull ${rt.model}`);
+      if (ri) L.push(`🎨 出图推荐：${ri.pick} — ${ri.note}`);
+      out.textContent = L.join('\n');
+    } catch (e) { out.textContent = '❌ ' + e.message; }
+  });
+  $('#setImgTest')?.addEventListener('click', async () => {
+    const out = $('#setImgOut'); out.textContent = '⏳ 连接中…';
+    const backend = $('#setImgLocal').value;
+    try {
+      const r = await api('/api/local/probe-image', 'POST', { backend, baseUrl: backend === 'comfy' ? $('#setComfyUrl').value.trim() : undefined });
+      out.textContent = r.ok ? `✅ 已连上 ${backend === 'a1111' ? 'SD WebUI' : 'ComfyUI'} @ ${r.baseUrl}｜${r.info}${r.models?.length ? '｜模型：' + r.models.slice(0, 5).join('、') : ''}`
+                             : `❌ ${r.error}`;
+    } catch (e) { out.textContent = '❌ ' + e.message; }
   });
   // 书库目录：原生文件夹选择器（桌面应用用 Tauri 对话框；浏览器回退到手填路径）
   $('#setWsPick').addEventListener('click', async () => {

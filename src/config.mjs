@@ -9,6 +9,13 @@ const DEFAULTS = {
   proxyNode: 'auto',                 // unterm 代理节点名；'auto' = 用 proxy.json 里的 current_node
   enableProxy: true,                 // 启动实例时是否开代理
   untermAgentName: 'claude-code',    // 连 MCP 时自报的受信 agent 名（解锁 session.input 写操作）
+  // 手动指定 Unterm 可执行文件（留空=自动找 C:\Program Files\Unterm\ 与 PATH）。
+  // ⚠️ 为什么需要：装了多份 Unterm（正式版 + 自己编的开发版）时，自动查找只会看标准位置，
+  // 很容易出现【程序启动的是 Program Files 里的旧版，而你实际在用的是别处的新版】。
+  // 两个版本的 pane 命名空间语义在 0.65 前后不同（见 sharesGlobalPaneNamespace），混用会出怪事。
+  // doctor 会主动比对"找到的二进制版本"与"运行中实例的版本"，不一致就报警。
+  untermExe: '',
+  untermCli: '',
   codexBypassSandbox: true,          // codex Windows 沙箱常失败 → 默认绕过（书目录是独立 git 仓库）
   gemini: {                          // Google Gemini / Imagen（用于 AI 生成封面底图、把中文题材翻成英文画面提示）
     apiKey: '',                      // Google AI Studio API key（AIza...）。存在用户配置文件里，不写进源码
@@ -54,10 +61,74 @@ const DEFAULTS = {
     zhipu:     { apiKey: '', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.5-flash' },    // 智谱：glm-4.5-flash 免费且明显更强（glm-4-flash 会复读凑字，弃用）
     deepseek:  { apiKey: '', baseUrl: 'https://api.deepseek.com',            model: 'deepseek-chat' },     // DeepSeek：极便宜、写作强
     dashscope: { apiKey: '', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' }, // 通义千问 API（有免费额度）
+    // 百炼订阅（Token Plan / Coding Plan）：sk-sp- 开头的 key，订阅制不按 token 计费。
+    // 一个 key 拿到多家旗舰（qwen3.8-max / glm-5.2 / deepseek-v4-pro …），实测 deepseek-v4-pro 文笔最好。
+    // ⚠️ 端点和模型名都与按量付费的 dashscope 不同，两者不能混用。
+    bailian:   { apiKey: '', baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', model: 'deepseek-v4-pro' },
+    // 豆包：中文语境/网络梗最熟，网文语感对路。⚠️ model 填【接入点 ID】(ep-xxxx) 不是模型名。
+    doubao:    { apiKey: '', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: '' },
+    // Kimi：长文本强，适合当"挑刺/润色"那一轮。
+    moonshot:  { apiKey: '', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-32k' },
+    // 文心：中式表达自然，对文言/网络梗理解到位。
+    ernie:     { apiKey: '', baseUrl: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-turbo-128k' },
+    // 【本地模型】跑在本机的 Ollama / LM Studio / llama.cpp，零成本、零额度、断网可写、内容不出本机。
+    // 中文网文首选 Qwen 系（Gemma 中文有明显翻译腔，正是本项目 deslop 闸在治的东西）。
+    // 显存分档：12G→qwen3:14b（甜点）｜8G→qwen3:8b｜24G+→qwen3.8:27b。`novel local` 会按你的显卡给建议。
+    local: {
+      baseUrl: 'http://127.0.0.1:11434/v1',   // Ollama。LM Studio 改 :1234/v1，llama.cpp server 改 :8080/v1
+      model: 'qwen3:14b',
+      apiKey: '',                             // 本地不需要；vLLM 等设了鉴权才填
+      flavor: 'auto',                         // auto|ollama|openai —— auto 会探一次 /api/version 认出 Ollama
+      // ⚠️ Ollama 默认 num_ctx 只有 4096，而本项目一次喂进去的上下文包有 8–15K token。
+      // 走 OpenAI 兼容端点会被【静默截断】（设定/大纲/上一章被悄悄砍掉→跑题复读且不报错），
+      // 所以认出 Ollama 后改走原生 /api/chat 并显式传这个值。16384 是 12G 卡跑 14B 的稳妥上限。
+      numCtx: 16384,
+      keepAlive: '30m',                       // 模型常驻显存，免得每章重新加载（14B 加载一次要十几秒）
+      // 输出上限单独给本地设，不跟云端共用 8192——num_ctx 是【喂料+输出】共享的一个窗口，
+      // 给输出留 8192 就等于把上下文包压到 8K 以内，设定圣经/大纲会被挤掉。
+      // 中文约 1.5 字/token，5120 token ≈ 7600 字，写 3000–3600 字的单章有两倍余量，够用且不浪费窗口。
+      maxTokens: 5120,
+      // Qwen3 等混合推理模型默认先吐 <think>…</think>。写网文不需要这段思考，而它会实打实吃掉
+      // 输出预算——思考花 3K token，正文就少 3K，表现是「写到一半没了」且不报错。故默认关。
+      think: false,
+      timeoutMs: 1800000,                     // 本地出 3000 字单章约 2–4 分钟，云端那个 5 分钟超时会误杀
+    },
     temperature: 0.85,               // 网文写作略高一点更有文采
     maxTokens: 8192,                 // 一批多章，给足输出上限
     timeoutMs: 300000,               // 单批 API 调用超时
     proxy: '',                       // 需要走代理才能访问时填（国内直连智谱/DeepSeek/通义都不用代理，留空）
+  },
+  // 出图后端：'gemini'=Google Imagen（要 key/代理/按张计费）｜'local'=本机 ComfyUI / SD WebUI（零成本、断网可用）。
+  // 本项目封面的书名是后期 canvas 叠上去的、底图要求【干净无字】，所以本地用 SDXL 系就够，
+  // 不非得上 20B 的 Qwen-Image（它最强的中文文字渲染在这里恰好用不到，却要多占十几 G 磁盘）。
+  image: {
+    backend: 'gemini',               // 'gemini' | 'local'
+    localBackend: 'comfy',           // 'comfy'（推荐）| 'a1111'（SD WebUI/Forge，启动要带 --api）
+    timeoutMs: 900000,               // 本地出一张：SDXL 约 30–60 秒；Qwen-Image 20B 在 12G 卡上约 5 分钟
+    // 12G 卡上文本模型(10G)和出图模型(12G)【放不下同时在显存里】，会 OOM 或疯狂换页。
+    // 故本地出图前自动把 Ollama 的文本模型请出去，写下一章时它会自己重载（14B 约 15 秒）。
+    // 显存 ≥20G 的机器不触发；也可设 false 手动管理。
+    autoUnloadText: true,
+    negative: '',                    // 留空=用 imagelocal.LOCAL_NEGATIVE（已摁死文字/水印/西方面孔）
+    comfy: {
+      baseUrl: 'http://127.0.0.1:8188',
+      preset: 'sdxl',                // 'sdxl' | 'qwen-image'；也可用 workflowFile 完全接管
+      workflowFile: '',              // 填了就用你自己在 ComfyUI「导出(API)」的工作流 JSON，
+                                     // 里面用 %prompt% %negative% %seed% %width% %height% 占位
+      ckpt: 'sd_xl_base_1.0.safetensors',   // preset=sdxl 时的大模型文件名（要与 models/checkpoints 下一致）
+      // preset=qwen-image 时这三个（要与 ComfyUI models/unet|text_encoders|vae 下的实际文件名一致）
+      unet: 'qwen-image-2512-Q4_K_M.gguf',
+      clip: 'qwen_2.5_vl_7b_fp8_scaled.safetensors',
+      vae: 'qwen_image_vae.safetensors',
+      gguf: true,                    // unet 是 .gguf 走 UnetLoaderGGUF（需装 ComfyUI-GGUF 节点）
+      clipGguf: false,               // 文本编码器也用 GGUF（12G 卡显存吃紧时可减少换页；理解力略降）
+      steps: 0, cfgScale: 0, width: 0, height: 0,   // 0=按 preset 取默认值
+    },
+    a1111: {
+      baseUrl: 'http://127.0.0.1:7860',
+      ckpt: '',                      // 留空=用 WebUI 当前已加载的模型
+      steps: 28, cfgScale: 6, width: 896, height: 1152, sampler: 'DPM++ 2M Karras',
+    },
   },
   autopilot: {
     enabled: true,                   // 是否自动监控应答

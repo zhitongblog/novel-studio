@@ -177,6 +177,7 @@
               <button class="btn ghost tiny" id="rdNavToggle" title="收起/展开左侧目录，专心读正文">📑 目录</button>
               <span class="rd-fname" id="rdFileName">选择左侧任意文件阅读</span>
               <div class="grow"></div>
+              <button class="btn ghost tiny hidden" id="rdRewrite" title="换个模型重写这一章（可改章名、可重新指定情节）">♻️ 重写本章</button>
               <button class="btn ghost tiny hidden" id="rdEdit">✏️ 编辑</button>
               <button class="btn primary tiny hidden" id="rdSave">💾 保存</button>
               <button class="btn ghost tiny hidden" id="rdCancel">取消</button>
@@ -315,6 +316,7 @@
       <p class="modal-hint">以<b>你的想法为主</b>：你给情节、AI 执笔，你审完满意再给下一段——AI 不自作主张改方向，从根上治“越写越变形”。两种给法：<b>给一段故事情节</b>让 AI 自拆 3–5 章连写（探索式书的主写法，全书不需要大纲），或<b>只给这一章的要求</b>让它一次只写一章。人物关系与逻辑由你把控。<b>需 claude 或 codex。</b></p>
       <div class="cw-head" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
         <label class="field" style="margin:0"><span>模型</span><select id="cwModel"></select></label>
+        <div id="cwModelTip" class="modal-hint hidden" style="margin:4px 0 0;grid-column:1/-1"></div>
         <span class="badge" id="cwChapInfo">下一章：第 ? 章</span>
       </div>
 
@@ -384,6 +386,41 @@
   </div>
 
   <!-- 重写弹窗 -->
+  <div class="modal hidden" id="chRewriteModal">
+    <div class="modal-card">
+      <button class="modal-close" id="crClose" title="关闭 (Esc)">✕</button>
+      <h2>♻️ 重写本章</h2>
+      <p class="modal-hint" id="crWhich"></p>
+      <p class="modal-hint">只重写这一章，其余全不动。<b>原文会自动备份成同名 .bak</b>，不满意可取回。</p>
+      <label class="field"><span>用哪个模型重写</span><select id="crModel"></select></label>
+      <div class="modal-hint" id="crModelTip" style="margin:-4px 0 8px"></div>
+      <div class="field"><span>这一章侧重什么（<b>可多选</b>，会告诉 AI 怎么配比、互相咬合）</span>
+        <div id="crSlants" class="chip-grid"></div>
+      </div>
+      <label class="field"><span>本章感情线尺度（留空 = 用本书的基线档）</span>
+        <select id="crRomance"></select>
+      </label>
+      <label class="field"><span>章名</span>
+        <select id="crTitleMode">
+          <option value="keep">保持原章名</option>
+          <option value="auto">让 AI 按重写后的内容重起一个（会避开全书已用章名）</option>
+          <option value="manual">我自己指定</option>
+        </select>
+      </label>
+      <label class="field hidden" id="crTitleWrap"><span>新章名</span><input id="crTitle" type="text" placeholder="填你想要的章名"></label>
+      <label class="field"><span>这一章的情节（<b>留空 = 保持原情节只改文笔</b>；写了就按你说的重来）</span>
+        <textarea id="crPlot" rows="4" placeholder="例如：改成他当场就动了手，打完才发现认错了人——把误会留到下一章揭开"></textarea></label>
+      <label class="field"><span>补充要求（可空）</span>
+        <textarea id="crNote" rows="2" placeholder="例如：对话再少一点、多写动作；结尾停在钩子上"></textarea></label>
+      <label class="chip" style="margin:2px 0 6px"><input type="checkbox" id="crPolish">
+        <span>多轮打磨</span><span class="chip-tip">初稿 → 挑刺 → 按意见改（多花 2 次调用，质感明显不同）</span></label>
+      <label class="field hidden" id="crCriticWrap"><span>让谁来挑刺（换个模型比自评有效得多）</span>
+        <select id="crCritic"></select></label>
+      <div class="btn-row end"><button class="btn ghost" id="crCancel">取消</button><button class="btn primary" id="crGo">♻️ 开始重写 ▶</button></div>
+      <div class="modal-hint" id="crStatus" style="margin-top:8px"></div>
+      <div class="modal-err" id="crErr"></div>
+    </div>
+  </div>
   <div class="modal hidden" id="rewriteModal">
     <div class="modal-card">
       <button class="modal-close" id="rwClose" title="关闭 (Esc)">✕</button>
@@ -688,7 +725,7 @@
           <label class="field"><span>作者名</span><input id="cvAuthor" placeholder="如：佚名" /></label>
           <label class="field"><span>主题</span><select id="cvTheme"></select></label>
           <div class="ai-cover-box">
-            <button class="btn" id="cvGenAI" style="width:100%">🎨 Imagen 生成插画</button>
+            <button class="btn" id="cvGenAI" style="width:100%">🎨 AI 生成插画</button>
             <textarea id="cvPrompt" class="ai-prompt" rows="2" placeholder="可留空（自动按题材/文风生成画面提示词），或自己写一句画面描述…"></textarea>
             <div class="modal-hint">Google Imagen 出竖版底图，约 10–20 秒（需 Gemini key + 代理）。</div>
           </div>

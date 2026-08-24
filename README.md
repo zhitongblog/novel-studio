@@ -49,6 +49,35 @@
 Novel Studio 本身**零密钥**：它读取 Unterm 实例本地自动生成的 auth_token（自动，无需你提供），
 写作额度消耗在 **codex/claude/gemini 各自的登录**上（与本软件无关）。装上即用。
 
+## 🖥️ 本地模型（免费 · 离线 · 稿子不出本机）
+
+正文和封面都能接到跑在自己机器上的模型：零成本、零额度、断网可写、书名实验想出几十张封面就出几十张。
+代价是慢——12G 显卡出一章 3000 字约 2–4 分钟（云端 20–40 秒），适合挂着长跑。
+
+```powershell
+novel local              # 体检：探服务 + 按你的显卡给出该装哪个模型 + 照着抄的命令
+```
+
+**选型结论：写中文网文用 Qwen，不要 Gemma。** Gemma 中文有明显翻译腔（正是本项目 `deslop` 与反 AI 味闸在治的东西），
+而且 Gemma 只能看图不能出图——出图那半边它根本接不上。Qwen 这边有 Qwen-Image（20B，Apache 2.0）。
+
+```powershell
+winget install Ollama.Ollama
+ollama pull qwen3:14b     # 12G 显存的甜点档；8G→qwen3:8b，24G+→qwen3.8:27b
+```
+
+然后在写作台的模型下拉里选 **「本地模型（Ollama·免费·离线）」** 即可开写。
+出图在「设置 · 🎨 出图后端」切到「本机出图」（ComfyUI 或 SD WebUI）。
+
+> ⚠️ **num_ctx 是最隐蔽的坑**：Ollama 默认上下文只有 4096 token，而本项目一次喂进去的上下文包有 8–15K。
+> 超出部分会被**静默截断**——不报错，只是把设定圣经和大纲悄悄砍掉，然后模型开始跑题复读。
+> 所以本项目认出 Ollama 后会绕开它的 OpenAI 兼容端点（那个端点不透传该参数），改走原生 `/api/chat` 显式传值。
+
+完整部署与排错见 **[docs/本地模型.md](docs/本地模型.md)**。
+
+> 本地和云端建议混着用：**正文长跑**用本地（量大、免费）、**立项/大纲/审稿/全文自检**用云端强模型（次数少但最吃推理）、
+> **封面**用本地（书名实验一次出 6–8 张，云端按张计费很肉疼）。换模型不换文风——规范落在每本书的 `AGENTS.md` 里。
+
 ## 安装 / 打包
 
 > 零运行时依赖，需 Node ≥ 18 和已安装的 Unterm（`C:\Program Files\Unterm\`）。
@@ -85,8 +114,10 @@ cargo tauri build    # 生成 Windows 安装包(NSIS) → src-tauri/target/relea
 
 ```powershell
 novel                 # TUI：书架 / 新建 / 开始写作 / 设置 / 自检 / 实例
-novel doctor          # 环境自检：Unterm、三模型可用性、运行实例、代理
-novel models          # 三模型可用性
+novel doctor          # 环境自检：Unterm、模型可用性、运行实例、代理、本地模型服务
+novel models          # 模型可用性
+novel local           # 本地模型体检 + 按显卡的选型建议（该装哪个、装多大）
+novel local import --file x.gguf   # ollama pull 拉不动时：手动下的 GGUF 一键导入
 
 # 新建一本书（手动：生成 bible/index/outline + 三模型上下文 + profile）
 novel book new --title "灯下记" --genre "民国国术·以武正道" --words 200万 --batch 5

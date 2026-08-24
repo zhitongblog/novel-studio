@@ -3,17 +3,14 @@
 // 番茄要求分卷必须有名字——有了这个，建卷/改卷名就不会再因空副标题卡住。
 import fs from 'node:fs';
 import path from 'node:path';
-import { chatComplete, providerConfigured } from './apichat.mjs';
+import { chatComplete, pickProvider } from './apichat.mjs';
 import { loadPublishChapters, outlineVolSubtitle, bibleVolSubtitle, bookVolNum } from './publish.mjs';
 
 const BIBLE = 'novel_bible.md';
 const SECTION = '## 卷名清单（自动生成）';
 const readSafe = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
 
-function pickProvider(cfg) {
-  for (const p of ['zhipu', 'deepseek', 'dashscope']) if (providerConfigured(p, cfg)) return p;
-  return null;
-}
+// 挑模型的逻辑收到 apichat.pickProvider 了（含本地模型），这里不再自己维护一份名单。
 
 // 某卷【目录名】自带的副标题（"卷03_静海旧火"/"卷03静海旧火" → "静海旧火"；"卷03" → ""）
 // ⚠️去前缀要一次吃光"卷"+数字，别用 \d+(.+) 那种会回溯把数字漏给副标题(实测"卷01"→误得"1")。

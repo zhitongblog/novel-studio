@@ -84,10 +84,24 @@ export function parseChapters(text, { onLog = () => {} } = {}) {
   for (let i = 0; i < heads.length; i++) {
     const h = heads[i];
     const nextHeadIdx = (i + 1 < heads.length) ? heads[i + 1].index : src.length;
-    let seg = src.slice(h.after, nextHeadIdx);
+    const whole = src.slice(h.after, nextHeadIdx);
     // 优先切到 <<<END>>>；没有则用整段（到下一 CHAPTER 前）
-    const endM = seg.match(/<<<\s*END\s*>>>/);
-    if (endM) seg = seg.slice(0, endM.index);
+    let seg = whole;
+    const endM = whole.match(/<<<\s*END\s*>>>/);
+    if (endM) {
+      seg = whole.slice(0, endM.index);
+      // 【小模型常见的摆模板行为】：把 <<<CHAPTER…>>> 和 <<<END>>> 当"框架"连着吐出来，
+      // 正文写在 END 【之后】。实测本地 qwen3:14b 就是这样：
+      //     <<<CHAPTER 章号=2 标题=旧人重逢>>>\n<<<END>>>\n沈砚秋站在拳馆外……
+      // 死守"END 之前"会把整章判成空、报"未按格式产出"，而正文其实好好地躺在下面。
+      // 所以：END 前几乎没东西、而 END 后有大段内容时，改用后面那段。
+      const before = seg.replace(/\s/g, '').length;
+      const after = whole.slice(endM.index + endM[0].length);
+      if (before < 50 && after.replace(/\s/g, '').length >= 50) {
+        onLog({ level: 'warn', msg: `  第 ${h.num} 章：模型把 <<<END>>> 提前吐了、正文写在其后，已按正文取用` });
+        seg = after.replace(/<<<\s*END\s*>>>/g, '');
+      }
+    }
     const body = sanitizeBody(seg);
     if (!h.num || !h.title) { onLog({ level: 'warn', msg: `网页版：跳过一段（缺章号或标题）` }); continue; }
     if (!body || body.replace(/\s/g, '').length < 50) { onLog({ level: 'warn', msg: `网页版：第 ${h.num} 章正文过短(<50字)，跳过（可能被截断）` }); continue; }

@@ -1,5 +1,12 @@
-// AI 封面底图生成：调用 Google Imagen（出竖版插画），把中文题材润色成英文出图提示词。
+// AI 封面底图生成。两条后端，由 config.image.backend 决定：
+//   'gemini'（默认）：调 Google Imagen——要 key、要代理、按张计费；
+//   'local'          ：调本机 ComfyUI / SD WebUI——零成本、断网可用、不限张数（见 imagelocal.mjs）。
 // 走 curl 是因为 Node 内置 fetch 不读环境代理；curl -x 显式走代理稳定，且 -o 落盘避开 stdout 缓冲上限。
+//
+// 【出图提示词要跟着后端换语言】——这是接本地后端最容易做错的一处：
+//   · Imagen / Qwen-Image：吃自然语言长句，Qwen-Image 更是【原生中文】，翻成英文反而丢语义；
+//   · SDXL 系：文本编码器是英文 CLIP，喂中文等于喂噪声，必须英文 tag 串。
+// 故 buildArtPrompt 按后端分别产出，不再一律走「翻成英文」。
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -7,6 +14,9 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig } from './config.mjs';
 import { getModel } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
+import { generateLocalImage, LOCAL_NEGATIVE } from './imagelocal.mjs';
+import { unloadLocalText, detectGpu } from './localai.mjs';
+import { chatComplete } from './apichat.mjs';
 
 // 出图硬约束（所有封面/书名实验封面共用）：强制中国人/东亚面孔/该时代中国场景/国风 +【画面内绝不出现任何文字】。
 // ⚠️ 关键坑：Imagen 会照着【版式词】画文字——"poster"→电影海报(带标题+片尾字幕)、"book cover"→画成一本带书名的实体书，
@@ -110,9 +120,9 @@ function bibleVisualBits(book) {
   return { era, hero };
 }
 
-// 让 Gemini 文本模型据【书的真实内容(时代/主角/题材)】润色成一句英文出图提示词，
+// 【Imagen 路径】据书的真实内容(时代/主角/题材)润色成一句英文出图提示词，
 // 并【硬性追加中国化后缀】杜绝"外国人/西式场景"。失败则回退到含内容的兜底。
-export function buildArtPrompt(book) {
+export function buildArtPromptSync(book) {
   const cfg = loadConfig();
   const g = cfg.gemini || {};
   const promptModel = g.promptModel || 'codex';
@@ -161,15 +171,90 @@ export function buildArtPrompt(book) {
   return fallback + ENFORCE;
 }
 
+// —— 本地后端的出图提示词 ——
+// Qwen-Image 原生中文：直接用中文描述画面，比「中译英再喂」保真得多（人物气质、时代器物、国风质感）。
+// SDXL：文本编码器只认英文，必须英文 tag 串，且同样要摁住「东亚面孔 + 无文字」。
+const ZH_ENFORCE = '，主角是中国人、东亚面孔，服饰与场景符合该时代的中国，国风质感，电影级光影，'
+  + '高细节数字绘画，竖版 3:4 单人特写，背景干净不杂乱，画面中不要出现任何文字、字母、水印或签名';
+
+// 用【本地模型】把书的设定润色成一句出图提示词。本地模式的要点就是不依赖云端，
+// 所以这里不复用 runCliPrompt(codex/claude)，直接调本地 LLM；失败就退回按设定拼的兜底句。
+async function localArtPrompt(book, cfg, zh) {
+  const { era, hero } = bibleVisualBits(book);
+  const desc = [
+    book.title && ('书名《' + book.title + '》'),
+    book.genre && ('类型：' + book.genre),
+    era && ('时代/世界观：' + era),
+    hero && ('主角：' + hero),
+  ].filter(Boolean).join('；');
+  const heroBit = hero ? hero.replace(/[，。；,].*$/, '') : '';
+  const eraBit = era ? era.replace(/[，。；,].*$/, '') : '';
+  const fallbackZh = (heroBit || '一位神情坚毅的中国主角') + (eraBit ? '，身处' + eraBit : '，历史中国背景');
+  const fallbackEn = 'Chinese webnovel cover illustration of ' + (heroBit || 'a determined Chinese hero')
+    + (eraBit ? ', set in ' + eraBit : ', historical China');
+
+  // ⚠️ 【别让模型自己加设定】——实测本地 14B 会往画面里塞设定里没有的东西：
+  // 设定写的是「形意拳传人」（空手），它却写出「负剑而立」，出来的封面凭空多了一把剑，
+  // 跟正文对不上。这类添油加醋在云端强模型上少见，本地模型必须显式摁住。
+  const NO_INVENT = '【硬性约束】只能依据上面给出的设定作画。严禁自行添加设定里没有的兵器、法器、坐骑、'
+    + '随从、身份标识或超自然元素——设定没写他用兵器，就不要给他任何刀剑枪棍；没写异能，'
+    + '就不要有光效、灵气、符文。拿不准的细节宁可不写，也不要编。';
+
+  const instruction = (zh
+    ? '你是顶级插画指导。为下面这本中文网络小说写【一句中文出图提示词】，用于 AI 出封面插画。要求：'
+      + '①一段话、画面感极强：写清主体人物的神态/动作/服饰、场景、构图、光影、色调；'
+      + '②贴合小说的主角形象与时代；③画面里不要任何文字。只输出这句提示词本身，不要解释、不要引号。'
+    : '你是顶级插画指导。为下面这本中文网络小说写【一句英文出图提示词】(用于 SDXL)。要求：'
+      + '①纯英文、逗号分隔的 tag 串、画面感强：主体人物(神态/动作/服饰)、场景、构图、光影、色调、艺术风格；'
+      + '②人物必须是中国人、东亚面孔，服饰场景符合该时代的中国；③不要任何文字/字母。'
+      + '只输出这串英文 tag，不要解释、不要引号。'
+  ) + '\n\n' + NO_INVENT + '\n\n小说信息：' + desc;
+
+  try {
+    const r = await chatComplete({
+      provider: 'local', cfg, maxTokens: 400, temperature: 0.85,
+      messages: [{ role: 'user', content: instruction }],
+    });
+    // <think> 推理段 chatComplete 里已统一剥掉，这里只清首尾引号/空白
+    let t = String(r.content || '').trim();
+    t = t.replace(/^[\s"'\u201c\u201d]+|[\s"'\u201c\u201d]+$/g, '').replace(/\s+/g, ' ').trim();
+    if (zh && t.length > 8) return t + ZH_ENFORCE;
+    if (!zh && t.length > 15 && !/[\u4e00-\u9fff]/.test(t)) return sanitizeArtPrompt(t) + ART_ENFORCE;
+  } catch {}
+  return zh ? (fallbackZh + ZH_ENFORCE) : (fallbackEn + ART_ENFORCE);
+}
+
 // 生成封面底图：Imagen 出 3:4 竖图，默认存到 book.dir/cover_bg.png（可用 outFile 另存，供多封面实验用），返回 {file, prompt, w, h}。
-export function generateCoverBg(book, { prompt, outFile } = {}) {
-  const g = gcfg();
-  const artPrompt = sanitizeArtPrompt((prompt && prompt.trim()) || buildArtPrompt(book));   // 剥掉 poster/book cover 等诱发文字的版式词
-  const body = { instances: [{ prompt: artPrompt }], parameters: { sampleCount: 1, aspectRatio: '3:4' } };
-  const j = curlJson(`${HOST}/models/${g.imageModel}:predict?key=${g.apiKey}`, body, 120);
-  const b64 = j.predictions?.[0]?.bytesBase64Encoded || j.predictions?.[0]?.image?.bytesBase64Encoded;
-  if (!b64) throw new Error('未返回图片（可能被安全策略拦截，换个题材描述再试）');
-  const buf = Buffer.from(b64, 'base64');
+export async function generateCoverBg(book, { prompt, outFile, onLog = () => {} } = {}) {
+  const cfg = loadConfig();
+  const backend = cfg.image?.backend || 'gemini';
+  let buf, artPrompt;
+
+  if (backend === 'local') {
+    // 中文 prompt 只在 ComfyUI + Qwen-Image 上用（SDXL / SD WebUI 的英文 CLIP 读不懂中文）。
+    const useZh = cfg.image?.comfy?.preset === 'qwen-image' && cfg.image?.localBackend !== 'a1111';
+    artPrompt = (prompt && prompt.trim()) || await localArtPrompt(book, cfg, useZh);
+    if (!useZh) artPrompt = sanitizeArtPrompt(artPrompt);   // 英文路径仍要剥掉 poster/book cover 等诱发文字的版式词
+    onLog({ level: 'act', msg: '本地出图（' + (cfg.image?.localBackend === 'a1111' ? 'SD WebUI' : 'ComfyUI · ' + (cfg.image?.comfy?.preset || 'sdxl')) + '）…' });
+    // 显存不够两边同时占（12G 卡上 14B 文本模型 10G + 出图 12G）→ 先把文本模型请出去。
+    // 提示词已经生成完了，这时卸载不影响本次出图；写下一章时 Ollama 会自动重载（约 15 秒）。
+    // 显存足够大（≥20G）就不折腾，两边常驻更省事。
+    const gpu = detectGpu();
+    if (cfg.image?.autoUnloadText !== false && (!gpu.ok || gpu.totalMb < 20000)) {
+      const u = await unloadLocalText(cfg.api?.local?.baseUrl, cfg.api?.local?.model);
+      if (u.unloaded) onLog({ level: 'info', msg: `  已暂时卸载文本模型 ${u.name} 腾出 ${u.freedGb}G 显存（下次写作会自动重载，约 15 秒）` });
+    }
+    buf = await generateLocalImage({ prompt: artPrompt, negative: cfg.image?.negative || LOCAL_NEGATIVE, cfg, onLog });
+  } else {
+    const g = gcfg();
+    artPrompt = sanitizeArtPrompt((prompt && prompt.trim()) || buildArtPromptSync(book));   // 剥掉 poster/book cover 等诱发文字的版式词
+    const body = { instances: [{ prompt: artPrompt }], parameters: { sampleCount: 1, aspectRatio: '3:4' } };
+    const j = curlJson(`${HOST}/models/${g.imageModel}:predict?key=${g.apiKey}`, body, 120);
+    const b64 = j.predictions?.[0]?.bytesBase64Encoded || j.predictions?.[0]?.image?.bytesBase64Encoded;
+    if (!b64) throw new Error('未返回图片（可能被安全策略拦截，换个题材描述再试）');
+    buf = Buffer.from(b64, 'base64');
+  }
+
   const file = outFile || path.join(book.dir, 'cover_bg.png');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, buf);
@@ -177,3 +262,16 @@ export function generateCoverBg(book, { prompt, outFile } = {}) {
   try { w = buf.readUInt32BE(16); h = buf.readUInt32BE(20); } catch {}
   return { file, prompt: artPrompt, w, h, bytes: buf.length };
 }
+
+// 供 UI「只出提示词给用户看/改」用：按当前后端产出对应语言的提示词。
+export async function buildArtPromptAuto(book) {
+  const cfg = loadConfig();
+  if ((cfg.image?.backend || 'gemini') === 'local') {
+    const useZh = cfg.image?.comfy?.preset === 'qwen-image' && cfg.image?.localBackend !== 'a1111';
+    return await localArtPrompt(book, cfg, useZh);
+  }
+  return buildArtPromptSync(book);
+}
+
+// 兼容旧调用名（Imagen 路径的同步实现）。
+export { buildArtPromptSync as buildArtPrompt };

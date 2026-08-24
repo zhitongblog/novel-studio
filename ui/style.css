@@ -371,3 +371,14 @@ textarea { resize: vertical; line-height: 1.5; }
 .ne-title { padding: 6px 8px 2px; font-weight: 600; font-size: 13px; cursor: pointer; line-height: 1.3; }
 .ne-title:hover { color: #58c1a6; }
 .ne-hook { padding: 0 8px 8px; font-size: 11px; opacity: .6; }
+
+
+/* 重写弹窗：可多选的"侧重"标签。用 label 包 checkbox，点整块都能选，手机上好点。 */
+.chip-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px;
+  border: 1px solid var(--border, #333); border-radius: 999px; cursor: pointer;
+  font-size: 12.5px; user-select: none; transition: background .12s, border-color .12s; }
+.chip:hover { border-color: var(--accent, #6aa8ff); }
+.chip input { margin: 0; cursor: pointer; }
+.chip.on { background: var(--accent-bg, rgba(106,168,255,.14)); border-color: var(--accent, #6aa8ff); }
+.chip .chip-tip { opacity: .55; font-size: 11.5px; }

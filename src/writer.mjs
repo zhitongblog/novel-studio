@@ -83,10 +83,31 @@ export async function snapshotPaneIds() {
   return new Set();
 }
 
+// 这条路径【只能跑 CLI 模型】：它要开一个 Unterm 窗口、把 agent 拉起来、往里注入指令。
+// api 类（直连接口）和 web 类（驱动网页聊天框）都没有可执行文件、也没有 seedArgs，
+// 走到这里只会崩在 `m.seedArgs is not a function` —— 一句纯技术报错，用户完全看不懂。
+//
+// ⚠️ 这个口子很宽：server.mjs 里有十几处「重写/续写/收尾/重建大纲」都直接传 book.model 调 startWriting，
+// 没有一处校验类型。只要书的默认模型是 api-*/web-*，这些功能全会崩。与其在十几处各加一遍，
+// 不如在入口拦一次，并且把话说清楚：这个功能要什么、你现在是什么、该怎么办。
+function assertCliModel(m, id) {
+  if (typeof m.seedArgs === 'function') return;
+  const kindName = m.kind === 'api' ? '直连接口的 API 模型' : m.kind === 'web' ? '驱动网页版的模型' : '该模型';
+  throw new Error(
+    `「${m.name}」是${kindName}，这个功能用不了它。`
+    + `\n它需要能在终端窗口里跑起来的 CLI 模型（codex / claude / gemini / qwen / trae）——`
+    + `本功能靠开窗口、启动 agent、注入指令来工作，而 ${m.name} 没有可执行文件。`
+    + `\n\n怎么办：`
+    + `\n· 想用${kindName}写正文：回写作台选它，点「开始写作」走的是对的那条路（直接调接口、引擎自己落盘）。`
+    + `\n· 想用这个功能：把书的模型换成一个 CLI 模型，或在装了 codex/claude 后重试。`);
+}
+
 // 生成启动脚本：设代理环境、cd 到书目录、启动 agent 带初始指令。
 // Windows → launch.ps1（pwsh）；macOS/Linux → launch.sh（POSIX sh）。
 export function writeLaunchScript(book, model, instruction, cfg) {
   const m = getModel(model);
+  if (!m) throw new Error('未知模型：' + model);
+  assertCliModel(m, model);
   // 安全网：把任何换行折叠成空格 —— 多行 prompt 会被 agent 当多行草稿、等人工回车，无法自动开跑。
   const seed = m.seedArgs(instruction, cfg).map(a => String(a).replace(/[\r\n]+/g, ' '));
   const proxy = cfg.enableProxy ? proxyUrl() : '';
@@ -140,6 +161,7 @@ export function writeLaunchScript(book, model, instruction, cfg) {
 export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true, autopilotConfirmOnly = false, onFreshRestart = null }) {
   const m = getModel(model);
   if (!m) throw new Error('未知模型：' + model);
+  assertCliModel(m, model);
   const det = detectModel(model);
   if (!det.available) {
     throw new Error(`${m.name} 不可用（${m.bin} 不在 PATH）。可用 \`unterm-cli agent install ${m.untermAgentId}\` 安装。`);

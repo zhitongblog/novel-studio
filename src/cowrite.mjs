@@ -19,20 +19,41 @@ import { lastChapterTail, recentChapterNames } from './contextpack.mjs';
 import { currentVolume, getBook, bookStats, volumeDirName } from './books.mjs';
 import { parseChapters, saveChapter, appendIndex, hanziCount } from './webwriter.mjs';
 import { startWriting } from './writer.mjs';
+import { chatComplete } from './apichat.mjs';
 import { sendToBook, sessionAgentAlive } from './attach.mjs';
 import { deslopRange } from './deslop.mjs';
 import { pacingGate } from './pacing.mjs';
-import { chapterRomanceSection } from './romance.mjs';   // 单章级感情线尺度（可临时覆盖全书档位）
+import { chapterRomanceSection } from './romance.mjs';
+import { craftSpec, openingSection, paragraphHealth, reflowInstruction } from './craft.mjs';
+import { voiceSection } from './voice.mjs';   // 单章级感情线尺度（可临时覆盖全书档位）
 import { getSession, removeSession } from './sessions.mjs';
 import { closeWindow } from './unterm.mjs';
 
 // 允许用于共创的模型：能忠实跟住作者具体指令、会写好文的强 CLI。排除弱/网页/API 免费模型。
 export const COWRITE_MODELS = ['claude', 'codex', 'gemini', 'qwen'];
-export function isCowriteModel(id) { return COWRITE_MODELS.includes(id); }
+
+// 共创的两类活，对模型的要求完全不同：
+//   · 出主意 / 无头写一章 —— 只要「喂 prompt、拿文本」，任何能对话的模型都行（含 API/本地）；
+//   · 窗口模式写一章 —— 要开可见的 Unterm 窗口让 AI 自己写文件，非 CLI 不可。
+// 原来只有一个 isCowriteModel 把两类一刀切成「必须 CLI」，于是本地模型连"出主意"都用不了——
+// 而那一步根本不需要窗口。拆成两个判断。
+export function isCowriteTextModel(id) {
+  if (COWRITE_MODELS.includes(id)) return true;
+  const m = getModel(id);
+  return !!m && m.kind === 'api';          // 直连接口的（含本地 Ollama）都能出文本
+}
+// 需要可见窗口的那条路：只能 CLI。
+export function isCowriteWindowModel(id) { return COWRITE_MODELS.includes(id); }
+// 兼容旧名（等价于"能不能参与共创"，现在按文本能力判定）
+export function isCowriteModel(id) { return isCowriteTextModel(id); }
 
 // 共创单次调用超时（ms）。claude/gemini 启动+推理更慢（写整章常 5–10 分钟），给足；codex/qwen 较快。
 // kind: 'idea'(出主意，短) | 'chapter'(写整章，长)。宁可等久也别误判超时把活干到一半掐了。
 function cwTimeout(model, kind) {
+  // 本地模型（12G 卡跑 14B）比云端慢一个量级：出主意约 1 分钟、写整章 3–6 分钟。
+  // 沿用 CLI 那套超时会误杀，直接给足——反正 API 路径由 chatComplete 自己的超时兜底。
+  const m = getModel(model);
+  if (m && m.kind === 'api') return kind === 'idea' ? 600000 : 1800000;
   const slow = (model === 'claude' || model === 'gemini');
   if (kind === 'idea') return slow ? 300000 : 180000;        // 出主意：claude 5min / codex 3min
   return slow ? 900000 : 480000;                              // 写整章：claude 15min / codex 8min
@@ -43,9 +64,20 @@ function cwTimeout(model, kind) {
 // （日志不刷、界面像卡死），用户以为"没开始创作"。async spawn 不阻塞，引擎照常刷日志、界面不卡。
 function runCowrite(model, prompt, cfg, timeoutMs = 300000) {
   const m = getModel(model);
-  if (!m || !isCowriteModel(model)) {
-    return Promise.reject(new Error('共创模式必须用 claude / codex（或 gemini / qwen）CLI；当前模型不支持：' + model
-      + '。请在共创面板顶部选 claude 或 codex。'));
+  if (!m) return Promise.reject(new Error('未知模型：' + model));
+
+  // API 类（智谱/DeepSeek/通义/本地 Ollama）：直接一次对话调用拿文本，不需要任何 CLI 或窗口。
+  // 这条路对本地模型尤其重要——共创是"一段段来"的交互式写法，正好适合慢但免费的本地模型。
+  if (m.kind === 'api') {
+    return chatComplete({
+      provider: m.provider, cfg,
+      messages: [{ role: 'user', content: prompt }],
+    }).then(r => r.content);
+  }
+
+  if (!isCowriteTextModel(model)) {
+    return Promise.reject(new Error(`「${m.name}」不能用于共创模式。`
+      + `可用：claude / codex / gemini / qwen 这类 CLI，或任一 API 模型（含本地 Ollama）。`));
   }
   if (!m.bin) return Promise.reject(new Error(m.name + ' 不是本地 CLI，无法用于共创模式'));
   const env = { ...process.env };
@@ -86,11 +118,94 @@ function bookGist(book) {
 }
 
 // 文风与反 AI 味的最小硬标准（保证 AI 写出来不是 AI 腔，但不喂长篇规范）。
+// 文风约束分两半，缺一不可。
+// 【教训】原来只有"别做什么"那一半（删套话、别升华、别凑字、实锚密度），模型就只优化被测量的东西：
+// 拼命塞物件、把句子剁短、绝不抒情 —— 写出来是一堆舞台指示，人物成了摄像机镜头而不是活人，
+// 通篇没有一句内心。读者感受到的"僵硬"正是这么来的。所以必须把"要做什么"明确写出来。
 const STYLE_GUARD = [
-  '文风与硬标准：句长短交错、张弛有度，不要句句等长；每 250–400 字有一个可见实锚（物件/身体感觉/具体动作/专有名词与数目）；',
+  // ——「要做什么」：治僵硬的那一半 ——
+  '【视角与内心（最重要）】：全程贴着主角的感知写，读者只知道他知道的。',
+  '他的判断、盘算、忌惮、想要什么，要【化进叙述里】（自由间接引语），而不是单开一段“他想……”。',
+  '每有一次冲突或转折，主角必须有【可感的反应】：身体的（手心、后颈、呼吸、牙关）或心理的（认出、犹豫、决定、忍住）。',
+  '写他【注意到什么】就等于写他在意什么——同一个场景，让他看见的东西带着他的处境和目的。',
+  '【世道规矩不许由叙述者科普】：不要写“这类人最怕……”“规矩是……”这种说明文口吻；',
+  '要让规矩通过人物的具体遭遇、别人的一句话、或主角吃过的亏带出来。',
+  '【对话要有来回和分寸】：不是两边各扔一句短话；让人物打断、答非所问、留半句不说。潜台词比台词重要。',
+  // ——「别做什么」：原有的反 AI 味硬标准 ——
+  '【节奏】句长短交错、张弛有度，不要句句等长；也不要通篇一句一段——',
+  '短促独立成段是重锤，只在关键处用；连着十几段都是四五个字，就从利落变成了呆板。',
+  '每 250–400 字有一个可见实锚（物件/身体感觉/具体动作/专有名词与数目），但实锚是为人物服务的，不是堆砌清单。',
   '删解释性套话（“这不是…而是”“这意味着”“换句话说”“总而言之”）与翻译腔现代词（进行/基于/针对/通过…的方式）；',
-  '对话带潜台词、人物口吻各异；段尾别总点题升华；严禁为凑字数重复段落或原地绕圈。',
+  '段尾别总点题升华；严禁为凑字数重复段落或原地绕圈。',
+
+  // ——【悬念结构】：这是"扣不扣得住人"的骨架，不是可选项 ——
+  // AI 写的场景天然倾向"起—承—转—收"然后干净收尾，读者读完松一口气就走了。
+  // 真正让人追更的章节恰恰相反：读完时手里的问题比读之前更多。
+  '【悬念（每章必须做到）】：',
+  '① 开头三行之内就要有【一个悬着的东西】——迫近的威胁、没答上的问题、不对劲的细节。别用天气或回忆开场。',
+  '② 全章要有一条明确的“悬着的线”：他在等什么 / 怕什么 / 瞒什么 / 想拿到什么。读者要能一直感到它。',
+  '③ 章中至少一次【情况比他以为的更糟】的翻转：他算错了、对方早知道、代价比预想的大。',
+  '④ 章末【停在新的不确定上】，不是停在解决和总结上——把一个更大的问号交给读者。',
+  '   收尾不要抒情、不要点题、不要“他知道，从今往后……”这类总结句。停在动作、物件或一句没接的话上。',
+
+  // ——【像真人写】：AI 味最深的一层，不在句子而在"作者的姿态" ——
+  '【像人写，不像 AI 写】：',
+  '· 信息不要给满。该让读者猜的别解释，该让人物瞒的别揭穿；解释一件事的最佳时机永远比你想的晚一点。',
+  '· 人物会误判、会说错话、会做多余的动作。全程精准得体的人物是假人。',
+  '· 该付代价就付：赢了也要有损失（伤、钱、名声、错过的人）。零成本的胜利读者不信。',
+  '· 允许不整齐：一段可以长，一段可以只有一句；某个细节可以埋下不解释；配角可以有跟主线无关的一句闲话。',
+  '· 不要每章都是同一个形状。这一章可以从中间切入，可以只写一场对话，可以在高点戛然而止。',
 ].join('');
+
+// 每章可调的文风倾向。同一本书里，打戏、对峙、日常该偏重的东西完全不同，
+// 用一条通用 STYLE_GUARD 压所有章节，出来的东西必然一个味道。
+// 这里只做【加权】，不覆盖 STYLE_GUARD 的底线（内心、视角、不科普那几条始终生效）。
+export const STYLE_SLANTS = {
+  inner: { name: '心理', tip: '判断与克制，适合对峙/重逢/下决心',
+    text: '【心理】把笔墨压在主角的判断与克制上——他认出了什么、在算计什么、为什么忍住。'
+        + '外部动作可以少，但每个动作背后都要让读者感到他的取舍。' },
+  fight: { name: '武打', tip: '拳脚交手、身法与伤',
+    text: '【武打】打斗写【一招一结果】，不写招式名称的堆砌：距离、重心、先动哪只手、打在哪儿、对方怎么变形。'
+        + '每一次交手都要改变局面（受伤、失去武器、暴露身份、被迫后退）。'
+        + '主角不许毫发无伤地赢——疼痛、脱力、护住的旧伤都要落到实处。'
+        + '打之前的对峙和打之后的余韵，比打的过程本身更值得写。' },
+  scene: { name: '画面动作', tip: '身体与空间，适合追逃/场面',
+    text: '【画面动作】以身体和空间为主：站位、距离、重心、手上的东西、光线和声音。'
+        + '内心用极短的一两处点到即止，靠动作本身传递情绪。' },
+  talk:  { name: '对话交锋', tip: '谈判/试探/揭底',
+    text: '【对话交锋】主体由对话推动，让人物打断、绕圈、答非所问、留半句不说。'
+        + '叙述只做最小限度的动作与神情标注，不替读者解释谁在想什么。' },
+  scheme:{ name: '权谋算计', tip: '布局、试探、反制',
+    text: '【权谋算计】让读者看得见棋盘：谁想要什么、谁手里有什么筹码、这一步换来什么。'
+        + '算计要落在具体的人和事上，不写“他运筹帷幄”这类空话。'
+        + '主角的谋划要有【被识破的风险】，对手不能是笨蛋。' },
+  thrill:{ name: '悬疑压迫', tip: '追查/被追/时间紧迫',
+    text: '【悬疑压迫】制造持续的压迫感：时间在走、包围在收拢、知情的人在减少。'
+        + '每隔一段抛一个新的不对劲，且不要立刻解释。让读者比主角早半步察觉危险。' },
+  payoff:{ name: '爽点打脸', tip: '亮本事/翻盘/立威',
+    text: '【爽点打脸】要有【可感的翻转时刻】：之前被轻视/被压制，此刻用具体的本事翻过来。'
+        + '爽点必须建立在前文的铺垫上（他早就看出来了、他一直在忍），不是天降神力。'
+        + '打脸写旁人的反应比写主角的姿态更有效。' },
+  slow:  { name: '铺陈氛围', tip: '放慢节奏、渗出时代感',
+    text: '【铺陈氛围】放慢节奏，允许更长的句子和成段的环境描写，让时代和处境从细节里渗出来。'
+        + '但仍须有一条明确的推进线，不能变成风景明信片。' },
+};
+
+// 侧重可【多选】——一章本来就可以既有心理、又有打戏、还有算计。
+// 传入 'inner,fight' 这样的逗号串，或数组。选了多项时额外提醒模型怎么配比，
+// 否则它容易平均用力、每样都浅尝辄止，反而比单选还糟。
+export function styleSlantSection(slant) {
+  const ids = (Array.isArray(slant) ? slant : String(slant || '').split(','))
+    .map(x => x.trim()).filter(x => x && STYLE_SLANTS[x]);
+  if (!ids.length) return '';
+  const parts = ids.map(id => '· ' + STYLE_SLANTS[id].text);
+  const head = ids.length === 1
+    ? '\n【本章侧重】'
+    : `\n【本章侧重（共 ${ids.length} 项，都要写到）】：不要平均用力——`
+      + '挑其中一项作为这一章的主干撑起篇幅，其余的穿插进主干里，各自至少有一个成规模的段落，'
+      + '而不是每样点一句就过。几项之间要互相咬合（比如打斗中途的算计、亲近之后的忌惮），别写成互不相干的板块。\n';
+  return head + '\n' + parts.join('\n') + '\n';
+}
 
 // ① 出主意 / 分段搭大纲：按作者的问题给具体可用的建议，不写正文、不落盘。返回 {ideas, model}。
 export async function brainstorm({ book, model, ask, cfg }) {
@@ -145,7 +260,7 @@ export function removeLastChapter(book) {
 
 // ② 按作者本章要求写这一章：严格照作者的 intent 写，AI 不得自作主张改方向。落盘一章。
 // redoLast=true：先删掉刚写的最后一章，再用（可能改过的）要求重写同一章号。
-export async function writeChapterFromIntent({ book, model, intent, useLastEnding = true, redoLast = false, romance = null, cfg, onLog = () => {} }) {
+export async function writeChapterFromIntent({ book, model, intent, useLastEnding = true, redoLast = false, slant = '', romance = null, cfg, onLog = () => {} }) {
   book = getBook(book.slug) || book;
   const it = String(intent || '').trim();
   if (!it) throw new Error('请先写「本章我的要求」——这一模式以你的主意为主，AI 按你的要求写。');
@@ -165,7 +280,11 @@ export async function writeChapterFromIntent({ book, model, intent, useLastEndin
     ``,
     useLastEnding && last.tail ? `【上一章结尾（衔接用，保持文笔与语气连续）】：\n${last.tail}\n` : '',
     names.length ? `【近期已用章名（新章名别与这些重复）】：${names.slice(-30).join('、')}\n` : '',
+    craftSpec({ mode: 'write' }),
+    openingSection(num),
+    voiceSection(book),          // 对标文风 + 范文原文（之前这三条写正文的路径一条都没接上）
     STYLE_GUARD,
+    styleSlantSection(slant),
     chapterRomanceSection(book.romance, romance),
     ``,
     `输出要求：`,
@@ -183,6 +302,8 @@ export async function writeChapterFromIntent({ book, model, intent, useLastEndin
   const ch = chapters[0];
   if (!ch) throw new Error('AI 未按格式产出本章（可能被截断或跑偏）。可重试，或把要求写得更具体。');
 
+  ch.body = await enforceParagraphs({ body: ch.body, num, title: ch.title, model, cfg, onLog });
+
   const volNum = currentVolume(book) || 1;
   const volDir = volumeDirName(book.dir, volNum);   // 复用已存在的卷目录（可能带卷名），别硬拼「卷NN」分叉出第二个
   const rel = saveChapter(book, volDir, num, ch.title, ch.body);
@@ -190,6 +311,301 @@ export async function writeChapterFromIntent({ book, model, intent, useLastEndin
   try { appendIndex(book, [row]); } catch (e) { onLog({ level: 'warn', msg: '更新 chapter_index.md 失败：' + e.message }); }
   onLog({ level: 'act', msg: `  ✓ 第 ${num} 章《${ch.title}》已落盘（约 ${row.words} 字）→ ${rel}` });
   return { num, title: ch.title, body: ch.body, rel, words: row.words, model };
+}
+
+// ===== ③ 单章重写：挑任意一章，换模型 / 改章名 / 重新给情节 =====
+// 为什么单独做：现有「♻️ 重写」是【按范围】的（001-008 / 卷01），固定用书的模型开 CLI 窗口，换不了模型。
+// 而实际最常见的需求恰恰是反过来的——某一章写崩了（小模型尤其常见），想【就这一章】换个更强的模型重来，
+// 而且往往还想顺手改掉章名、或者干脆重新规定这一章该发生什么。三件事凑在一起才是完整的「重写」。
+//
+// plot 为空 → 保持原情节，只提升文笔；plot 有内容 → 按作者给的新情节重写这一章（这才是"重新注入"）。
+export async function rewriteChapter({
+  book, rel, model, note = '', plot = '', newTitle = '', titleMode = 'keep',
+  slant = '', romance = null, polish = false, critic = '', cfg, onLog = () => {},
+}) {
+  book = getBook(book.slug) || book;
+  const abs = path.join(book.dir, rel);
+  if (!fs.existsSync(abs)) throw new Error('找不到这一章：' + rel);
+
+  const base = path.basename(abs);
+  const num = parseInt((base.match(/^(\d{1,4})/) || [])[1] || '0', 10);
+  const oldTitle = base.replace(/\.txt$/i, '').replace(/^\d{1,4}/, '');
+  if (!num) throw new Error('这个文件不是章节正文（文件名要以章号开头）：' + base);
+
+  // 章名三种处理：
+  //   keep   保持原名（改完内容还叫原来那个名）
+  //   manual 用作者填的新名
+  //   auto   让模型【根据它重写出来的内容】自己起一个——重写后情节和重点都变了，
+  //          沿用旧名或让作者盲填其实都别扭，由写的人起名最贴。
+  // auto 时 title 先留空，等解析出正文再从 <<<CHAPTER 标题=…>>> 里取。
+  const cleanTitle = (t) => String(t || '').trim().replace(/[\\/:*?"<>|\r\n]+/g, '').slice(0, 40);
+  const wantTitle = cleanTitle(newTitle);
+  const mode = (titleMode === 'auto' || titleMode === 'manual') ? titleMode : 'keep';
+  const autoTitle = mode === 'auto';
+  const title = autoTitle ? '' : (mode === 'manual' && wantTitle ? wantTitle : oldTitle);
+
+  const original = fs.readFileSync(abs, 'utf8').trim();
+  const lo = book?.standards?.minChars || 3000;
+  const hi = book?.standards?.targetCharsHi || 3600;
+  const newPlot = String(plot || '').trim();
+
+  // 上一章结尾：保持衔接。在同目录找 num-1 那一章——不能用 lastChapterTail（它取的是全书最后一章）。
+  let prevTail = '';
+  if (num > 1) {
+    try {
+      const dir = path.dirname(abs);
+      const prev = fs.readdirSync(dir).find(f => /\.txt$/i.test(f)
+        && parseInt((f.match(/^(\d{1,4})/) || [])[1] || '0', 10) === num - 1);
+      if (prev) prevTail = fs.readFileSync(path.join(dir, prev), 'utf8').trim().slice(-1200);
+    } catch {}
+  }
+
+  // auto 起名要避开全书已用的章名——本项目很在意章名全书唯一（自检闸会专门查重名）。
+  const usedNames = autoTitle
+    ? (recentChapterNames(book, 80).recent || []).filter(n => n && n !== oldTitle).slice(-40)
+    : [];
+
+  const prompt = [
+    `你是资深中文网络小说作者。请【重写第 ${num} 章】。这一章已经写过一版，但作者不满意。`,
+    `书：${bookGist(book)}。`,
+    ``,
+    `【这一章原来的内容（供你了解上下文；${newPlot ? '情节已被作者重新指定，下面这版只作参考，不必沿用' : '不要照抄它的文笔'}）】：`,
+    original.slice(0, 4000),
+    ``,
+    newPlot
+      ? `【作者重新指定的本章情节（最高优先，必须照做——与上面原内容冲突时，一律以这里为准）】：\n${newPlot}`
+      : `【情节约束】：这一章在全书里的位置和作用不变——同样的情节节点、同样的人物、同样的结果，不要改剧情走向。要改的是【怎么写】：更具体的细节、更自然的对话、更好的节奏。`,
+    note ? `\n【作者对这次重写的补充要求】：${note}` : '',
+    autoTitle
+      ? `\n【章名】：请你【根据自己重写出来的内容】另起一个章名——要具体、有钩子、能让人想点进来，`
+        + `别用“风波”“变故”“重逢”这类万能词。原名《${oldTitle}》仅供参考，不必沿用。`
+        + (usedNames.length ? `\n【已用章名（新名不得与这些重复，意思高度相近的也要错开）】：${usedNames.join('、')}` : '')
+      : (mode === 'manual' && wantTitle
+          ? `\n【章名】：作者已把本章章名改为《${title}》，请让内容与这个章名相称。`
+          : `\n【章名】：保持《${title}》不变。`),
+    ``,
+    prevTail ? `【上一章结尾（衔接用，保持语气连续）】：\n${prevTail}\n` : '',
+    craftSpec({ mode: 'rewrite' }),
+    openingSection(num),
+    voiceSection(book),          // 对标文风 + 范文原文
+    STYLE_GUARD,
+    styleSlantSection(slant),
+    chapterRomanceSection(book.romance, romance),
+    ``,
+    `输出要求：`,
+    `1. 约 ${lo}–${hi} 字，靠情节推进与细节写足，【严禁重复段落或原地绕圈凑字】。`,
+    `2. 用固定分隔符包裹，标记单独成行，正文里不要出现 <<<CHAPTER 或 <<<END：`,
+    `<<<CHAPTER 章号=${num} 标题=${autoTitle ? '你新起的章名' : title}>>>`,
+    `（本章正文，仅正文，可含自然段换行；不要写“第X章”标题行、不要 markdown、不要作者旁白、不要解释）`,
+    `<<<END>>>`,
+    `3. 除这个带分隔符的章节块外，回复里不要有任何多余文字。`,
+  ].filter(Boolean).join('\n');
+
+  const mName = getModel(model)?.name || model;
+  onLog({ level: 'act', msg: `重写第 ${num} 章《${oldTitle}》`
+    + (autoTitle ? ' → 章名由 AI 按新内容重起' : (mode === 'manual' && wantTitle ? ` → 新章名《${title}》` : ''))
+    + `（原 ${hanziCount(original)} 字，用 ${mName}${newPlot ? '，已重新指定情节' : ''}）…` });
+
+  const out = await runCowrite(model, prompt, cfg, cwTimeout(model, 'chapter'));
+  const ch = parseChapters(out, { onLog })[0];
+  if (!ch) throw new Error(`${mName} 未按格式产出本章（可能被截断或跑偏）。可重试，或换个模型。`);
+
+  // auto 模式：用模型给的章名。它没给或给了个空的就退回原名，别把文件写成没名字的。
+  const finalTitle = autoTitle ? (cleanTitle(ch.title) || oldTitle) : title;
+
+  // 多轮打磨：拿初稿再走一遍「挑刺→改」。多花一到两次调用，换修改层积出来的质感。
+  let bodyText = ch.body;
+  if (polish) {
+    try {
+      const pr = await polishChapter({ book, draft: bodyText, num, title: finalTitle, model, critic, cfg, onLog });
+      bodyText = pr.body;
+    } catch (e) { onLog({ level: 'warn', msg: '  打磨失败，保留初稿：' + (e.message || e) }); }
+  }
+  // 分段闸放在最后：打磨那一轮也可能把段落改碎，量完再落盘
+  bodyText = await enforceParagraphs({ body: bodyText, num, title: finalTitle, model, cfg, onLog });
+  ch.body = bodyText;
+
+  const words = hanziCount(ch.body);
+  if (words < lo * 0.5) {
+    throw new Error(`${mName} 只写出 ${words} 字（目标 ${lo}–${hi}），太短没有替换价值。原文未改动，请重试或换个模型。`);
+  }
+
+  // 先备份原文再落盘——重写是破坏性操作，用户改坏了要能拿回来。
+  try { fs.writeFileSync(abs + '.bak', original, 'utf8'); } catch {}
+
+  let finalRel = rel;
+  if (finalTitle !== oldTitle) {
+    // 改名：重命名文件 + 同步 chapter_index.md 里那一行，否则索引会指向不存在的路径。
+    const dir = path.dirname(abs);
+    let name = `${String(num).padStart(3, '0')}${finalTitle}.txt`;
+    let dst = path.join(dir, name);
+    if (fs.existsSync(dst) && dst !== abs) { name = `${String(num).padStart(3, '0')}${finalTitle}_2.txt`; dst = path.join(dir, name); }
+    fs.writeFileSync(dst, ch.body.endsWith('\n') ? ch.body : ch.body + '\n', 'utf8');
+    if (dst !== abs) { try { fs.unlinkSync(abs); } catch {} }
+    finalRel = path.relative(book.dir, dst).replace(/\\/g, '/');
+    updateIndexRow(book, num, finalTitle, finalRel, onLog);
+  } else {
+    fs.writeFileSync(abs, ch.body.endsWith('\n') ? ch.body : ch.body + '\n', 'utf8');
+  }
+
+  onLog({ level: 'act', msg: `  ✓ 第 ${num} 章已重写（${hanziCount(original)} → ${words} 字）`
+    + (finalTitle !== oldTitle ? `，章名改为《${finalTitle}》并已更新索引` : '') + `；原文备份在 ${path.basename(rel)}.bak` });
+
+  return { num, title: finalTitle, oldTitle, rel: finalRel, words, before: hanziCount(original), body: ch.body, model, backup: rel + '.bak' };
+}
+
+// 改章名后同步索引里那一行（章名 + 路径）。找不到该行就补一行，别让索引和磁盘对不上。
+function updateIndexRow(book, num, title, rel, onLog = () => {}) {
+  const fp = path.join(book.dir, 'chapter_index.md');
+  try {
+    const cur = fs.readFileSync(fp, 'utf8');
+    let hit = false;
+    const next = cur.split(/\r?\n/).map((line) => {
+      const m = line.match(/^\s*\|\s*(\d{1,4})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|(.*)$/);
+      if (!m || parseInt(m[1], 10) !== num) return line;
+      hit = true;
+      return `| ${num} | ${title} | ${m[3].trim()} | ${rel} | 已写 |`;
+    }).join('\n');
+    if (!hit) { onLog({ level: 'warn', msg: `  索引里没有第 ${num} 章那一行，已跳过更新（可跑一次自检修复）` }); return; }
+    fs.writeFileSync(fp, next.replace(/\s*$/, '') + '\n', 'utf8');
+  } catch (e) {
+    onLog({ level: 'warn', msg: '  更新 chapter_index.md 失败：' + (e.message || e) });
+  }
+}
+
+// 段落呼吸闸：写完真的量一遍，太碎就打回让它【只重新分段、一个字不改】。
+// 为什么要机器量而不是靠提示词：模型对"段落要短"这类单向指标必然滑到极端
+// （实测 155 段 / 3307 字，46% 的段落不到 10 字，读起来像机关枪）。
+// 提示词是软约束，尺子才是硬的。最多打回一次，别为了分段来回折腾。
+async function enforceParagraphs({ body, num, title, model, cfg, onLog }) {
+  const h = paragraphHealth(body);
+  if (h.ok) return body;
+  onLog({ level: 'warn', msg: `  段落过碎（${h.paras} 段/平均 ${h.avgLen} 字/${h.tinyPct}% 是单行），打回重排…` });
+  try {
+    const out = await runCowrite(model, reflowInstruction(h, num, title) + '\n\n【正文】\n' + body,
+      cfg, cwTimeout(model, 'chapter'));
+    const re = parseChapters(out, { onLog })[0];
+    if (!re) { onLog({ level: 'warn', msg: '  重排没按格式返回，保留原分段' }); return body; }
+    // 只该动换行——字数掉太多说明它顺手改写了，宁可不要
+    const before = hanziCount(body), after = hanziCount(re.body);
+    if (after < before * 0.9) {
+      onLog({ level: 'warn', msg: `  重排把字改没了（${before}→${after}），保留原分段` });
+      return body;
+    }
+    const h2 = paragraphHealth(re.body);
+    onLog({ level: 'act', msg: `  ✓ 重排完成：${h.paras} 段 → ${h2.paras} 段，平均 ${h.avgLen} → ${h2.avgLen} 字` });
+    return re.body;
+  } catch (e) {
+    onLog({ level: 'warn', msg: '  重排失败，保留原分段：' + (e.message || e) });
+    return body;
+  }
+}
+
+// 对【已经写好的章】单独重排段落：一个字不改，只并段。
+// 这是个独立能力，不必跟重写绑在一起——存量章节大多只是分得太碎，
+// 文字本身没问题，重写反而会把好句子改没。
+export async function reflowChapter({ book, rel, model, cfg, onLog = () => {} }) {
+  book = getBook(book.slug) || book;
+  const abs = path.join(book.dir, rel);
+  if (!fs.existsSync(abs)) throw new Error('找不到这一章：' + rel);
+  const base = path.basename(abs);
+  const num = parseInt((base.match(/^(\d{1,4})/) || [])[1] || '0', 10);
+  const title = base.replace(/\.txt$/i, '').replace(/^\d{1,4}/, '');
+  const original = fs.readFileSync(abs, 'utf8').trim();
+
+  const h = paragraphHealth(original);
+  if (h.ok) {
+    onLog({ level: 'info', msg: `第 ${num} 章段落已经健康（${h.paras} 段 / 平均 ${h.avgLen} 字），无需重排` });
+    return { num, title, rel, changed: false, before: h, after: h };
+  }
+  onLog({ level: 'act', msg: `重排第 ${num} 章《${title}》：${h.paras} 段 / 平均 ${h.avgLen} 字 / ${h.tinyPct}% 是单行` });
+
+  const out = await runCowrite(model, reflowInstruction(h, num, title) + '\n\n【正文】\n' + original,
+    cfg, cwTimeout(model, 'chapter'));
+  const re = parseChapters(out, { onLog })[0];
+  if (!re) throw new Error('重排没按格式返回，原文未改动。可重试或换个模型。');
+
+  const b = hanziCount(original), a = hanziCount(re.body);
+  if (a < b * 0.9) throw new Error(`重排时把字改没了（${b} → ${a}），原文未改动。这一步只该动换行，请重试。`);
+
+  const h2 = paragraphHealth(re.body);
+  try { fs.writeFileSync(abs + '.bak', original, 'utf8'); } catch {}
+  fs.writeFileSync(abs, re.body.endsWith('\n') ? re.body : re.body + '\n', 'utf8');
+  onLog({ level: 'act', msg: `  ✓ ${h.paras} 段 → ${h2.paras} 段，平均 ${h.avgLen} → ${h2.avgLen} 字（字数 ${b}→${a}，原文已备份 .bak）` });
+  return { num, title, rel, changed: true, before: h, after: h2, words: a };
+}
+
+// ===== 多轮打磨：初稿 → 挑刺 → 改 =====
+// 人写一章是【写完再改】，每一遍改不同的东西；一次成稿不可能有修改层积出来的质感。
+// 这里做最小可用的两轮：让【另一个视角】专挑"哪里像 AI 写的"，再让原模型按意见改。
+//
+// 关键在挑刺那一轮的提示词——不能问"写得好不好"（模型会一通夸），
+// 要问【具体哪一句、为什么像机器写的、怎么改】，逼它给出可执行的修改点。
+
+const CRITIC_PROMPT = [
+  '你是一位挑剔的网文编辑。下面是一章初稿。你的任务【不是夸它】，是找出它【哪里像 AI 写的、哪里像记叙文】。',
+  '',
+  '重点查这七条，每条都要给【具体到句子】的例子：',
+  '1. 质量密度是否过于均匀——每段都在使技巧、没有一句松弛的闲笔？真人写的东西有废话、有笨拙处。',
+  '2. 句式是否同构——是不是通篇一个节奏（比如全是短断句＋对仗），像给整篇套了滤镜？',
+  '3. 有没有叙述者在替读者解释/科普/总结？该让读者自己看出来的地方被说破了？',
+  '4. 情绪是否"被推导出来"而非被感受到——每个反应都恰到好处、合乎逻辑，没有失当或过头的时候？',
+  '5. 场景有没有价值翻转？结束时局面和开始时是不是一样？',
+  '6. 章末是不是停在总结/抒情上，而不是新的不确定上？',
+  '7. 有没有空话套话、翻译腔、万能形容词（"心中泛起一丝涟漪"这类）？',
+  '',
+  '输出格式：直接列 5–10 条【可执行的修改意见】，每条写成：',
+  '  · 问题：<原文里的具体一句或一段>｜为什么：<一句话>｜怎么改：<具体建议>',
+  '不要写总评、不要打分、不要客套。挑不出问题就说"无"，但绝大多数初稿都挑得出。',
+].join('\n');
+
+// 让模型自己评自己容易护短；能换个模型来挑刺最好。critic 传空则用同一个模型。
+export async function polishChapter({ book, draft, num, title, model, critic = '', cfg, onLog = () => {} }) {
+  const criticModel = critic && getModel(critic) ? critic : model;
+  const cName = getModel(criticModel)?.name || criticModel;
+
+  onLog({ level: 'act', msg: `  打磨第 1 轮：让 ${cName} 挑刺…` });
+  const notes = await runCowrite(
+    criticModel,
+    `${CRITIC_PROMPT}\n\n【初稿】\n${draft.slice(0, 12000)}`,
+    cfg, cwTimeout(criticModel, 'idea'),
+  );
+  const clean = String(notes || '').trim();
+  if (!clean || clean.length < 30 || /^无[。.]?$/.test(clean)) {
+    onLog({ level: 'info', msg: '  挑刺没给出有效意见，保留初稿' });
+    return { body: draft, notes: '', polished: false };
+  }
+  onLog({ level: 'info', msg: `  拿到 ${(clean.match(/·/g) || []).length || '若干'} 条意见，开始改…` });
+
+  const fixPrompt = [
+    `你是这一章的作者。编辑给了修改意见，请【按意见把这一章改一遍】。`,
+    ``,
+    `【编辑意见】：`,
+    clean,
+    ``,
+    `【改写要求】：`,
+    `1. 保持情节、人物、结局不变——这是润色不是重写，不要改故事。`,
+    `2. 逐条落实意见。改不动的可以不改，但大部分要看得出改过。`,
+    `3. 顺手把节奏调开：允许有一两处松弛的闲笔，不必每段都使技巧。`,
+    `4. 字数与初稿相当或略多。`,
+    ``,
+    `输出：只输出改好的完整正文，用分隔符包裹，正文里不要出现 <<<CHAPTER 或 <<<END：`,
+    `<<<CHAPTER 章号=${num} 标题=${title}>>>`,
+    `（改好的完整正文）`,
+    `<<<END>>>`,
+    ``,
+    `【初稿】`,
+    draft,
+  ].join('\n');
+
+  const out = await runCowrite(model, fixPrompt, cfg, cwTimeout(model, 'chapter'));
+  const ch = parseChapters(out, { onLog })[0];
+  if (!ch || hanziCount(ch.body) < hanziCount(draft) * 0.6) {
+    onLog({ level: 'warn', msg: '  按意见改写失败或缩水太多，保留初稿' });
+    return { body: draft, notes: clean, polished: false };
+  }
+  onLog({ level: 'act', msg: `  ✓ 打磨完成（${hanziCount(draft)} → ${hanziCount(ch.body)} 字）` });
+  return { body: ch.body, notes: clean, polished: true };
 }
 
 // ===== 窗口模式（可见 Unterm）：作者能【看见】AI 在窗口里写这一章 =====
@@ -239,7 +655,9 @@ export async function writeChapterInWindow({ book, model, intent, useLastEnding 
   book = getBook(book.slug) || book;
   const it = String(intent || '').trim();
   if (!it) throw new Error('请先写「本章我的要求」——共创以你的主意为主。');
-  if (!isCowriteModel(model)) throw new Error('共创窗口模式需 claude / codex（或 gemini / qwen）CLI；当前：' + model);
+  if (!isCowriteWindowModel(model)) throw new Error(`「${getModel(model)?.name || model}」没有可执行文件，开不了可见窗口。`
+    + `窗口模式要能在终端里跑起来的 CLI（claude / codex / gemini / qwen）。`
+    + `用 API/本地模型的话，共创会走【无头模式】：同样按你的要求写这一章并落盘，只是看不到窗口里实时打字。`);
   if (redoLast) { const del = removeLastChapter(book); if (del) onLog({ level: 'info', msg: `重写：已移除刚才的第 ${del} 章` }); }
 
   const before = bookStats(book).chapters;
@@ -336,7 +754,7 @@ export async function writeChaptersFromPlot({ book, model, plot, useLastEnding =
   book = getBook(book.slug) || book;
   const pt = String(plot || '').trim();
   if (!pt) throw new Error('请先写「这一段的故事情节」——本书没有大纲，剧情以你给的这段为准。');
-  if (!isCowriteModel(model)) throw new Error('需 claude / codex（或 gemini / qwen）CLI；当前：' + model);
+  if (!isCowriteWindowModel(model)) throw new Error(`「${getModel(model)?.name || model}」开不了可见窗口，这个功能需要 CLI 模型（claude / codex / gemini / qwen）。`);
 
   const before = bookStats(book).chapters;
   const startNum = (lastChapterTail(book, 0).num || 0) + 1;

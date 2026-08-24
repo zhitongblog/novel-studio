@@ -12,6 +12,7 @@ import { buildBatchPack } from './contextpack.mjs';
 import { bookStats, getBook, currentVolume } from './books.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { chatComplete, API_PROVIDERS, resolveProviderCfg } from './apichat.mjs';
+import { probeText } from './localai.mjs';
 import { recordApiUsage, estimateCost, fmtCost } from './usage.mjs';
 import {
   parseChapters,
@@ -126,17 +127,32 @@ async function writeBatchApi({ book, provider, cfg, count, onLog, control }) {
 export async function runApiWrite({
   book, provider, batches = 1, onLog = () => {}, cfg = null, control = null,
 } = {}) {
-  if (!isApiProvider(provider)) throw new Error('未知 API 提供方：' + provider + '（可选 zhipu|deepseek|dashscope）');
-  // 提前校验 key（缺就早失败、提示清楚）
+  if (!isApiProvider(provider)) throw new Error('未知 API 提供方：' + provider + '（可选 ' + Object.keys(API_PROVIDERS).join('|') + '）');
+  // 提前校验（缺就早失败、提示清楚）。本地模型没有 key 的概念——改成探服务在不在，
+  // 否则「写了一整批才发现 Ollama 没启动」，白等好几分钟。
   const pc = resolveProviderCfg(provider, cfg);
-  if (!pc.apiKey) throw new Error(`未配置 ${pc.name} 的 API Key（在「设置 · API 模型」里填）。`);
+  if (pc.keyless) {
+    const probe = await probeText(pc.baseUrl);
+    if (!probe.ok) throw new Error(`本地模型不可用：${probe.error}`);
+    const names = (probe.models || []).map(m => m.name);
+    // 模型名允许省略 :latest（ollama list 显示 qwen3:14b，用户可能填 qwen3）
+    const hit = names.some(n => n === pc.model || n.split(':')[0] === pc.model.split(':')[0]);
+    if (names.length && !hit) {
+      throw new Error(`本地没有模型「${pc.model}」。已装的是：${names.slice(0, 8).join('、')}。`
+        + `先拉一个：ollama pull ${pc.model}，或到「设置 · 本地模型」改成已装的名字。`);
+    }
+    onLog({ level: 'info', msg: `本地模型就绪：${probe.kind === 'ollama' ? 'Ollama' : 'OpenAI 兼容服务'} @ ${pc.baseUrl}｜模型 ${pc.model}｜上下文 ${pc.numCtx}` });
+  } else if (!pc.apiKey) {
+    throw new Error(`未配置 ${pc.name} 的 API Key（在「设置 · API 模型」里填）。`);
+  }
 
   const count = book?.standards?.batchSize || 3;
 
   // 写前 git 存档（best-effort）
   try { const h = gitSnapshot(book.dir, 'API 写作前自动存档'); if (h) onLog({ level: 'info', msg: `已 git 存档：${h}（不满意可回退）` }); } catch {}
 
-  onLog({ level: 'act', msg: `API 写作启动：${pc.name}（模型 ${pc.model}）、每批 ${count} 章、共 ${batches} 批` });
+  onLog({ level: 'act', msg: `API 写作启动：${pc.name}（模型 ${pc.model}）、每批 ${count} 章、共 ${batches} 批`
+    + (pc.local ? `｜本地生成较慢，单章约 2–5 分钟，本次约 ${count * batches * 3} 分钟起，可挂着跑` : '') });
 
   const results = [];
   let totalWrote = 0;
