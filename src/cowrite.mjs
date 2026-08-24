@@ -24,8 +24,15 @@ import { sendToBook, sessionAgentAlive } from './attach.mjs';
 import { deslopRange } from './deslop.mjs';
 import { pacingGate } from './pacing.mjs';
 import { chapterRomanceSection } from './romance.mjs';
-import { craftSpec, openingSection, paragraphHealth, reflowInstruction } from './craft.mjs';
-import { voiceSection } from './voice.mjs';   // 单章级感情线尺度（可临时覆盖全书档位）
+import { paragraphHealth, reflowInstruction } from './craft.mjs';
+// 【通用方法】审美层整个交给范本：MECHANICS 是唯一由代码写死的（与文风无关的硬性要求），
+// voicePrint 来自本书的 style_refs/ 与手法卡。开发者不再规定"该怎么写"。
+// 停用的 craftSpec + STYLE_GUARD + openingSection 夹带的是纯文学审美，对网文条条减分，
+// 保留在 craft.mjs 里备查但不再注入。
+import { voicePrint } from './voiceprint.mjs';
+// 机制层：连续性铁律 + 节奏 + 输出规则 + 动笔前的私有约束卡。
+// 判据是"换本书还成不成立"——成立才写死在代码里；审美一律交给范本。
+import { mechanics, auditPrompt, fixPrompt } from './continuity.mjs';   // 单章级感情线尺度（可临时覆盖全书档位）
 import { getSession, removeSession } from './sessions.mjs';
 import { closeWindow } from './unterm.mjs';
 
@@ -280,12 +287,10 @@ export async function writeChapterFromIntent({ book, model, intent, useLastEndin
     ``,
     useLastEnding && last.tail ? `【上一章结尾（衔接用，保持文笔与语气连续）】：\n${last.tail}\n` : '',
     names.length ? `【近期已用章名（新章名别与这些重复）】：${names.slice(-30).join('、')}\n` : '',
-    craftSpec({ mode: 'write' }),
-    openingSection(num),
-    voiceSection(book),          // 对标文风 + 范文原文（之前这三条写正文的路径一条都没接上）
-    STYLE_GUARD,
-    styleSlantSection(slant),
+    voicePrint(book),            // 文风全部来自范本+手法卡，代码不夹带审美
+    styleSlantSection(slant),    // 侧重是作者本章主动选的，属于"作者的意图"，不是"我的审美"
     chapterRomanceSection(book.romance, romance),
+    mechanics({ card: true }),
     ``,
     `输出要求：`,
     `1. 只写【第 ${num} 章】这一章，约 ${lo}–${hi} 字，情节靠推进与细节写足，不重复凑字。`,
@@ -301,8 +306,6 @@ export async function writeChapterFromIntent({ book, model, intent, useLastEndin
   const chapters = parseChapters(out, { onLog });
   const ch = chapters[0];
   if (!ch) throw new Error('AI 未按格式产出本章（可能被截断或跑偏）。可重试，或把要求写得更具体。');
-
-  ch.body = await enforceParagraphs({ body: ch.body, num, title: ch.title, model, cfg, onLog });
 
   const volNum = currentVolume(book) || 1;
   const volDir = volumeDirName(book.dir, volNum);   // 复用已存在的卷目录（可能带卷名），别硬拼「卷NN」分叉出第二个
@@ -385,12 +388,10 @@ export async function rewriteChapter({
           : `\n【章名】：保持《${title}》不变。`),
     ``,
     prevTail ? `【上一章结尾（衔接用，保持语气连续）】：\n${prevTail}\n` : '',
-    craftSpec({ mode: 'rewrite' }),
-    openingSection(num),
-    voiceSection(book),          // 对标文风 + 范文原文
-    STYLE_GUARD,
+    voicePrint(book),            // 文风全部来自范本+手法卡，代码不夹带审美
     styleSlantSection(slant),
     chapterRomanceSection(book.romance, romance),
+    mechanics({ card: true }),
     ``,
     `输出要求：`,
     `1. 约 ${lo}–${hi} 字，靠情节推进与细节写足，【严禁重复段落或原地绕圈凑字】。`,
@@ -417,12 +418,13 @@ export async function rewriteChapter({
   let bodyText = ch.body;
   if (polish) {
     try {
-      const pr = await polishChapter({ book, draft: bodyText, num, title: finalTitle, model, critic, cfg, onLog });
+      const pr = await auditChapter({ book, draft: bodyText, num, title: finalTitle, model, critic, prevTail, cfg, onLog });
       bodyText = pr.body;
-    } catch (e) { onLog({ level: 'warn', msg: '  打磨失败，保留初稿：' + (e.message || e) }); }
+    } catch (e) { onLog({ level: 'warn', msg: '  审计失败，保留初稿：' + (e.message || e) }); }
   }
-  // 分段闸放在最后：打磨那一轮也可能把段落改碎，量完再落盘
-  bodyText = await enforceParagraphs({ body: bodyText, num, title: finalTitle, model, cfg, onLog });
+  // ⚠️ 段落闸已停用：判据是反的。作者认可的样章有 53% 单行段、最长连续 10 行，
+  // 这道闸会把【作者喜欢的文字】判为不合格打回重排。分段属于文风，交给范本管。
+  // reflowChapter 保留为手动工具（作者自己觉得碎时用），不再自动拦截。
   ch.body = bodyText;
 
   const words = hanziCount(ch.body);
@@ -542,70 +544,44 @@ export async function reflowChapter({ book, rel, model, cfg, onLog = () => {} })
 // 关键在挑刺那一轮的提示词——不能问"写得好不好"（模型会一通夸），
 // 要问【具体哪一句、为什么像机器写的、怎么改】，逼它给出可执行的修改点。
 
-const CRITIC_PROMPT = [
-  '你是一位挑剔的网文编辑。下面是一章初稿。你的任务【不是夸它】，是找出它【哪里像 AI 写的、哪里像记叙文】。',
-  '',
-  '重点查这七条，每条都要给【具体到句子】的例子：',
-  '1. 质量密度是否过于均匀——每段都在使技巧、没有一句松弛的闲笔？真人写的东西有废话、有笨拙处。',
-  '2. 句式是否同构——是不是通篇一个节奏（比如全是短断句＋对仗），像给整篇套了滤镜？',
-  '3. 有没有叙述者在替读者解释/科普/总结？该让读者自己看出来的地方被说破了？',
-  '4. 情绪是否"被推导出来"而非被感受到——每个反应都恰到好处、合乎逻辑，没有失当或过头的时候？',
-  '5. 场景有没有价值翻转？结束时局面和开始时是不是一样？',
-  '6. 章末是不是停在总结/抒情上，而不是新的不确定上？',
-  '7. 有没有空话套话、翻译腔、万能形容词（"心中泛起一丝涟漪"这类）？',
-  '',
-  '输出格式：直接列 5–10 条【可执行的修改意见】，每条写成：',
-  '  · 问题：<原文里的具体一句或一段>｜为什么：<一句话>｜怎么改：<具体建议>',
-  '不要写总评、不要打分、不要客套。挑不出问题就说"无"，但绝大多数初稿都挑得出。',
-].join('\n');
-
-// 让模型自己评自己容易护短；能换个模型来挑刺最好。critic 传空则用同一个模型。
-export async function polishChapter({ book, draft, num, title, model, critic = '', cfg, onLog = () => {} }) {
+// 连续性审计：初稿 → 只查连续性 → 最小改动修订。
+//
+// 【为什么从"挑文笔"改成"挑连续性"】
+// 原来这一轮让模型挑文笔毛病。那是审美：机器判不好，而且它挑出来的意见
+// 会把文字往更"正确"也更死板的方向推——越打磨越像标准答案，正是作者说的"僵硬"。
+// 而连续性是客观的：人死没死、伤好没好、他知不知道这件事、兵有多少、走了几天——
+// 每一条都能对照已知状态判定真假。机器擅长记账，就让它记账。
+async function auditChapter({ book, draft, num, title, model, critic = '', prevTail = '', cfg, onLog = () => {} }) {
   const criticModel = critic && getModel(critic) ? critic : model;
   const cName = getModel(criticModel)?.name || criticModel;
 
-  onLog({ level: 'act', msg: `  打磨第 1 轮：让 ${cName} 挑刺…` });
+  let ledger = '';
+  try { ledger = fs.readFileSync(path.join(book.dir, 'continuity_ledger.md'), 'utf8'); } catch {}
+
+  onLog({ level: 'act', msg: `  连续性审计：让 ${cName} 对照已知状态核一遍…` });
   const notes = await runCowrite(
     criticModel,
-    `${CRITIC_PROMPT}\n\n【初稿】\n${draft.slice(0, 12000)}`,
+    auditPrompt({ chapterText: draft.slice(0, 12000), prevTail, ledger, num }),
     cfg, cwTimeout(criticModel, 'idea'),
   );
   const clean = String(notes || '').trim();
-  if (!clean || clean.length < 30 || /^无[。.]?$/.test(clean)) {
-    onLog({ level: 'info', msg: '  挑刺没给出有效意见，保留初稿' });
-    return { body: draft, notes: '', polished: false };
+  if (!clean || clean.length < 20 || /^无[。.]?$/.test(clean)) {
+    onLog({ level: 'info', msg: '  连续性无问题' });
+    return { body: draft, notes: '', fixed: false };
   }
-  onLog({ level: 'info', msg: `  拿到 ${(clean.match(/·/g) || []).length || '若干'} 条意见，开始改…` });
+  const n = (clean.match(/·/g) || []).length || '若干';
+  onLog({ level: 'warn', msg: `  查出 ${n} 处连续性问题，按最小改动修…` });
 
-  const fixPrompt = [
-    `你是这一章的作者。编辑给了修改意见，请【按意见把这一章改一遍】。`,
-    ``,
-    `【编辑意见】：`,
-    clean,
-    ``,
-    `【改写要求】：`,
-    `1. 保持情节、人物、结局不变——这是润色不是重写，不要改故事。`,
-    `2. 逐条落实意见。改不动的可以不改，但大部分要看得出改过。`,
-    `3. 顺手把节奏调开：允许有一两处松弛的闲笔，不必每段都使技巧。`,
-    `4. 字数与初稿相当或略多。`,
-    ``,
-    `输出：只输出改好的完整正文，用分隔符包裹，正文里不要出现 <<<CHAPTER 或 <<<END：`,
-    `<<<CHAPTER 章号=${num} 标题=${title}>>>`,
-    `（改好的完整正文）`,
-    `<<<END>>>`,
-    ``,
-    `【初稿】`,
-    draft,
-  ].join('\n');
-
-  const out = await runCowrite(model, fixPrompt, cfg, cwTimeout(model, 'chapter'));
+  const NL = String.fromCharCode(10);
+  const out = await runCowrite(model, fixPrompt({ notes: clean, num, title }) + NL + NL + '【正文】' + NL + draft,
+    cfg, cwTimeout(model, 'chapter'));
   const ch = parseChapters(out, { onLog })[0];
-  if (!ch || hanziCount(ch.body) < hanziCount(draft) * 0.6) {
-    onLog({ level: 'warn', msg: '  按意见改写失败或缩水太多，保留初稿' });
-    return { body: draft, notes: clean, polished: false };
+  if (!ch || hanziCount(ch.body) < hanziCount(draft) * 0.85) {
+    onLog({ level: 'warn', msg: '  修订失败或改动过大（应是最小改动），保留初稿' });
+    return { body: draft, notes: clean, fixed: false };
   }
-  onLog({ level: 'act', msg: `  ✓ 打磨完成（${hanziCount(draft)} → ${hanziCount(ch.body)} 字）` });
-  return { body: ch.body, notes: clean, polished: true };
+  onLog({ level: 'act', msg: `  ✓ 已修（${hanziCount(draft)} → ${hanziCount(ch.body)} 字）` });
+  return { body: ch.body, notes: clean, fixed: true };
 }
 
 // ===== 窗口模式（可见 Unterm）：作者能【看见】AI 在窗口里写这一章 =====

@@ -125,3 +125,53 @@ export function saveBookFile(book, rel, content) {
   fs.writeFileSync(abs, String(content == null ? '' : content), 'utf8');
   return { ok: true, kb: kbOf(abs) };
 }
+
+// ——— 删除章节 ———
+// 【为什么要有这个】逐章人工把关的工作流里，"不满意就删掉重来"比"在旧文上重写"干净得多：
+// 重写会被原文的结构和用词锚住（实测重写四轮，开头始终没跳出第一版的框架），
+// 而删掉重生成是真的从头再来。全自动写作目前不靠谱，删除是迭代的核心动作。
+//
+// 删之前一律 git 存档 + 留 .deleted 备份，两道保险——删章是破坏性的，不能只靠回收站。
+export function deleteChapters(book, rels, { onLog = () => {} } = {}) {
+  const list = Array.isArray(rels) ? rels : [rels];
+  const done = [];
+  const nums = [];
+
+  for (const rel of list) {
+    const abs = path.join(book.dir, String(rel || ''));
+    if (!rel || !fs.existsSync(abs)) { onLog({ level: 'warn', msg: `跳过（找不到）：${rel}` }); continue; }
+    const base = path.basename(abs);
+    const num = parseInt((base.match(/^(\d{1,4})/) || [])[1] || '0', 10);
+    if (!num) { onLog({ level: 'warn', msg: `跳过（不是章节正文）：${base}` }); continue; }
+
+    // 备份到书目录下的 .deleted/，带时间戳，不会被下一次删除覆盖
+    try {
+      const bak = path.join(book.dir, '.deleted');
+      fs.mkdirSync(bak, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+      fs.copyFileSync(abs, path.join(bak, `${stamp}_${base}`));
+    } catch (e) { onLog({ level: 'warn', msg: '备份失败（仍继续删）：' + (e.message || e) }); }
+
+    try { fs.unlinkSync(abs); } catch (e) { onLog({ level: 'warn', msg: '删除失败：' + base }); continue; }
+    // 顺手清掉同名的 .bak（重写留下的），不然目录里全是垃圾
+    for (const ext of ['.bak']) { try { fs.unlinkSync(abs + ext); } catch {} }
+    done.push(rel); nums.push(num);
+    onLog({ level: 'act', msg: `已删 第 ${num} 章《${base.replace(/\.txt$/i, '').replace(/^\d{1,4}/, '')}》` });
+  }
+
+  // 从 chapter_index.md 里摘掉对应行
+  if (nums.length) {
+    const fp = path.join(book.dir, 'chapter_index.md');
+    try {
+      const cur = fs.readFileSync(fp, 'utf8');
+      const set = new Set(nums);
+      const kept = cur.split(/\r?\n/).filter((line) => {
+        const m = line.match(/^\s*\|\s*(\d{1,4})\s*\|/);
+        return !(m && set.has(parseInt(m[1], 10)));
+      }).join('\n');
+      fs.writeFileSync(fp, kept.replace(/\s*$/, '') + '\n', 'utf8');
+    } catch (e) { onLog({ level: 'warn', msg: '更新 chapter_index.md 失败：' + (e.message || e) }); }
+  }
+
+  return { deleted: done, nums, count: done.length };
+}

@@ -2202,6 +2202,8 @@ async function openReader(book) {
   $('#rdFileName').textContent = '加载中…'; $('#rdContent').innerHTML = '<div class="rd-empty">加载中…</div>'; $('#rdNav').innerHTML = '';
   exitEdit(); $('#rdEdit').classList.add('hidden');
   $('#rdRewrite') && $('#rdRewrite').classList.add('hidden');
+  $('#rdAdopt') && $('#rdAdopt').classList.add('hidden');
+  $('#rdDelete') && $('#rdDelete').classList.add('hidden');
   try {
     const t = await api('/api/book/files?book=' + encodeURIComponent(book.slug));
     renderReaderNav(t);
@@ -2236,6 +2238,8 @@ async function loadReaderFile(rel) {
   $('#rdEdit').classList.remove('hidden');
   // 只有【章节正文】能重写；设定圣经/大纲/审稿报告走「编辑」就行
   $('#rdRewrite') && $('#rdRewrite').classList.toggle('hidden', !rdIsChapter(rel));
+  $('#rdAdopt') && $('#rdAdopt').classList.toggle('hidden', !rdIsChapter(rel));
+  $('#rdDelete') && $('#rdDelete').classList.toggle('hidden', !rdIsChapter(rel));
   try {
     const r = await api('/api/book/read?book=' + encodeURIComponent(RD_BOOK.slug) + '&rel=' + encodeURIComponent(rel));
     RD_RAW = r.content || '';
@@ -2254,6 +2258,8 @@ function exitEdit() {
   $('#rdEditor').classList.add('hidden'); $('#rdContent').classList.remove('hidden');
   $('#rdEdit').classList.toggle('hidden', !RD_REL); $('#rdSave').classList.add('hidden'); $('#rdCancel').classList.add('hidden');
   $('#rdRewrite') && $('#rdRewrite').classList.toggle('hidden', !rdIsChapter(RD_REL));
+  $('#rdAdopt') && $('#rdAdopt').classList.toggle('hidden', !rdIsChapter(RD_REL));
+  $('#rdDelete') && $('#rdDelete').classList.toggle('hidden', !rdIsChapter(RD_REL));
 }
 $('#rdEdit').addEventListener('click', enterEdit);
 $('#rdCancel').addEventListener('click', exitEdit);
@@ -2284,6 +2290,79 @@ $('#rdRenumber').addEventListener('click', async () => {
 $('#btnReadFromWrite').addEventListener('click', () => { if (CUR) openReader(CUR); });
 $('#btnRead').addEventListener('click', () => { if (CUR) openReader(CUR); });
 // 打开阅读器并直接跳到某一章（rel）——共创/写作后"直接读刚写的这一章"用。
+// ---------- 文风范本：本书文风的唯一来源 ----------
+// 程序不再内置任何"该怎么写"的规则（那等于把开发者的审美强加给每本书）。
+// 风格锚定在具体文本上：范本原文 + 从范本提炼的手法卡。
+let VC_CANDS = [];
+async function vcRefresh() {
+  const r = await api('/api/book/voice', 'POST', { book: CUR.slug });
+  const refs = r.refs || [];
+  $('#vcList').innerHTML = refs.length
+    ? refs.map(x => `<div class="rd-dup-row" style="display:flex;align-items:center;gap:8px">
+        <b style="flex:1">${esc(x.name)}</b><span class="rd-kb">${x.chars} 字</span>
+        <button class="btn ghost tiny" data-del="${esc(x.file)}">移除</button></div>`).join('')
+    : '<div class="rd-empty">还没有范本 —— 此时程序只给最低要求，文风由模型自由发挥。</div>';
+  $('#vcList').querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+    await api('/api/book/voice-remove', 'POST', { book: CUR.slug, file: b.dataset.del });
+    vcRefresh();
+  }));
+  $('#vcCardText').textContent = r.card || '（还没提炼手法卡）';
+}
+function openVoice() {
+  if (!CUR) return;
+  $('#vcErr').textContent = ''; $('#vcName').value = ''; $('#vcText').value = '';
+  $('#vcCands').innerHTML = ''; VC_CANDS = [];
+  $('#voiceModal').classList.remove('hidden');
+  vcRefresh().catch(e => { $('#vcErr').textContent = e.message; });
+}
+$('#btnVoice') && $('#btnVoice').addEventListener('click', openVoice);
+$('#vcClose') && $('#vcClose').addEventListener('click', () => $('#voiceModal').classList.add('hidden'));
+
+$('#vcAdd') && $('#vcAdd').addEventListener('click', async () => {
+  const text = $('#vcText').value.trim();
+  if (!text) { $('#vcErr').textContent = '内容是空的'; return; }
+  $('#vcErr').textContent = '';
+  try {
+    await api('/api/book/voice-add', 'POST', { book: CUR.slug, name: $('#vcName').value.trim() || '范本', text });
+    $('#vcName').value = ''; $('#vcText').value = '';
+    await vcRefresh(); toast('范本已挂上');
+  } catch (e) { $('#vcErr').textContent = e.message; }
+});
+
+$('#vcBoot') && $('#vcBoot').addEventListener('click', async () => {
+  const b = $('#vcBoot'); const old = b.textContent;
+  b.disabled = true; b.textContent = '生成中…（约 1 分钟）'; $('#vcErr').textContent = '';
+  try {
+    const r = await api('/api/book/voice-boot', 'POST', { book: CUR.slug, words: 600 });
+    VC_CANDS = r.candidates || [];
+    $('#vcCands').innerHTML = VC_CANDS.map((c, i) => `
+      <div style="border:1px solid var(--border,#333);border-radius:8px;padding:8px 10px;margin:8px 0">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <b>${esc(c.name)}</b><span class="chip-tip">${esc(c.hint)}</span>
+          <div class="grow"></div>
+          <button class="btn primary tiny" data-adopt="${i}">就要这个</button>
+        </div>
+        <div style="white-space:pre-wrap;font-size:13px;max-height:200px;overflow:auto;opacity:.9">${esc(c.text)}</div>
+      </div>`).join('');
+    $('#vcCands').querySelectorAll('[data-adopt]').forEach(btn => btn.addEventListener('click', async () => {
+      await api('/api/book/voice-boot-adopt', 'POST', { book: CUR.slug, candidate: VC_CANDS[+btn.dataset.adopt] });
+      await vcRefresh(); toast('已设为本书范本');
+    }));
+  } catch (e) { $('#vcErr').textContent = e.message; }
+  finally { b.disabled = false; b.textContent = old; }
+});
+
+$('#vcCard') && $('#vcCard').addEventListener('click', async () => {
+  const b = $('#vcCard'); const old = b.textContent;
+  b.disabled = true; b.textContent = '提炼中…'; $('#vcErr').textContent = '';
+  try {
+    const r = await api('/api/book/voice-card', 'POST', { book: CUR.slug });
+    $('#vcCardText').textContent = r.card || '';
+    toast('手法卡已更新');
+  } catch (e) { $('#vcErr').textContent = e.message; }
+  finally { b.disabled = false; b.textContent = old; }
+});
+
 // ---------- 单章重写：换模型 / 改章名 / 重新给情节 ----------
 // 放在阅读页：作者读到哪一章不满意，当场就能重写那一章，不用回写作台绕一圈。
 const rdIsChapter = (rel) => /^chapters\//.test(rel || '') && /\.txt$/i.test(rel || '');
@@ -2351,7 +2430,29 @@ function openChapterRewrite() {
     }
   }).catch(() => {});
 }
+// 删除本章。逐章把关的工作流里，不满意就删掉重来比在旧文上重写干净——
+// 重写会被原文的结构锚住，删掉重生成才是真的从头再来。
+$('#rdDelete') && $('#rdDelete').addEventListener('click', async () => {
+  if (!RD_BOOK || !rdIsChapter(RD_REL)) return;
+  const base = RD_REL.split('/').pop().replace(/\.txt$/i, '');
+  if (!confirm(`删除《${base}》？
+
+会先 git 存档，并把原文备份到书目录的 .deleted/，两样都能取回。`)) return;
+  try {
+    const r = await api('/api/book/delete-chapters', 'POST', { book: RD_BOOK.slug, rels: [RD_REL] });
+    toast(`已删 ${r.count} 章` + (r.snapshot ? `（存档 ${r.snapshot}）` : ''));
+    await openReader(RD_BOOK);          // 目录要刷新，被删的那章不该还在左侧列着
+  } catch (e) { toast(e.message); }
+});
 $('#rdRewrite') && $('#rdRewrite').addEventListener('click', openChapterRewrite);
+// 这一章写得对味 → 设为范本。长期看这是最有价值的一条路：书越写越像它自己。
+$('#rdAdopt') && $('#rdAdopt').addEventListener('click', async () => {
+  if (!RD_BOOK || !rdIsChapter(RD_REL)) return;
+  try {
+    await api('/api/book/voice-adopt-chapter', 'POST', { book: RD_BOOK.slug, rel: RD_REL });
+    toast('已设为本书文风范本——后续章节会向它看齐');
+  } catch (e) { toast(e.message); }
+});
 // 只有「我自己指定」才需要输入框，其余两种模式藏起来，别让人以为必须填
 $('#crTitleMode') && $('#crTitleMode').addEventListener('change', () => {
   $('#crTitleWrap').classList.toggle('hidden', $('#crTitleMode').value !== 'manual');

@@ -5,6 +5,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { ROMANCE_LEVELS } from './romance.mjs';
+const NL = String.fromCharCode(10);
+const NL2 = NL + NL;
+import { listRefs, addRef, removeRef, readCard, saveCard, CARD_PROMPT, readRefs, hasVoicePrint } from './voiceprint.mjs';
+import { draftCandidates, adoptCandidate, TONES } from './voiceboot.mjs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
@@ -19,7 +23,7 @@ import { startWriting } from './writer.mjs';
 import { runStateless } from './statelessWriter.mjs';
 import { runWebWrite, getAdapter } from './webwriter.mjs';
 import { runApiWrite, isApiProvider } from './apiwriter.mjs';
-import { API_PROVIDERS, providerConfigured, isKeylessProvider } from './apichat.mjs';
+import { API_PROVIDERS, providerConfigured, isKeylessProvider, chatComplete } from './apichat.mjs';
 import { localHealth, probeText, probeImage } from './localai.mjs';
 import { brainstorm, writeChapterInWindow, writeChapterFromIntent, writeChaptersFromPlot, rewriteChapter, reflowChapter, isCowriteModel, isCowriteWindowModel, COWRITE_MODELS, STYLE_SLANTS } from './cowrite.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
@@ -30,7 +34,7 @@ import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction } from './editor.mjs';
 import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
-import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters } from './files.mjs';
+import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
 import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment } from './fanqie.mjs';
@@ -1259,6 +1263,84 @@ async function api(p, req, res, u) {
           slants: Object.entries(STYLE_SLANTS).map(([id, v]) => ({ id, name: v.name, tip: v.tip })),
           romance: ROMANCE_LEVELS.map(r => ({ id: r.id, name: r.name, short: r.short })),
         });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    // —— 文风范本：本书文风的唯一来源 ——
+    if (p === '/api/book/voice') {   // 列出本书的范本与手法卡
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        return json(res, 200, { ok: true, refs: listRefs(book), card: readCard(book), has: hasVoicePrint(book), tones: TONES });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/voice-add') {   // 贴一段文字进来当范本
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        if (!String(body.text || '').trim()) return json(res, 400, { error: '内容是空的' });
+        const f = addRef(book, body.name || '范本', body.text);
+        return json(res, 200, { ok: true, file: f, refs: listRefs(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/voice-adopt-chapter') {   // 把【已写的某一章】设为范本——书越写越像它自己
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const abs = path.join(book.dir, String(body.rel || ''));
+        if (!body.rel || !fs.existsSync(abs)) return json(res, 400, { error: '找不到这一章' });
+        const t = fs.readFileSync(abs, 'utf8').trim();
+        const name = path.basename(abs).replace(/[.]txt$/i, '');
+        const f = addRef(book, '本书-' + name, t);
+        return json(res, 200, { ok: true, file: f, refs: listRefs(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/voice-remove') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        removeRef(book, body.file);
+        return json(res, 200, { ok: true, refs: listRefs(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/voice-card') {   // 让模型读范本、自己总结手法卡
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const refs = readRefs(book, { totalMax: 9000 });
+        if (!refs.length) return json(res, 400, { error: '还没有范本，先挂几段文字或选一章设为范本' });
+        const model = body.model || book.model || cfg.defaultModel;
+        const m = getModel(model);
+        const r = await chatComplete({
+          provider: m?.provider || model, cfg, maxTokens: 1400,
+          messages: [{ role: 'user', content: CARD_PROMPT + NL2 + refs.map(x => '—— 《' + x.name + '》 ——' + NL + x.text).join(NL2) }],
+        });
+        saveCard(book, r.content);
+        return json(res, 200, { ok: true, card: readCard(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/voice-boot') {   // 冷启动：生成几个不同调性的开头供挑选
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const model = body.model || book.model || cfg.defaultModel;
+        const cands = await draftCandidates({ book, model, cfg, words: Number(body.words) || 700,
+          onLog: (e) => pushLog(book.slug, { ...e, source: 'voice' }) });
+        return json(res, 200, { ok: true, candidates: cands });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/voice-boot-adopt') {   // 选中某个候选 → 成为本书第一份范本
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const f = adoptCandidate(book, body.candidate);
+        return json(res, 200, { ok: true, file: f, refs: listRefs(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/delete-chapters') {   // 删章：逐章把关的工作流里，删掉重来比在旧文上重写干净
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        if (sessionLive(book.slug)) return json(res, 409, { error: '这本书正在写作中，请先停止再删' });
+        const rels = Array.isArray(body.rels) ? body.rels : (body.rel ? [body.rel] : []);
+        if (!rels.length) return json(res, 400, { error: '没有指定要删的章节' });
+        // 两道保险：git 存档 + 各章单独备份到书目录的 .deleted/
+        let snapshot = '';
+        try { snapshot = gitSnapshot(book.dir, '删除章节前存档') || ''; } catch {}
+        const r = deleteChapters(book, rels, { onLog: (e) => pushLog(book.slug, { ...e, source: 'delete' }) });
+        pushLog(book.slug, { level: 'act', source: 'delete', msg: `已删 ${r.count} 章（可从 .deleted/ 取回${snapshot ? '，或 git reset 到 ' + snapshot : ''}）` });
+        return json(res, 200, { ok: true, ...r, snapshot });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/reflow-chapter') {   // 只重排段落，一个字不改（存量章节多半只是分得太碎）
