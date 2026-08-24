@@ -2290,6 +2290,51 @@ $('#rdRenumber').addEventListener('click', async () => {
 $('#btnReadFromWrite').addEventListener('click', () => { if (CUR) openReader(CUR); });
 $('#btnRead').addEventListener('click', () => { if (CUR) openReader(CUR); });
 // 打开阅读器并直接跳到某一章（rel）——共创/写作后"直接读刚写的这一章"用。
+// ---------- 立项第二步：先定文风 ----------
+// 【为什么放在建书里】没有范本时模型默认往书面语走（实测无范本 36.1 字/段、还整章半角逗号；
+// 网文范本是 16.2）。等作者写完几章再回头挂范本就晚了——前面几章已经定了调，后面还得向它们看齐。
+// 挑的是【一段真文字】而不是一个形容词标签：形容词进提示词就退化成"多用短句"这类废话，压不住任何东西。
+let NB_VOICE = null;
+let NB_VOICE_CANDS = [];
+function nbVoiceReset() {
+  NB_VOICE = null; NB_VOICE_CANDS = [];
+  const box = $('#nbVoiceCands'); if (box) box.innerHTML = '';
+  const tip = $('#nbVoicePick'); if (tip) tip.textContent = '';
+}
+function nbVoiceRender() {
+  $('#nbVoiceCands').innerHTML = NB_VOICE_CANDS.map((c, i) => `
+    <div class="nb-cand${NB_VOICE && NB_VOICE.name === c.name ? ' on' : ''}" data-pick="${i}">
+      <div class="nb-cand-head"><b>${esc(c.name)}</b><span class="chip-tip">${esc(c.hint)}</span>
+        <div class="grow"></div><span class="nb-cand-mark">${NB_VOICE && NB_VOICE.name === c.name ? '✓ 已选' : '点这里选它'}</span></div>
+      <div class="nb-cand-body">${esc(c.text)}</div>
+    </div>`).join('');
+  $('#nbVoiceCands').querySelectorAll('[data-pick]').forEach(el => el.addEventListener('click', () => {
+    const c = NB_VOICE_CANDS[+el.dataset.pick];
+    NB_VOICE = (NB_VOICE && NB_VOICE.name === c.name) ? null : { name: c.name, text: c.text };
+    $('#nbVoicePick').textContent = NB_VOICE ? `已选「${NB_VOICE.name}」——开写后它就是本书范本` : '还没挑（可以不挑，直接开写）';
+    nbVoiceRender();
+  }));
+}
+$('#nbVoiceGen') && $('#nbVoiceGen').addEventListener('click', async () => {
+  // 书名在第二步的 #nbFinalTitle（点候选或自己写都会填到它），不是第一步的 #nbTheme 输入框
+  const title = $('#nbFinalTitle').value.trim();
+  if (!title) { $('#nbErr2').textContent = '先定个书名（点上面的候选，或自己写一个），AI 才知道要写什么的开头'; return; }
+  const b = $('#nbVoiceGen'); const old = b.textContent;
+  b.disabled = true; b.textContent = '生成中…（5 段并发，约 1 分钟）'; $('#nbErr2').textContent = '';
+  try {
+    const r = await api('/api/book/voice-boot', 'POST', {
+      title, genre: $('#nbTheme') ? $('#nbTheme').value.trim() : '',
+      synopsis: $('#nbSynopsis') ? $('#nbSynopsis').value.trim() : '',
+      model: $('#nbModel').value, words: 700,
+    });
+    NB_VOICE_CANDS = r.candidates || [];
+    nbVoiceRender();
+    $('#nbVoicePick').textContent = '点一段选它；都不满意就再生成一批';
+    b.textContent = '换五段再看看';
+  } catch (e) { $('#nbErr2').textContent = '生成失败：' + e.message; b.textContent = old; }
+  finally { b.disabled = false; }
+});
+
 // ---------- 文风范本：本书文风的唯一来源 ----------
 // 程序不再内置任何"该怎么写"的规则（那等于把开发者的审美强加给每本书）。
 // 风格锚定在具体文本上：范本原文 + 从范本提炼的手法卡。
@@ -2592,6 +2637,7 @@ function openModal() {
   $('#nbErr').textContent = ''; $('#nbFinalTitle').value = ''; $('#nbLaunch').disabled = true;
   // 重置对标状态
   NB_REF_STYLE = null;
+  nbVoiceReset();   // 换一本书就换一套文风候选，别把上一本挑的带过来
   // 重置开局架构为默认「粗罗盘」
   NB_PLAN_MODE = 'compass';
   const pseg = document.getElementById('nbPlanMode');
@@ -2742,6 +2788,7 @@ $('#nbLaunch').addEventListener('click', async () => {
       characters: $('#nbChars') ? $('#nbChars').value.trim() : '',   // 作者指定的角色（AI 原样采用）
       planMode: NB_PLAN_MODE,   // freehand=探索式：只给写作手法，全书不出任何大纲，情节作者逐段给
       romance: NB_ROMANCE,      // 感情线档位：写进该书写作规范，全程约束分寸（含未成年红线）
+      voiceRef: NB_VOICE,       // 挑中的那段开头 → 本书第一份范本 + 手法卡（没挑就是 null）
     });
     $('#modal').classList.add('hidden');
     await refresh();
@@ -2749,7 +2796,7 @@ $('#nbLaunch').addEventListener('click', async () => {
     openWrite(book); setWriting(true); openStream(book.slug);
     const st = r.book && r.book.style;
     const free = NB_PLAN_MODE === 'freehand';
-    toast('已立项《' + title + '》' + (st ? ' · 文风：' + st.name : '') + '，AI 正在' +
+    toast('已立项《' + title + '》' + (NB_VOICE ? ' · 文风范本：' + NB_VOICE.name : (st ? ' · 文风：' + st.name : '')) + '，AI 正在' +
       (free ? '定写作手法（只写手法+主角名+故事概述，不出任何大纲）。手法出来后，在「🤝 我来主笔」里给第一段故事情节，AI 自拆 3–5 章。'
             : '搭设定 + 全书罗盘（每卷一句话走向）。罗盘出来后，用「🧭 本卷大纲」逐卷共创再写。'));
   } catch (e) { $('#nbErr2').textContent = '失败：' + e.message; $('#nbLaunch').disabled = false; }

@@ -2,6 +2,8 @@
 // 各模型分别读取不同文件：codex/gemini 读 AGENTS.md，claude 读 CLAUDE.md，gemini 读 GEMINI.md，qwen 读 QWEN.md。
 // 内容是同一套标准，确保换模型不换文风与流程。
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { styleVoice } from './styles.mjs';
 import { romanceVoice, ROMANCE_REDLINE } from './romance.mjs';
 
@@ -16,6 +18,9 @@ export function skillBody(book) {
   const tgtLo = std.targetCharsLo || 3000;
   const tgtHi = std.targetCharsHi || 3600;
   const sv = styleVoice(b.style || std.style);
+  // 这本书有没有挂范本，决定文风那一节怎么写（范本优先，形容词降级为补充）
+  let hasRefs = false;
+  try { hasRefs = b.dir ? fs.readdirSync(path.join(b.dir, 'style_refs')).some(f => /\.(txt|md)$/i.test(f)) : false; } catch { hasRefs = false; }
   const rv = romanceVoice(b.romance);   // 感情线档位：建书时选，缺省走推荐档
   // tweak 仅在“真有内容”时注入：过滤空串与占位符（如自动填充的“本书专属微调建议”），
   // 否则会把一句废话当成写作指令注进规范（这是早期一处 leak）。
@@ -32,7 +37,23 @@ export function skillBody(book) {
   const readSources = freehand
     ? '`novel_bible.md` 的【写作手法】、`continuity_ledger.md` 的人物名册、`chapter_index.md` 末尾、最近 3–5 章正文'
     : '`novel_bible.md`、当前卷 `outlines/`、`chapter_index.md` 末尾、最近 3–5 章正文、最近一份 `reviews/`、以及 `continuity_ledger.md`';
-  const styleSection = sv ? `
+  // 【文风：范本优先于形容词】
+  // 老写法是把 book.style 的 {name, rules} 抄进规范——那是一串形容词（"节奏明快、descriptions 克制"），
+  // 抽象词进了提示词就退化成"多用短句、注重细节"这类放之四海皆准的废话，压不住任何东西。
+  // 实测：有范本时 18.4 字/段（贴着范本的 17.9），无范本时 36.1 字/段、还整章用半角逗号。
+  // 所以只要这本书有 style_refs/，就让 agent【去读原文】，形容词降级为补充说明。
+  const styleSection = hasRefs ? `
+
+## 本书文风（最高优先级，整本一致）
+
+- **文风的唯一依据是 \`style_refs/\` 里的范本原文**。动笔前必须先读一遍，写成【那个样子】。
+- 学的是：叙述者的姿态、句子的呼吸、段落的换行密度、信息给法、用词口味、情绪的外放程度、一章的起收方式。
+- \`style_card.md\`（若有）是从范本里提炼的手法卡，可当速查；**与范本冲突时以范本原文为准**——描述总是有损的。
+- 【严禁照抄】范本的情节、人物、地名、专有名词、成句，**也不要复制它的句子结构与开场方式**。范本是让你感受"这个人怎么说话"，不是填空模板。
+- 已写章节同样是范本：越往后写，越要向本书自己已有的章节看齐，保证整本一个腔调。${sv ? `
+- （补充，仅供参考，冲突时一律以范本为准）文风定位：**${sv.name}**${sv.short ? `（${sv.short}）` : ''}` : ''}${realTweak ? `
+- 本书专属微调：${realTweak}` : ''}
+` : (sv ? `
 
 ## 本书文风（最高优先级，整本一致）
 
@@ -40,7 +61,8 @@ export function skillBody(book) {
 - 怎么写：${sv.rules}${realTweak ? `
 - 本书专属微调：${realTweak}` : ''}
 - 全书保持这一文风的腔调、句式节奏与用词基线；它优先于个人习惯，但仍要满足下面的"反 AI 味"硬标准。
-` : '';
+- 【建议】在「🖋️ 文风范本」里挂一段你认可的文字当范本——比这几行形容词管用得多。
+` : '');
   const romanceSection = `
 
 ## 感情线（本书档位：${rv ? rv.name : '暧昧'}）

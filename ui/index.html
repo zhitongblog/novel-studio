@@ -229,7 +229,7 @@
           <label class="field"><span>模型</span><select id="nbModel"></select></label>
         </div>
         <div class="grid2">
-          <label class="field"><span>文风</span><select id="nbStyle"></select></label>
+          <label class="field"><span>文风（兜底用；下一步可以直接看样章挑）</span><select id="nbStyle"></select></label>
           <label class="field"><span>规划卷数（只出粗罗盘）</span><input id="nbVolCount" type="number" min="3" max="200" value="30" title="立项只出这么多卷的一句话走向（罗盘），不细化章节。之后每卷开写前跟你共创该卷大纲。" /></label>
         </div>
         <label class="field"><span>开局架构 · 谁来定故事骨架</span>
@@ -302,6 +302,21 @@
         <div class="modal-hint">下面是 AI 据题材的建议，点一个填进上面，可任意修改；不喜欢就自己写。</div>
         <div id="nbLoading" class="nb-loading hidden">AI 构思中…</div>
         <div id="nbTitles" class="nb-titles"></div>
+        <div class="nb-voice" id="nbVoiceBox">
+          <div class="nb-voice-head">
+            <b>🖋️ 先定这本书的文风</b>
+            <span class="chip-tip">让 AI 按这个题材写 5 段调性不同的开头，你挑一段——它就是本书的文风范本，全书向它看齐。</span>
+          </div>
+          <div class="modal-hint">
+            不挑也能开写，但<b>没有范本时模型默认往书面语走</b>（实测 36 字/段，网文该是 16 上下），
+            读起来就是"像记叙文"。挑一段只要 1 分钟，比写完几章再回头救省事得多。
+          </div>
+          <div class="btn-row" style="margin:6px 0">
+            <button class="btn" id="nbVoiceGen">生成 4 段开头给我挑</button>
+            <span id="nbVoicePick" class="chip-tip"></span>
+          </div>
+          <div id="nbVoiceCands"></div>
+        </div>
         <div class="btn-row end">
           <button class="btn ghost" id="nbBack2">← 返回</button>
           <button class="btn" id="nbRegen">换一批建议</button>

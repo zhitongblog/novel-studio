@@ -13,7 +13,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { getModel } from './models.mjs';
+import { getModel, detectModel } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { lastChapterTail, recentChapterNames } from './contextpack.mjs';
 import { currentVolume, getBook, bookStats, volumeDirName } from './books.mjs';
@@ -69,7 +69,10 @@ function cwTimeout(model, kind) {
 // headless 跑一次强模型 CLI，拿文本输出。model 直用（不重路由）。timeoutMs 给足（写整章慢）。
 // 【异步 spawn】——绝不能用 spawnSync：那会把整个引擎的事件循环冻住数十秒到数分钟，期间 App 无任何响应
 // （日志不刷、界面像卡死），用户以为"没开始创作"。async spawn 不阻塞，引擎照常刷日志、界面不卡。
-function runCowrite(model, prompt, cfg, timeoutMs = 300000) {
+// 【导出】文风冷启动 / 手法卡提炼也要用它。
+// 之前那两处直接调 chatComplete，等于把 CLI 模型（claude、codex）排除在外——
+// 而实测里写得最像网文的恰恰是 claude。同一个调度口，谁都能跑。
+export function runCowrite(model, prompt, cfg, timeoutMs = 300000) {
   const m = getModel(model);
   if (!m) return Promise.reject(new Error('未知模型：' + model));
 
@@ -87,6 +90,12 @@ function runCowrite(model, prompt, cfg, timeoutMs = 300000) {
       + `可用：claude / codex / gemini / qwen 这类 CLI，或任一 API 模型（含本地 Ollama）。`));
   }
   if (!m.bin) return Promise.reject(new Error(m.name + ' 不是本地 CLI，无法用于共创模式'));
+  // 先探一下这个 CLI 在不在。不查的话，命令不存在时 shell 只往 stderr 写一句就退出，
+  // 空的 stdout 一路走到解析器，报出来是"AI 未按格式产出本章"——让人以为模型跑偏，其实压根没调起来。
+  if (!detectModel(model).available) {
+    return Promise.reject(new Error(
+      `没找到 ${m.bin} 命令——「${m.name}」本机没装或不在 PATH 里。装好后确保终端里能直接跑 ${m.bin}，或改用 API 类模型。`));
+  }
   const env = { ...process.env };
   if (cfg?.enableProxy) {
     const px = proxyUrl();
@@ -110,7 +119,20 @@ function runCowrite(model, prompt, cfg, timeoutMs = 300000) {
     child.stdout && child.stdout.on('data', d => { out += d; });
     child.stderr && child.stderr.on('data', d => { err += d; });
     child.on('error', (e) => { if (done) return; done = true; clearTimeout(timer); reject(new Error(m.name + ' 调用失败：' + (e.message || e))); });
-    child.on('close', () => { if (done) return; done = true; clearTimeout(timer); resolve(stripAnsi(out + '\n' + err)); });
+    // 【实测踩过的坑】codex 没装时，shell 只把"命令找不到"写进 stderr 就退出，stdout 是空的。
+    // 原来这里无脑 resolve，空回复一路走到解析器，报的是"AI 未按格式产出本章"——
+    // 让人以为是模型跑偏，实际上根本没调起来。所以退出码非 0 且没正文时，直说是哪一步没成。
+    child.on('close', (code) => {
+      if (done) return; done = true; clearTimeout(timer);
+      const o = stripAnsi(out), e = stripAnsi(err);
+      if (code !== 0 && !o.trim()) {
+        const miss = /not (?:be )?recognized|No such file|command not found|无法将.*识别/i.test(e);
+        return reject(new Error(miss
+          ? `没找到 ${m.bin} 命令——「${m.name}」这个 CLI 本机没装或不在 PATH 里。请先装好并能在终端直接运行 ${m.bin}，或换用 API 类模型。`
+          : `${m.name} 退出码 ${code}，没有产出内容：${e.trim().slice(0, 300) || '（无错误输出）'}`));
+      }
+      resolve(o + '\n' + e);
+    });
     try { child.stdin.write(prompt); child.stdin.end(); } catch (e) { /* 子进程若已退出，close/error 会处理 */ }
   });
 }

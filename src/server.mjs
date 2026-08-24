@@ -8,7 +8,7 @@ import { ROMANCE_LEVELS } from './romance.mjs';
 const NL = String.fromCharCode(10);
 const NL2 = NL + NL;
 import { listRefs, addRef, removeRef, readCard, saveCard, CARD_PROMPT, readRefs, hasVoicePrint } from './voiceprint.mjs';
-import { draftCandidates, adoptCandidate, TONES } from './voiceboot.mjs';
+import { draftCandidates, adoptCandidate, deriveCard, TONES } from './voiceboot.mjs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
@@ -397,6 +397,11 @@ async function api(p, req, res, u) {
     const body = await readJson(req);
     if (p === '/api/book/create') {
       const b = createBook(body, cfg);
+      // 手动建书也走同一条路：挑中的开头 = 本书第一份范本（见 /api/book/launch 里的说明）
+      if (body.voiceRef && body.voiceRef.text) {
+        try { await adoptCandidate(b, body.voiceRef, { model: body.model || b.model || cfg.defaultModel, cfg }); }
+        catch (e) { pushLog(b.slug, { level: 'warn', source: 'voice', msg: '文风范本落盘失败：' + e.message }); }
+      }
       return json(res, 200, { ok: true, book: { ...b, stats: { chapters: 0, kb: 0 } } });
     }
     if (p === '/api/book/delete') {
@@ -795,6 +800,17 @@ async function api(p, req, res, u) {
       const freehand = body.freehand === true || body.discovery === true || body.planMode === 'discovery' || body.planMode === 'freehand';
       try { book = createBook({ title: body.title, genre: body.theme || body.genre, model: body.model, totalWords: body.words, volumes: body.volumes || '', style: styleInput, planMode: freehand ? 'freehand' : 'compass', romance: body.romance }, cfg); }
       catch (e) { return json(res, 400, { error: e.message }); }
+      // 【建书时就把文风定下来】作者在立项弹窗里挑中的那段开头，落成本书第一份范本 + 手法卡。
+      // 为什么非在这一步不可：没有范本时模型默认往书面语走（实测无范本 36.1 字/段，
+      // 网文范本是 16.2，且整章用半角逗号）——那正是"写出来像记叙文"的来源。
+      // 等作者写完几章再回头挂范本就晚了：前面几章已经定了调，后面还得向它们看齐。
+      if (body.voiceRef && body.voiceRef.text) {
+        try {
+          await adoptCandidate(book, body.voiceRef, { model: body.model || book.model || cfg.defaultModel, cfg,
+            onLog: (e) => pushLog(book.slug, { ...e, source: 'voice' }) });
+          pushLog(book.slug, { level: 'act', source: 'voice', msg: `🖋️ 文风已锚定：《${body.voiceRef.name || '样章'}》已成为本书范本，全书向它看齐` });
+        } catch (e) { pushLog(book.slug, { level: 'warn', source: 'voice', msg: '文风范本落盘失败：' + e.message }); }
+      }
       // 立项时选择参与度；startWriting 会据 book.writeMode/reviewEvery 播种运行时审核开关
       if (body.participation != null) {
         try { setParticipation(book.slug, body.participation); } catch {}
@@ -1301,32 +1317,33 @@ async function api(p, req, res, u) {
     if (p === '/api/book/voice-card') {   // 让模型读范本、自己总结手法卡
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
-        const refs = readRefs(book, { totalMax: 9000 });
-        if (!refs.length) return json(res, 400, { error: '还没有范本，先挂几段文字或选一章设为范本' });
         const model = body.model || book.model || cfg.defaultModel;
-        const m = getModel(model);
-        const r = await chatComplete({
-          provider: m?.provider || model, cfg, maxTokens: 1400,
-          messages: [{ role: 'user', content: CARD_PROMPT + NL2 + refs.map(x => '—— 《' + x.name + '》 ——' + NL + x.text).join(NL2) }],
-        });
-        saveCard(book, r.content);
+        await deriveCard(book, { model, cfg });
         return json(res, 200, { ok: true, card: readCard(book) });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/voice-boot') {   // 冷启动：生成几个不同调性的开头供挑选
       try {
-        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
-        const model = body.model || book.model || cfg.defaultModel;
-        const cands = await draftCandidates({ book, model, cfg, words: Number(body.words) || 700,
-          onLog: (e) => pushLog(book.slug, { ...e, source: 'voice' }) });
+        // 【立项时书还没建】——所以允许只传 seed(书名/题材/简介)。
+        // 这是"建书时就把文风定下来"的关键：先看到四种腔调，挑一个，再开写。
+        const book = body.book ? getBook(body.book) : null;
+        if (body.book && !book) return json(res, 400, { error: '找不到书' });
+        const seed = book || { title: body.title, genre: body.genre || body.theme, synopsis: body.synopsis };
+        if (!seed.title) return json(res, 400, { error: '先填书名，AI 才知道要写什么的开头' });
+        const model = body.model || book?.model || cfg.defaultModel;
+        const log = (e) => { if (book) pushLog(book.slug, { ...e, source: 'voice' }); };
+        const cands = await draftCandidates({ seed, model, cfg, words: Number(body.words) || 700, onLog: log });
+        if (!cands.length) return json(res, 500, { error: '四个候选都没生成出来，换个模型再试' });
         return json(res, 200, { ok: true, candidates: cands });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/voice-boot-adopt') {   // 选中某个候选 → 成为本书第一份范本
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
-        const f = adoptCandidate(book, body.candidate);
-        return json(res, 200, { ok: true, file: f, refs: listRefs(book) });
+        const model = body.model || book.model || cfg.defaultModel;
+        const f = await adoptCandidate(book, body.candidate, { model, cfg,
+          onLog: (e) => pushLog(book.slug, { ...e, source: 'voice' }) });
+        return json(res, 200, { ok: true, file: f, refs: listRefs(book), card: readCard(book) });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/delete-chapters') {   // 删章：逐章把关的工作流里，删掉重来比在旧文上重写干净

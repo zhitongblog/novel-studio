@@ -382,3 +382,15 @@ textarea { resize: vertical; line-height: 1.5; }
 .chip input { margin: 0; cursor: pointer; }
 .chip.on { background: var(--accent-bg, rgba(106,168,255,.14)); border-color: var(--accent, #6aa8ff); }
 .chip .chip-tip { opacity: .55; font-size: 11.5px; }
+
+/* 立项第二步：先定文风。挑的是一段真文字，不是一个形容词标签——
+   所以候选卡要给足正文预览，作者是靠"读着对不对味"来判断的。 */
+.nb-voice { border: 1px solid var(--border, #333); border-radius: 10px; padding: 10px 12px; margin: 10px 0; }
+.nb-voice-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 2px; }
+.nb-cand { border: 1px solid var(--border, #333); border-radius: 8px; padding: 8px 10px; margin: 8px 0; cursor: pointer; transition: border-color .12s, background .12s; }
+.nb-cand:hover { border-color: var(--accent, #6aa9ff); }
+.nb-cand.on { border-color: var(--accent, #6aa9ff); background: rgba(106, 169, 255, .08); }
+.nb-cand-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.nb-cand-mark { font-size: 12px; opacity: .7; white-space: nowrap; }
+.nb-cand.on .nb-cand-mark { opacity: 1; color: var(--accent, #6aa9ff); }
+.nb-cand-body { white-space: pre-wrap; font-size: 13px; line-height: 1.7; max-height: 190px; overflow: auto; opacity: .92; }
