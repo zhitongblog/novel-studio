@@ -50,16 +50,23 @@ export const MINIMAL_DEFAULT = [
   '· 章末留一个具体的悬念，别停在总结或抒情上。',
 ].join('\n');
 
-const ONE_MAX = 2500;      // 单篇范本上限
-const TOTAL_MAX = 7000;    // 范本总量上限：给足，让模型真能"看见"文风
+// 【实测教训】范本给到 7000 字符时，模型不是"学语感"而是【当模板填空】：
+// 生成结果与范本逐句雷同——"香。/ 很香。/ 哪怕看惯了网络上各种精修美女…"整段照搬，
+// 连"甚至任何滤镜落在她脸上，都是多余"这样的成句都一字不差。
+// 语感靠几百字就能传递，多给的部分只会变成可抄的模板。故砍到 2500。
+const ONE_MAX = 1200;      // 单篇范本上限
+const TOTAL_MAX = 2500;    // 范本总量上限
 
 export function refsDir(book) { return path.join(book.dir, 'style_refs'); }
 
 // 读范本。优先读整篇——截断会把节奏和结构切没，而节奏正是最该学的东西。
-export function readRefs(book, { totalMax = TOTAL_MAX } = {}) {
+// preferLater：优先取靠后的范本。用第一章当范本去写第一章，几乎必然被抄结构；
+// 用中后段当范本写开篇，学到的才是语感而不是骨架。
+export function readRefs(book, { totalMax = TOTAL_MAX, preferLater = true } = {}) {
   const dir = refsDir(book);
   let files = [];
   try { files = fs.readdirSync(dir).filter(f => /\.(txt|md)$/i.test(f)).sort(); } catch { return []; }
+  if (preferLater && files.length > 2) files = files.slice().reverse();
   const out = []; let used = 0;
   for (const f of files) {
     if (used >= totalMax) break;
@@ -122,7 +129,10 @@ export function voicePrint(book) {
     lines.push('【文风范本 —— 这是判断文风的最高依据】');
     lines.push('下面是作者认可的文字。你要写成【这个样子】。');
     lines.push('学的是：叙述者的姿态、句子的呼吸、信息给法、用词口味、情绪的外放程度、一章的起收方式。');
-    lines.push('⚠️ 只学写法，【严禁照抄】范本里的情节、人物、地名、专有名词或成句——内容必须全是本书自己的。');
+    lines.push('⚠️ 【严禁照抄】范本里的情节、人物、地名、专有名词或成句。');
+    lines.push('⚠️ 【也严禁复制范本的句子结构与开场方式】——不要套用它的开头句式、不要沿用它的');
+    lines.push('   段落排布顺序、不要把它的比喻和梗换个词再用一遍。范本是让你感受"这个人怎么说话"，');
+    lines.push('   不是让你填空。写出来的东西如果能和范本逐句对上，就是抄，重写。');
     if (card) lines.push('⚠️ 手法卡与范本冲突时，【以范本为准】——描述总是有损的，原文才是真的。');
     for (const r of refs) {
       lines.push('');
