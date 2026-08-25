@@ -1478,7 +1478,7 @@ let ST_TARGET = 'bible';
 async function openStudio() {
   if (!CUR) return;
   ST_TARGET = 'bible';
-  $('#stAsk').value = ''; $('#stErr').textContent = '';
+  $('#stAsk').value = ''; $('#sdErr').textContent = '';
   $('#stTarget').querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', b.dataset.t === 'bible'));
   $('#stVolWrap').classList.add('hidden');
   $('#studioModal').classList.remove('hidden');
@@ -1531,8 +1531,8 @@ $('#stAiRename') && $('#stAiRename').addEventListener('click', async () => {
 $('#rdNavToggle') && $('#rdNavToggle').addEventListener('click', () => {
   const r = $('#reader'); if (r) r.classList.toggle('nav-collapsed');
 });
-$('#stClose') && $('#stClose').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
-$('#stCancel') && $('#stCancel').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
+$('#sdClose') && $('#sdClose').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
+$('#sdCancel') && $('#sdCancel').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
 $('#stTarget') && $('#stTarget').addEventListener('click', (e) => {
   const b = e.target.closest('.seg-btn'); if (!b) return;
   ST_TARGET = b.dataset.t;
@@ -1542,16 +1542,16 @@ $('#stTarget') && $('#stTarget').addEventListener('click', (e) => {
 $('#stGo') && $('#stGo').addEventListener('click', async () => {
   if (!CUR) return;
   const ask = $('#stAsk').value.trim();
-  if (ask.length < 2) { $('#stErr').textContent = '先用一句话说说你想怎么改'; return; }
+  if (ask.length < 2) { $('#sdErr').textContent = '先用一句话说说你想怎么改'; return; }
   const scope = ST_TARGET === 'outline' ? $('#stVol').value : '';
-  if (ST_TARGET === 'outline' && !scope) { $('#stErr').textContent = '先选要改哪一卷'; return; }
-  $('#stGo').disabled = true; $('#stErr').textContent = 'AI 正在改…（约 1–2 分钟，别关窗）';
+  if (ST_TARGET === 'outline' && !scope) { $('#sdErr').textContent = '先选要改哪一卷'; return; }
+  $('#stGo').disabled = true; $('#sdErr').textContent = 'AI 正在改…（约 1–2 分钟，别关窗）';
   try {
     const r = await api('/api/book/revise-setting', 'POST', { book: CUR.slug, target: ST_TARGET, scope, instruction: ask, model: $('#writeModel').value });
     $('#studioModal').classList.add('hidden');
     if (r.mode === 'opened') { setWriting(true); openStream(CUR.slug); }
     toast(ST_TARGET === 'outline' ? `AI 正在按你的话改【${scope}】大纲（看下方日志/镜像）` : 'AI 正在按你的话改设定/角色（看下方日志/镜像）');
-  } catch (e) { $('#stErr').textContent = '失败：' + e.message; }
+  } catch (e) { $('#sdErr').textContent = '失败：' + e.message; }
   finally { $('#stGo').disabled = false; }
 });
 

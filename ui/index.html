@@ -115,7 +115,6 @@
               <button class="btn" id="btnOutline">📋 大纲审稿</button>
               <button class="btn" id="btnFinale">🏁 完本</button>
               <button class="btn" id="btnVoice" title="本书文风的唯一来源：挂范本、看手法卡">🖋️ 文风范本</button>
-              <button class="btn" id="btnVoice" title="本书文风的唯一来源：挂范本、看手法卡">🖋️ 文风范本</button>
               <button class="btn" id="btnRewrite">♻️ 重写</button>
               <button class="btn" id="btnStyle">🎨 文风</button>
               <button class="btn" id="btnRefStyle" title="对标书风格学习：贴一段对标作品正文，AI 分析出文风指南，保存后写作自动照这个腔写。只学腔、不抄内容。">📚 对标风格</button>
@@ -443,42 +442,6 @@
       <div class="modal-err" id="vcErr"></div>
     </div>
   </div>
-  <div class="modal hidden" id="voiceModal">
-    <div class="modal-card" style="max-width:760px">
-      <button class="modal-close" id="vcClose" title="关闭 (Esc)">✕</button>
-      <h2>🖋️ 文风范本</h2>
-      <p class="modal-hint">
-        本书的文风<b>完全由这里的范本决定</b>——程序不再内置任何"该怎么写"的规则。
-        范本可以是你喜欢的书、你自己写的，或本书里你满意的章节。
-        模型模仿例子的能力远强于遵守描述，所以<b>给它看，比跟它讲管用</b>。
-      </p>
-
-      <div class="field"><span>已挂的范本</span><div id="vcList" class="rd-empty">加载中…</div></div>
-
-      <details class="field" style="border:1px solid var(--border,#333);border-radius:8px;padding:8px 10px">
-        <summary style="cursor:pointer;font-size:13px">➕ 贴一段文字当范本</summary>
-        <label class="field"><span>起个名字</span><input id="vcName" placeholder="例如：某某书第三章"></label>
-        <label class="field"><span>正文（越完整越好，节奏和结构才学得到）</span>
-          <textarea id="vcText" rows="8" placeholder="把你认可的整章正文贴进来…"></textarea></label>
-        <div class="btn-row end"><button class="btn primary" id="vcAdd">挂上去</button></div>
-      </details>
-
-      <details class="field" style="border:1px solid var(--border,#333);border-radius:8px;padding:8px 10px">
-        <summary style="cursor:pointer;font-size:13px">🎲 还没有范本？让 AI 写几个不同调性的开头，你挑一个</summary>
-        <p class="modal-hint" style="margin:6px 0">
-          说不清自己要什么很正常——<b>看到了就知道要不要</b>。挑中的那篇就成为本书的第一份范本。
-        </p>
-        <div class="btn-row" style="margin:0"><button class="btn" id="vcBoot">生成 4 个候选（约 1 分钟）</button></div>
-        <div id="vcCands"></div>
-      </details>
-
-      <div class="field"><span>手法卡（模型读范本后自己总结的，写作时与范本一同注入）</span>
-        <div class="btn-row" style="margin:2px 0 6px"><button class="btn ghost" id="vcCard">从范本重新提炼手法卡</button></div>
-        <pre id="vcCardText" class="rd-empty" style="white-space:pre-wrap;max-height:240px;overflow:auto"></pre>
-      </div>
-      <div class="modal-err" id="vcErr"></div>
-    </div>
-  </div>
   <div class="modal hidden" id="chRewriteModal">
     <div class="modal-card">
       <button class="modal-close" id="crClose" title="关闭 (Esc)">✕</button>
@@ -749,7 +712,7 @@
   <!-- 创作台：大白话改设定/大纲 -->
   <div class="modal hidden" id="studioModal">
     <div class="modal-card" style="width: 600px;">
-      <button class="modal-close" id="stClose" title="关闭 (Esc)">✕</button>
+      <button class="modal-close" id="sdClose" title="关闭 (Esc)">✕</button>
       <h2>✍️ 改设定 / 大纲</h2>
       <div class="st-rename">
         <div class="st-rename-h">🔤 改名字？<b>人名用「AI 智能改名」</b>——它先通读全书认清 TA 的全名/小名/别人各种称呼(陈老师/老陈…)再一致改，<b>不误伤</b>同姓的人、地名、系统名；<b>地名/生僻整词</b>可用「直接替换」。两者都会 git 存档、连已写章节一起改。</div>
@@ -774,10 +737,10 @@
         <textarea id="stAsk" class="ai-prompt" rows="4" placeholder="例如：把主角改得更腹黑、别老被动挨打；　或：卷2加一个暗中较劲的对手——七十多岁的老木匠柳先生；　或：卷3的卷末改成主角当众打脸顾家"></textarea>
       </label>
       <div class="btn-row end">
-        <button class="btn ghost" id="stCancel">取消</button>
+        <button class="btn ghost" id="sdCancel">取消</button>
         <button class="btn primary" id="stGo">✍️ 让 AI 改</button>
       </div>
-      <div class="modal-err" id="stErr"></div>
+      <div class="modal-err" id="sdErr"></div>
     </div>
   </div>
 
