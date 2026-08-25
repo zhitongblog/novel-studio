@@ -200,3 +200,97 @@ curl -X POST .../api/v1/lease/request -d '{"capability":"DesktopObserve","holder
 配套加了 `test/unzoo-mcp.test.mjs`：静态扫描 51 个源文件禁止兼容层端点回流，四种响应形状解包，租约自动续租与蛇形转换，以及在本地 `file://` 测试页上实测 `isTrusted`。
 
 **关于 #5**：坐标点击与可信输入这两条在**本地测试页上已复验通过**（isTrusted=true、落点准确）。番茄 Arco 按钮那批「点了没反应」的结论仍未在真实页面复验——那需要登录态和真实书目。
+
+---
+
+# 处理状态（2026-08-25 回填）
+
+已在 v2.5.28 源码 + 运行态逐条核实，**全部条目有去向，无遗漏**。
+
+| # | 核实结论 | 去向 |
+|---|---|---|
+| 1 | ✅ 属实，**范围比我们发现的更大** | [#151](https://github.com/unzooai/unzoo/issues/151) |
+| 1b | ✅ 属实，根因已定位到一行 | [#155](https://github.com/unzooai/unzoo/issues/155) |
+| 1c | ✅ 属实，**比我们说的更严重** | [#156](https://github.com/unzooai/unzoo/issues/156) |
+| 2 | ✅ 属实 | 并入 [#151](https://github.com/unzooai/unzoo/issues/151) 评论 |
+| 3 | ⚠️ **一处需自我更正**，核心诉求属实 | [#154](https://github.com/unzooai/unzoo/issues/154) |
+| 4 | 🔴 **远比我们以为的严重** | [#153](https://github.com/unzooai/unzoo/issues/153) |
+| 5 | ⏸ 维持原判，需真实页面复验 | 暂不提 |
+| 6 | ✅ 已答复 | 见下文 |
+| 新 | 前台/后台执行边界未文档化 | [#152](https://github.com/unzooai/unzoo/issues/152) |
+
+## #1 我们的机制推测不对
+
+我们猜「旧路由命令表覆盖不全，唯独这两个上传工具没注册」。真实根因是两条：
+
+1. #110 加的兜底只在 `is_local_tool()==true` 时触发，而该函数的前缀白名单**不含 `browser_`**；
+2. 「工具名 → 专用 REST 端点」的映射表 `v1816_rest_endpoint()` **只在 MCP 路径被查**。
+
+掉队的不是个别工具，是**整个 `browser_` 便利工具族**。我们请求的「自查全表」对方已完成——**我们只发现了 4 个硬失败里的 2 个**，漏掉的两个正是等待类：
+
+- 硬失败：`browser_set_input_files`、`browser_upload_trusted`、**`browser_wait_for`**、**`browser_network_wait_for`**
+- 静默语义分叉（200 + 错数据）：`tab_get_info`（返回整个列表而非单个）、`browser_delay`
+- 参数契约分叉：`profile_get_fingerprint`（`profile_id` vs `profile_path`）
+
+## #3 需自我更正：OpenAPI 覆盖是完整的
+
+我们写的「255 条 path、完整」**是对的**。对方一度统计为「只有 178 条、83 条未文档化」并已在 #151 发更正——实测 router 261 vs openapi 255，差的 6 条全是 HTML 页面（`/docs/`、`/settings/*`、`/tools`），**API 端点一条不缺**。
+
+我们的核心诉求（**没有任何入口指向它**）完全成立。核实到比我们说的更糟：
+
+- 数字不是三个是**四个**：CLI 模块注释与 `--help` 写 `290+`、`unzoo tools` footer 写 `194+`、`tools/list` 返回 `96`、manifest `313`
+- `unzoo tools` **从不调用 `tools/list`**，只 ping `/api/v1/status` 探活后打印硬编码表；它列出的 `navigate_back`/`navigate_forward`/`reload` 在 CLI 的 44 个命令里根本不存在
+- `tools/list` 的 96 是 tool profile 过滤视图、manifest 313 才是全集，**这点没有任何文档说明**——这正是我们「找不到 `browser_wait_for_function`」的真正原因
+
+## #4 这条是我们那次线上事故的直接成因
+
+`browser_wait_for_function` 不是「缺文档」，**它是空壳**。而且不止它一个：
+
+| 工具 | 传 `timeout_ms:4000` 实际耗时 | 返回 |
+|---|---|---|
+| `browser_wait_for_selector` | **95 ms** | `{}` 假成功 |
+| `browser_wait_for_network_idle` | **109 ms** | `{}` 假成功 |
+| `browser_wait_for_function` | **132 ms** | `{}` 假成功 |
+| `browser_wait_for` ✅ | 4132 ms | `{"elapsed_ms":4017,"matched":false}` |
+| `browser_delay` ✅ | 4112 ms | `{"delayed_ms":4000}` |
+
+两层根因：① `browser_wait_for_function` 的 schema 声明 `expression`/`timeout_ms`，实现却读 `function`/`timeout`，读不到就兜底成字面量 `true` → `if(true) return true` 恒真立即返回；② transform 生成的是 `(async function(){…})()` 即 Promise，而 `eval_js` **不 await**，直接拿 `{}` 返回。
+
+**对我们的行动含义**：
+
+1. 那次「把还没渲染完误判成没有该章」的事故，成因在这里——无论选哪个 wait 工具，拿到的都是假就绪信号
+2. **我们自己写的轮询是唯一正确解，#153 修复前不要删**
+3. 轮询继续用**同步表达式**：`browser_evaluate` 不 await Promise（实测 `(async()=>{await sleep(2000);return 42})()` → 128ms 返回 `{}`；同步 `42` → 正确返回 42）
+4. **现在就能改的一处**：就绪判定从 `browser_wait_for_selector` 换成 `browser_wait_for`，它是真的等，且如实返回 `matched`
+
+## #1c 比我们说的更严重
+
+不只是「扁平端点绕过」。`enforcement::enforce()` **全仓只有一个调用点**（`mcp_server.rs:633`，硬编码 `Channel::Mcp`），而 `Channel` 枚举定义了 6 条通道：
+
+```rust
+pub enum Channel { Rest, Mcp, Workflow, Brain, Cdp, Provider }
+//                  ↑只有 Mcp 被接入，其余 5 条声明了却从不校验
+```
+
+实际暴露面：扁平端点、`/api/v1/tools/call`、CLI `unzoo call`、CDP shim **全部绕过**。
+
+更麻烦的是 `/api/v1/tools/call`：`is_local_tool()==true` 的工具会经兜底回到 MCP 分发器从而受管控，`browser_` 族则不会——**同一个端点里一部分工具受管控、一部分不受**，比整体不管控更难推理。
+
+另外我们观察到的「request→grant 无需人工批准」与代码注释直接矛盾：`Capability::requires_explicit_grant()` 把 `DesktopObserve` 等标为「需用户显式授权，不自动批准」，实际可程序化自助获取。这条已一并写进 #156。
+
+## #5 复验了一半，维持原判
+
+在 `about:blank` 的原生 `<button>` 上实测：标签页 `visibilityState=hidden` 且 `document.hasFocus()=false` 时，`browser_click` **能正常触发**（计数器 0→1）。
+
+但这**否证不了**我们记录的 Arco 组件问题——SPA 的 portal / 遮罩层 / 事件委托是完全不同的场景。**结论不变：真实番茄后台页面复验后再提，指针序列补丁暂时保留。**
+
+顺带修正我们清单里的一句话：「部分按钮要求标签页处于前台才触发」——这条在原生元素上不成立。对方新出的《后台执行指南》（#152）结论是绝大部分能力不需要前台，例外只有三个：合成 Ctrl+V（被浏览器安全策略拦截，须改用 `/api/v1/clipboard/*`）、视口截图（会抢活动标签，加 `full_page:true` 规避）、`tab_activate`（会把整个浏览器窗口提到 OS 前台，后台流程不应调用）。
+
+## #6 CDP shim：已答复，不必提
+
+- **未废弃**，代码在 `cdp_shim.rs`，9222 仍是默认端口
+- 被 `managed_mode` 门控（#98 安全考虑：9222 无认证，可绕过 auth/lease/审计）
+- ⚠️ **我们代码里的报错提示「请在 Unzoo 设置里开启 CDP」是错的**——`/api/v1/settings/service` 返回的键里根本没有 `managed_mode`，UI 也没这个开关。唯一手段是环境变量 `UNZOO_MANAGED_MODE=0`。**这条文案要改掉，否则以后还会误导我们自己。**
+- 本机当前 `managed=false` 且 9222 无监听、端口也没被占用，说明 shim 启动失败了
+
+**我们原计划（把 `cdpClick` 迁到官方 MCP 工具、不依赖 shim）继续执行**——理由更充分了：它默认关闭且没有正规开关。注意 #156 提到 `Channel::Cdp` 从不校验租约，如果对方按方案 A 收紧，CDP 路径可能进一步受限。
