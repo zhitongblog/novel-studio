@@ -297,7 +297,18 @@ export async function republishRange(book, { from, to, limit = 0, onLog = () => 
   if (limit > 0) chs = chs.slice(0, limit);
   if (!chs.length) { onLog({ level: 'info', msg: `第 ${from}-${to} 章本地为空，无可重发` }); return { ok: true, edited: 0 }; }
   onLog({ level: 'act', msg: `编辑替换番茄第 ${chs[0].num}–${chs[chs.length - 1].num} 章（共 ${chs.length} 章，用清洗后正文）…` });
-  const config = { editMode: true, bookId: pc.bookId, intervalSeconds: pc.intervalSeconds || 3 };
+  // 番茄章节管理页一次只显示一个卷。不带卷信息就只会在第1卷里找，多卷书第2卷起的章永远找不到
+  // → 连续3次 notFound → 编辑模式直接停。故这里先读番茄卷列表并给每章标好所属卷名。
+  let fanqieVolumes = [];
+  try {
+    const vm = await buildVolumeMap(book, loadPublishChapters(book), pc, onLog);
+    if (vm.ok && !vm.single && Array.isArray(vm.fanqieVolumes) && vm.fanqieVolumes.length > 1) {
+      fanqieVolumes = vm.fanqieVolumes;
+      for (const c of chs) c.volumeText = vm.map[c.vol] || '';
+      onLog({ level: 'info', msg: `番茄共 ${fanqieVolumes.length} 卷，编辑时按章所属卷自动切卷` });
+    }
+  } catch (e) { onLog({ level: 'warn', msg: '读番茄卷列表失败（编辑将只在当前卷查找）：' + (e.message || e) }); }
+  const config = { editMode: true, bookId: pc.bookId, intervalSeconds: pc.intervalSeconds || 3, fanqieVolumes };
   const r = await publishBook({ profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title, chapters: chs, config, onLog });
   // 手工重发过的章要刷新指纹基线，否则下一次自动同步会把它们当成"又被重写"再覆盖一遍。
   if (r.ok) {
@@ -349,6 +360,9 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
   }
   if (limit > 0) { newCh = newCh.slice(0, limit); editCh = []; }   // 试发只走新章
   if (!newCh.length && !editCh.length) { onLog({ level: 'info', msg: '番茄已是最新，无新章/无重写章可发' }); return { ok: true, published: 0, fanqieMax }; }
+  // 番茄卷列表（按番茄展示顺序）——编辑模式靠它把「章所属卷名」换算成卷页序号去切卷。
+  // 空数组=按单卷处理。matchVolumes 开时由 buildVolumeMap 顺带带回，不额外多跑一次页面。
+  let fanqieVolumes = [];
   // 多卷映射(matchVolumes 开)：把每章按其图书卷映射到番茄对应卷名；番茄缺卷则【自动新建】(只建恰好缺的、绝不多建)
   if (pc.matchVolumes) {
     onLog({ level: 'act', msg: '读取番茄卷列表并按卷映射…' });
@@ -412,18 +426,26 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
         return { ok: false, blocked: true, reason: deferReason || '番茄缺卷', published: 0 };
       }
       for (const c of [...editCh, ...newCh]) c.volumeText = vm.map[c.vol] || '';
+      fanqieVolumes = Array.isArray(vm.fanqieVolumes) ? vm.fanqieVolumes : [];
       onLog({ level: 'info', msg: '卷映射：' + [...new Set([...editCh, ...newCh].map(c => c.vol))].map(v => `${v}→${vm.map[v]}`).join('，') });
     }
   }
-  // 先同步重写章(edit)，再追加新章(new)——顺序固定，避免错位
-  const chapters = [...editCh, ...newCh];
-  if (editCh.length) onLog({ level: 'act', msg: `同步 ${editCh.length} 个重写章(edit)：第 ${editCh.map(c => c.num).join('、')} 章` });
-  if (newCh.length) onLog({ level: 'act', msg: `追加第 ${newCh[0].num}–${newCh[newCh.length - 1].num} 章新章（共 ${newCh.length} 章）…` });
+  // matchVolumes 关、但要 edit 已发布旧章时：仍需知道番茄有几卷，否则编辑模式只会在第1卷找章，
+  // 多卷书里第2卷及以后的章永远找不到。只读一次卷列表，读失败不阻断（退化成单卷行为）。
+  if (!fanqieVolumes.length && editCh.length) {
+    try {
+      const fv = await getFanqieVolumes({ profilePath: pc.profilePath, bookId: pc.bookId, onLog });
+      if (fv.ok && fv.volumes.length > 1) {
+        fanqieVolumes = fv.volumes;
+        onLog({ level: 'info', msg: `番茄共 ${fv.volumes.length} 卷，编辑重写章时会自动跨卷查找` });
+      }
+    } catch (e) { onLog({ level: 'warn', msg: '读番茄卷列表失败（编辑将只在当前卷查找）：' + (e.message || e) }); }
+  }
   // 排期起始日：自动接续番茄已排期（晚于今天→用它；否则→今天；手动更晚者优先）
   const sched = resolveSchedule(pc, fm.latestDate);
   if (sched.scheduled) onLog({ level: 'info', msg: `📅 排期起始日：${sched.start}（${sched.reason}）` });
   else onLog({ level: 'info', msg: '📅 立即发布（番茄无未来排期、未设每日限量）' });
-  const config = {
+  const baseConfig = {
     chaptersPerDay: pc.chaptersPerDay || 'max',
     scheduledStartDate: sched.start,
     scheduledTime: pc.scheduledTime || '',
@@ -431,15 +453,48 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
     matchVolumes: !!pc.matchVolumes,
     useAI: !!pc.useAI,
     bookId: pc.bookId,
+    fanqieVolumes,
   };
-  const r = await publishBook({ profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title, chapters, config, onLog });
-  // 发布成功后记账：记录本次发布时间(用于下次识别重写章)与已发到的章号
-  if (r.ok) {
+
+  // ⚠️ publishBook 一次只能跑一种模式（内部按 mode 选 editLoop / publishLoop），【绝不能混批】。
+  // 混批时新章会被拿去 editLoop 里"找番茄上已存在的章"，而新章在番茄根本不存在 →
+  // 连续 notFound → 整批卡死、新章一章没发。故拆成两次调用：先 edit 再 new。
+  const runs = [];
+  let editRes = null, newRes = null;
+
+  if (editCh.length) {
+    onLog({ level: 'act', msg: `同步 ${editCh.length} 个重写章(edit)：第 ${editCh.map(c => c.num).join('、')} 章` });
+    editRes = await publishBook({
+      profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title,
+      chapters: editCh, config: { ...baseConfig, editMode: true }, onLog,
+    });
+    runs.push(editRes);
+    if (!editRes.ok) {
+      onLog({ level: 'warn', msg: `⚠️ 重写章只同步了 ${editRes.published || 0}/${editCh.length} 章（${editRes.error || editRes.status}）——新章照常继续发` });
+    }
+  }
+
+  if (newCh.length) {
+    onLog({ level: 'act', msg: `追加第 ${newCh[0].num}–${newCh[newCh.length - 1].num} 章新章（共 ${newCh.length} 章）…` });
+    newRes = await publishBook({
+      profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title,
+      chapters: newCh, config: baseConfig, onLog,
+    });
+    runs.push(newRes);
+  }
+
+  // 只把【真的发上去的那些章】计入记账/指纹（publishBook 的 published 是成功计数）
+  const editedOk = editRes?.published || 0;
+  const publishedOk = newRes?.published || 0;
+  const doneChapters = [...editCh.slice(0, editedOk), ...newCh.slice(0, publishedOk)];
+  const ok = runs.length > 0 && runs.every(x => !!x.ok);
+
+  if (doneChapters.length) {
     try {
       // 单调不回退 + 防脏值：所有候选强制转数字、剔除 NaN/非有限值，取最大。
       // 血泪教训——曾有一路读到的 maxChapter 是字符串 "NaN"，"NaN"||0 仍是真值，
       // Math.max 出 NaN，JSON.stringify(NaN)=null → publishedMax 被写成 null，floor 保护失效、起始章号又选低。
-      const cands = [fanqieMax, pc.publishedMax, r.lastChapter, ...newCh.map(c => c.num)]
+      const cands = [fanqieMax, pc.publishedMax, newRes?.lastChapter?.num, ...newCh.slice(0, publishedOk).map(c => c.num)]
         .map(Number).filter(Number.isFinite);
       const newMax = cands.length ? Math.max(...cands) : 0;
       const patch = { lastPublishAt: Date.now() };
@@ -448,9 +503,18 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
       // 指纹基线：把这次真正发上去的章记下来，作为下次"有没有被重写"的比对基准。
       // 只记发成功的那些，没发的不动——否则会把没发的章误标成"线上已是这版"。
       const hs = loadPublishedHashes(book);
-      for (const c of chapters) if (c && c.num && c.hash) hs[String(c.num)] = c.hash;
+      for (const c of doneChapters) if (c && c.num && c.hash) hs[String(c.num)] = c.hash;
       savePublishedHashes(book, hs);
     } catch {}
   }
-  return { ok: !!r.ok, fanqieMax, attempted: chapters.length, edited: editCh.length, ...r };
+
+  return {
+    ok, fanqieMax,
+    attempted: editCh.length + newCh.length,
+    edited: editedOk, published: publishedOk,
+    lastChapter: newRes?.lastChapter || editRes?.lastChapter || null,
+    status: newRes?.status || editRes?.status || 'completed',
+    stopped: !!(newRes?.stopped || editRes?.stopped),
+    error: newRes?.error || editRes?.error || null,
+  };
 }

@@ -678,136 +678,165 @@ class FanqiePublisher {
   }
 
   // ===== 编辑替换模式 =====
+  // 切卷不再点下拉框，改为直接导航到 chapter-manage/<bookId>&<卷序号>（见 gotoVolumePage）——
+  // 番茄章节管理页的卷下拉选择器几经改版且要等 Arco Portal 挂载，导航稳得多。
 
-  // 选择卷
-  async selectVolume(volumeIndex) {
-    // 坐标真实点击展开卷下拉（trusted）
-    const opened = await this.client.clickByLocator(`
-      const triggers = document.querySelectorAll('.byte-select, .arco-select, .serial-select, [class*="volume-select"], [class*="select-trigger"]');
-      for (const tr of triggers) {
-        const text = tr.textContent || '';
-        if (text.includes('卷') || text.includes('第') || tr.closest('[class*="volume"]')) return tr;
+  // 等章节表【真正渲染出数据行】再读——番茄后台是 SPA，异步渲染。
+  // 原来靠固定 sleep(1500)，表格没渲染完就 evaluate → 读成"没有这一章"(假 notFound) → 连续3次就停。
+  // 与 getFanqieMaxChapter 的读取路径同一套硬化：轮询到【确定结果】(有真数据行 / 明确空态 / 硬失败)才停。
+  // prevPage 非空时还要求页码已经翻过去，避免读到上一页的残留行。
+  async waitChapterRows({ prevPage = null, maxMs = 15000 } = {}) {
+    const probe = `
+      (function(){
+        var text = document.body ? document.body.innerText : '';
+        var hasRows = /第\\s*\\d+\\s*章/.test(text);
+        var hasArco = !!document.querySelector('[class*="arco-"]');
+        var empty = hasArco && (text.indexOf('暂无') >= 0 || text.indexOf('还没有') >= 0 || text.indexOf('快去创作') >= 0);
+        var active = document.querySelector('.arco-pagination-item-active');
+        var currentPage = active ? (parseInt(active.textContent) || 1) : 1;
+        var login = /\\/login|passport/.test(location.href) || text.indexOf('扫码登录') >= 0;
+        var err = ['ERR_', 'net::', '未连接到互联网', '代理服务器', '无法访问此网站'].some(function(s){ return text.indexOf(s) >= 0; });
+        return { hasRows: hasRows, empty: empty, currentPage: currentPage, login: login, err: err };
+      })()
+    `;
+    const deadline = Date.now() + maxMs;
+    let last = null;
+    while (Date.now() < deadline) {
+      last = await this.client.evaluate(probe);
+      if (last) {
+        if (last.login || last.err) return { ...last, ready: false, fatal: true };
+        const paged = prevPage == null || last.currentPage !== prevPage;
+        if (paged && (last.hasRows || last.empty)) return { ...last, ready: true };
       }
-      const dds = document.querySelectorAll('.byte-select-view, .arco-select-view, [class*="select-view"]');
-      if (dds.length) return dds[0];
-      return null;
-    `);
-    this.log(`打开卷下拉框: ${opened}`);
-    await this.client.sleep(600); // 等 Arco 弹层挂载（Portal + transition）
-
-    // 坐标真实点击目标卷选项（弹层渲染在 body 末尾，document 层级定位）
-    const selected = await this.client.clickByLocator(`
-      const targetIndex = ${volumeIndex - 1};
-      const volumeNum = ${volumeIndex};
-      const options = document.querySelectorAll('.byte-select-option, .byte-select-dropdown-option, .arco-select-option, [class*="select-option"], [class*="dropdown-option"]');
-      if (options.length > targetIndex) return options[targetIndex];
-      for (const opt of options) {
-        const text = opt.textContent || '';
-        if (text.includes('第' + volumeNum + '卷') || text.includes('卷' + volumeNum)) return opt;
-      }
-      return null;
-    `);
-    this.log(`选择卷: ${selected}`);
-    await this.client.sleep(1000);
-    return selected;
+      await this.client.sleep(400);
+    }
+    return { ...(last || {}), ready: false };
   }
 
-  // 查找章节 - 逐页遍历（因为章节列表不是严格按章节号排序的）
-  async searchForChapter(targetChapterNum) {
-    const targetPattern = `第${targetChapterNum}章`;
-    this.log(`查找 ${targetPattern}，逐页遍历...`);
+  // 章节管理页：切到第 volIndex 卷的章节列表（番茄一次只显示一个卷）。返回 true=已渲染出内容。
+  async gotoVolumePage(volIndex) {
+    const bookId = this.config?.bookId;
+    if (!bookId || !volIndex) return false;
+    await this.client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}&${volIndex}`);
+    const st = await this.waitChapterRows({ maxMs: 15000 });
+    this.currentVolPage = volIndex;
+    return !!st.ready;
+  }
 
-    // 检查当前页是否有目标章节（使用精确匹配）
+  // 在【当前卷】的章节列表里逐页找目标章。
+  // 翻页判据改用"下一页按钮是否可用"，不再靠 totalPages —— arco 分页出省略号(1 2 3 … 20)时
+  // 从可见页码取 max 会把总页数算漏，导致"遍历N页后未找到"。
+  async searchChapterInCurrentVolume(targetChapterNum) {
+    const targetPattern = `第${targetChapterNum}章`;
     const checkPage = `
       (function() {
-        const targetNum = ${targetChapterNum};
+        var targetNum = ${targetChapterNum};
         // 精确匹配：第X章 后面不能跟数字，避免 "第40章" 匹配到 "第402章"
-        const exactPattern = new RegExp('第' + targetNum + '章(?![0-9])');
-        const links = document.querySelectorAll('a');
-        for (const link of links) {
-          if (link.textContent && exactPattern.test(link.textContent)) {
-            return { found: true };
-          }
+        var exactPattern = new RegExp('第' + targetNum + '章(?![0-9])');
+        var links = document.querySelectorAll('a');
+        for (var i = 0; i < links.length; i++) {
+          if (links[i].textContent && exactPattern.test(links[i].textContent)) return { found: true };
         }
-
-        // 获取分页信息
-        const activeItem = document.querySelector('.arco-pagination-item-active');
-        const currentPage = activeItem ? parseInt(activeItem.textContent) || 1 : 1;
-
-        const pageItems = document.querySelectorAll('.arco-pagination-item:not(.arco-pagination-item-prev):not(.arco-pagination-item-next)');
-        let totalPages = 1;
-        for (const item of pageItems) {
-          const num = parseInt(item.textContent);
-          if (!isNaN(num) && num > totalPages) totalPages = num;
-        }
-
-        return { found: false, currentPage, totalPages };
+        var active = document.querySelector('.arco-pagination-item-active');
+        var currentPage = active ? (parseInt(active.textContent) || 1) : 1;
+        var next = document.querySelector('.arco-pagination-item-next');
+        var cls = next ? (next.className || '') : '';
+        var hasNext = !!next && cls.indexOf('disabled') < 0 && next.getAttribute('aria-disabled') !== 'true';
+        return { found: false, currentPage: currentPage, hasNext: hasNext };
       })()
     `;
 
-    // 先检查当前页
-    let result = await this.client.evaluate(checkPage);
-    if (result?.found) {
-      this.log(`✅ ${targetPattern} 在当前页面`);
-      return { success: true };
+    // 先等表格渲染完再判断（否则把"还没渲染"当成"没有这一章"）
+    const st0 = await this.waitChapterRows({ maxMs: 15000 });
+    if (st0.fatal) {
+      return { success: false, fatal: true, message: st0.login ? '番茄需要登录' : '番茄页面加载失败(网络/代理错误页)' };
     }
 
-    this.log(`当前第 ${result?.currentPage} 页，共 ${result?.totalPages} 页`);
+    let r = await this.client.evaluate(checkPage);
+    if (r?.found) { this.log(`✅ ${targetPattern} 在当前页`); return { success: true }; }
 
-    // 先回到第1页（坐标真实点击）
-    if (result?.currentPage !== 1) {
+    // 回到第 1 页再逐页找
+    if ((r?.currentPage || 1) !== 1) {
+      const prev = r.currentPage;
       this.log('先回到第1页...');
-      await this.client.clickByLocator(`
+      const jumped = await this.client.clickByLocator(`
         const items = document.querySelectorAll('.arco-pagination-item');
         for (const item of items) { if ((item.textContent || '').trim() === '1') return item; }
         return null;
       `);
-      await this.client.sleep(1500);
+      if (jumped) await this.waitChapterRows({ prevPage: prev, maxMs: 12000 });
     }
 
-    // 从第1页开始逐页查找
-    const totalPages = result?.totalPages || 10;
-    for (let page = 1; page <= totalPages; page++) {
-      result = await this.client.evaluate(checkPage);
+    const HARD_MAX_PAGES = 300;   // 防御性上限，正常靠"下一页不可用"退出
+    for (let page = 1; page <= HARD_MAX_PAGES; page++) {
+      r = await this.client.evaluate(checkPage);
+      if (r?.found) { this.log(`✅ 在第 ${r.currentPage || page} 页找到 ${targetPattern}`); return { success: true }; }
+      if (!r?.hasNext) { this.log(`本卷共 ${r?.currentPage || page} 页，没有 ${targetPattern}`); break; }
 
-      if (result?.found) {
-        this.log(`✅ 在第 ${page} 页找到 ${targetPattern}`);
-        return { success: true };
-      }
+      const prev = r.currentPage;
+      const navClicked = await this.client.clickByLocator(`
+        const next = document.querySelector('.arco-pagination-item-next');
+        if (!next) return null;
+        const cls = next.className || '';
+        if (cls.indexOf('disabled') >= 0 || next.getAttribute('aria-disabled') === 'true') return null;
+        return next;
+      `);
+      if (!navClicked) { this.log('⚠️ 无法翻到下一页'); break; }
 
-      this.log(`第 ${page} 页没有找到，继续...`);
-
-      // 翻到下一页（坐标真实点击）
-      if (page < totalPages) {
-        const navClicked = await this.client.clickByLocator(`
-          const nextPage = ${page + 1};
-          const items = document.querySelectorAll('.arco-pagination-item');
-          for (const item of items) { if (parseInt(item.textContent) === nextPage) return item; }
-          const nextBtn = document.querySelector('.arco-pagination-item-next:not(.arco-pagination-item-disabled)');
-          if (nextBtn) return nextBtn;
-          return null;
-        `);
-        if (!navClicked) {
-          this.log('⚠️ 无法翻到下一页');
-          break;
-        }
-        await this.client.sleep(1500);
-      }
+      const after = await this.waitChapterRows({ prevPage: prev, maxMs: 12000 });
+      if (after.fatal) return { success: false, fatal: true, message: after.login ? '番茄需要登录' : '番茄页面加载失败' };
+      if (!after.ready) { this.log('⚠️ 翻页后列表未渲染完，停止本卷查找'); break; }
     }
 
-    return { success: false, message: `遍历 ${totalPages} 页后未找到 ${targetPattern}` };
+    return { success: false };
+  }
+
+  // 查找章节：先切到该章所属卷再找；找不到再扫其它卷。
+  // ⚠️多卷书必需——番茄章节管理页一次只显示一个卷，原来永远只在第1卷找，
+  // 第2卷及以后的章"永远找不到"→连续3次notFound→编辑模式直接停。
+  async searchForChapter(targetChapterNum, volumeText = '') {
+    const vols = Array.isArray(this.config?.fanqieVolumes) ? this.config.fanqieVolumes : [];
+
+    // 目标卷序号 = 卷名在番茄卷列表里的位置（1 基）；取不到就用当前页
+    let wantIdx = 0;
+    if (volumeText && vols.length) {
+      const i = vols.indexOf(volumeText);
+      if (i >= 0) wantIdx = i + 1;
+      else this.log(`⚠️ 番茄卷列表里没有「${volumeText}」，改为全卷扫描`);
+    }
+    if (wantIdx && this.currentVolPage !== wantIdx) {
+      this.log(`切到第 ${wantIdx} 卷「${volumeText}」的章节列表…`);
+      await this.gotoVolumePage(wantIdx);
+    }
+
+    this.log(`查找 第${targetChapterNum}章，逐页遍历...`);
+    let r = await this.searchChapterInCurrentVolume(targetChapterNum);
+    if (r.success || r.fatal) return r;
+
+    // 兜底：目标卷没有 → 扫其它卷（单卷书 / 卷列表未知则直接放弃）
+    if (vols.length <= 1) return { success: false, message: `未找到第 ${targetChapterNum} 章` };
+    const searched = wantIdx || this.currentVolPage || 1;
+    this.log(`目标卷没有第 ${targetChapterNum} 章 → 扫描全部 ${vols.length} 卷…`);
+    for (let idx = 1; idx <= vols.length; idx++) {
+      if (idx === searched) continue;
+      if (this.shouldStop) break;
+      this.log(`  查第 ${idx} 卷「${vols[idx - 1]}」…`);
+      if (!(await this.gotoVolumePage(idx))) continue;
+      r = await this.searchChapterInCurrentVolume(targetChapterNum);
+      if (r.success || r.fatal) return r;
+    }
+    return { success: false, message: `全部 ${vols.length} 卷都没有第 ${targetChapterNum} 章` };
   }
 
   async editLoop() {
     let consecutiveFailures = 0;
     const maxConsecutiveFailures = 3;
 
-    // 首先确保选择了正确的卷
-    if (this.config?.volumeIndex) {
-      this.log(`确保选择卷 ${this.config.volumeIndex}...`);
-      await this.selectVolume(this.config.volumeIndex);
-      await this.client.sleep(1500);
-    }
+    // publishBook 已把页面导到 chapter-manage/<bookId>&<volumeIndex>，记下当前所在卷页。
+    // 之后每章由 searchForChapter 按 chapter.volumeText 自行切卷（多卷书必需）。
+    this.currentVolPage = this.config?.volumeIndex || 1;
+    const volList = Array.isArray(this.config?.fanqieVolumes) ? this.config.fanqieVolumes : [];
+    if (volList.length > 1) this.log(`番茄共 ${volList.length} 卷，编辑时按章所属卷自动切卷`);
 
     while (this.currentIndex < this.chapters.length && !this.shouldStop) {
       const chapter = this.chapters[this.currentIndex];
@@ -876,10 +905,14 @@ class FanqiePublisher {
       return { success: false, message: '请先进入章节管理页面' };
     }
 
-    // Step 2: 使用搜索功能查找章节
+    // Step 2: 使用搜索功能查找章节（按该章所属卷切卷后再找）
     this.log(`查找第 ${websiteChapterNum} 章...`);
-    const navigateToChapter = await this.searchForChapter(websiteChapterNum);
+    const navigateToChapter = await this.searchForChapter(websiteChapterNum, chapter.volumeText || '');
     if (!navigateToChapter.success) {
+      // 登录失效/网络错误页是硬失败——不要当成"这章不存在"去重试刷新，直接要人介入
+      if (navigateToChapter.fatal) {
+        return { success: false, needsIntervention: true, reason: 'page_invalid', message: navigateToChapter.message };
+      }
       return { success: false, notFound: true, message: navigateToChapter.message };
     }
 
@@ -1079,11 +1112,11 @@ class FanqiePublisher {
 
     if (!returnedToList) {
       this.log('⚠️ 无法确认是否返回章节列表，直接导航...');
-      // 直接导航到章节管理页面
+      // 直接导航回【刚才所在的那一卷】的章节管理页（不是写死第1卷，否则下一章又要重新切卷）
       if (this.config?.bookId) {
-        const volumeIdx = this.config.volumeIndex || 1;
+        const volumeIdx = this.currentVolPage || this.config.volumeIndex || 1;
         await this.client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${this.config.bookId}&${volumeIdx}`);
-        await this.client.sleep(3000);
+        await this.waitChapterRows({ maxMs: 15000 });
       }
     }
 
@@ -2088,9 +2121,17 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
     return { ok: false, published: 0, lastChapter: null, status: 'error', error: '没有可发布的章节' };
   }
 
-  // mode 判定：以传入章节的 mode 为准（调用方已标好）。同一批应当同模式；混杂时以第一个为准并告警。
+  // mode 判定：以传入章节的 mode 为准（调用方已标好）。
+  // ⚠️ 一次调用只能跑一条路径（editLoop 或 publishLoop），【绝不允许混批】——
+  // 原来混批时"以第一个章节的 mode 为准"，于是 edit 打头的批会把后面的新章也拿去 editLoop
+  // 里"找番茄上已存在的章"，而新章在番茄根本不存在 → 连续 notFound → 整批卡死、新章一章没发。
+  // 调用方必须拆成两次调用（先 edit 再 new），见 publish.mjs。
   const modes = new Set(chapters.map(c => c.mode || 'new'));
-  if (modes.size > 1) log('⚠️ 章节 mode 不一致，将以第一个章节的 mode 决定发布路径', 'error');
+  if (modes.size > 1) {
+    const msg = '同一批里混了 edit 与 new 两种模式——请拆成两次 publishBook 调用（先同步重写章，再追加新章）';
+    log('⛔ ' + msg, 'error');
+    return { ok: false, published: 0, lastChapter: null, status: 'error', error: msg };
+  }
   const isEditMode = (chapters[0].mode || 'new') === 'edit';
 
   // 映射到 FanqiePublisher 期望的章节结构（保留原字段语义：chapterNumber/title/content）
@@ -2120,15 +2161,25 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
     volumeIndex: config.volumeIndex,
     volumeText: config.volumeText || '',
     matchVolumes: !!config.matchVolumes,
+    // 番茄卷列表（按番茄展示顺序）。编辑模式靠它把「章所属卷名」换算成卷页序号去切卷；
+    // 空数组=当单卷处理（维持旧行为）。由 publish.mjs 从 buildVolumeMap/getFanqieVolumes 传入。
+    fanqieVolumes: Array.isArray(config.fanqieVolumes) ? config.fanqieVolumes : [],
   };
 
   log(`📚 ${innerConfig.editMode ? '编辑替换' : '新建发布'}《${bookName || bookId}》，共 ${mapped.length} 章`, 'info');
 
   try {
     if (innerConfig.editMode) {
-      // 编辑模式：导航到章节管理页面（卷下标默认 1，沿用原前端 &1）
-      const volumeIdx = innerConfig.volumeIndex || 1;
-      log('正在打开章节管理页面...');
+      // 编辑模式：导航到章节管理页面。首章所属卷已知就直接开到那一卷，省一次切卷；
+      // 未知(单卷书/没传卷列表)沿用旧的 &1。之后每章由 searchForChapter 自行切卷。
+      let volumeIdx = innerConfig.volumeIndex || 1;
+      const firstVolText = mapped[0]?.volumeText || '';
+      if (firstVolText && innerConfig.fanqieVolumes.length) {
+        const i = innerConfig.fanqieVolumes.indexOf(firstVolText);
+        if (i >= 0) volumeIdx = i + 1;
+      }
+      innerConfig.volumeIndex = volumeIdx;
+      log(`正在打开章节管理页面（第 ${volumeIdx} 卷）...`);
       await client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}&${volumeIdx}`);
       await client.sleep(2000);
     } else {
