@@ -34,7 +34,21 @@ export function listBookFiles(book) {
     const cdir = path.join(dir, 'chapters');
     for (const v of fs.readdirSync(cdir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name).sort()) {
       const chs = [];
-      try { for (const f of fs.readdirSync(path.join(cdir, v)).filter(f => /\.txt$/i.test(f))) chs.push({ name: f.replace(/\.txt$/i, ''), rel: 'chapters/' + v + '/' + f, num: parseInt((f.match(/^\d+/) || [])[0] || '0', 10), kb: kbOf(path.join(cdir, v, f)) }); } catch {}
+      // name 要【剥掉前导全局章号】——章号已经单独放在 num 里，阅读页是按「第{num}章 {name}」拼的，
+      // 不剥就会显示成「第1章 001雨巷里的死人箱」，章号出现两遍。（本文件第 105 行的查重早就这么剥了。）
+      // 兜底：万一文件名纯粹是章号（剥完为空），退回不剥，免得列表出现无名条目。
+      try {
+        for (const f of fs.readdirSync(path.join(cdir, v)).filter(f => /\.txt$/i.test(f))) {
+          const full = f.replace(/\.txt$/i, '');
+          const stripped = full.replace(/^\d+[_\-\s]?/, '').trim();
+          chs.push({
+            name: stripped || full,
+            rel: 'chapters/' + v + '/' + f,
+            num: parseInt((f.match(/^\d+/) || [])[0] || '0', 10),
+            kb: kbOf(path.join(cdir, v, f)),
+          });
+        }
+      } catch {}
       chs.sort((a, b) => a.num - b.num);
       volumes.push({ vol: v, chapters: chs });
     }
