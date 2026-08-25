@@ -132,6 +132,58 @@ export function saveBookFile(book, rel, content) {
 // 而删掉重生成是真的从头再来。全自动写作目前不靠谱，删除是迭代的核心动作。
 //
 // 删之前一律 git 存档 + 留 .deleted 备份，两道保险——删章是破坏性的，不能只靠回收站。
+// 删审稿/自检类文件（reviews/ 下的内容自检、节奏体检、大纲审稿…）。
+//
+// 【为什么要能删】这些不只是碍眼的产物：contextpack.latestReviewDigest 会把【最近一份】
+// 自检里的未决项回喂进写作提示词。一份跑偏的自检会一直影响后面每一批，
+// 而且它是"最近一份"——不删掉就没法让它别再被读到。
+//
+// 与删章不同的两点：不碰 chapter_index.md（自检不在台账里）；只允许 reviews/ 下的
+// .md/.txt，路径任何一段是 .. 或跳出书目录一律拒绝。
+export function deleteReviews(book, rels, { onLog = () => {} } = {}) {
+  const list = Array.isArray(rels) ? rels : [rels];
+  const done = [];
+  const root = path.resolve(book.dir);
+
+  for (const rel of list) {
+    const r = String(rel || '').replace(/\\/g, '/');
+    if (!/^reviews\/[^/]+\.(md|txt)$/i.test(r)) {
+      onLog({ level: 'warn', msg: `跳过（只允许删 reviews/ 下的 .md/.txt）：${rel}` });
+      continue;
+    }
+    const abs = path.resolve(book.dir, r);
+    // 双保险：解析后必须仍在书目录内（挡 ../ 之类）
+    if (!abs.startsWith(root + path.sep)) { onLog({ level: 'warn', msg: `跳过（越界路径）：${rel}` }); continue; }
+    if (!fs.existsSync(abs)) { onLog({ level: 'warn', msg: `跳过（找不到）：${rel}` }); continue; }
+
+    const base = path.basename(abs);
+    // 同样备份到 .deleted/，带时间戳——删错了还能捞回来
+    try {
+      const bak = path.join(book.dir, '.deleted');
+      fs.mkdirSync(bak, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+      fs.copyFileSync(abs, path.join(bak, `${stamp}_${base}`));
+    } catch (e) { onLog({ level: 'warn', msg: '备份失败（仍继续删）：' + (e.message || e) }); }
+
+    try { fs.unlinkSync(abs); } catch { onLog({ level: 'warn', msg: '删除失败：' + base }); continue; }
+    done.push(r);
+    onLog({ level: 'act', msg: `已删审稿：${base}` });
+  }
+  return { deleted: done, count: done.length };
+}
+
+// 列出 reviews/ 下的全部审稿文件（新的在前）。
+export function listReviews(book) {
+  const dir = path.join(book.dir, 'reviews');
+  let files = [];
+  try { files = fs.readdirSync(dir).filter(f => /\.(md|txt)$/i.test(f)); } catch { return []; }
+  return files.map(f => {
+    let size = 0, mtime = 0;
+    try { const st = fs.statSync(path.join(dir, f)); size = st.size; mtime = st.mtimeMs; } catch {}
+    return { rel: 'reviews/' + f, name: f, size, mtime };
+  }).sort((a, b) => b.mtime - a.mtime);
+}
+
 export function deleteChapters(book, rels, { onLog = () => {} } = {}) {
   const list = Array.isArray(rels) ? rels : [rels];
   const done = [];

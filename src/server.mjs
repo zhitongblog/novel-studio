@@ -34,7 +34,7 @@ import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction } from './editor.mjs';
 import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
-import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters } from './files.mjs';
+import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
 import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment } from './fanqie.mjs';
@@ -1344,6 +1344,23 @@ async function api(p, req, res, u) {
         const f = await adoptCandidate(book, body.candidate, { model, cfg,
           onLog: (e) => pushLog(book.slug, { ...e, source: 'voice' }) });
         return json(res, 200, { ok: true, file: f, refs: listRefs(book), card: readCard(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/delete-reviews') {   // 删自检/审稿：它们会被回喂进写作提示词，跑偏的那份必须能清掉
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const rels = Array.isArray(body.rels) ? body.rels : (body.rel ? [body.rel] : []);
+        // all:true → 清空整个 reviews/（写完一卷回头清账用）
+        const targets = body.all ? listReviews(book).map(x => x.rel) : rels;
+        if (!targets.length) return json(res, 400, { error: '没有要删的审稿文件' });
+        const r = deleteReviews(book, targets, { onLog: (e) => pushLog(book.slug, { ...e, source: 'delete' }) });
+        return json(res, 200, { ok: true, ...r, reviews: listReviews(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/reviews') {          // 列 reviews/ 下全部审稿文件（新的在前）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        return json(res, 200, { ok: true, reviews: listReviews(book) });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/delete-chapters') {   // 删章：逐章把关的工作流里，删掉重来比在旧文上重写干净

@@ -6,11 +6,19 @@
 
 ## 安装
 
+脚本不挑工作目录，但命令要跟当前位置对上——**在仓库根目录**：
+
 ```bash
-node skills/install.mjs --list     # 先看会装到哪儿
+node skills/install.mjs --list     # 先看会装到哪儿，不动手
 node skills/install.mjs            # 装到所有检测到的 AI
 node skills/install.mjs claude     # 只装某一家：claude / codex / gemini
 node skills/install.mjs --skill unzoo-fanqie-publish
+```
+
+**已经在 `skills/` 目录里**，就去掉前缀：
+
+```bash
+node install.mjs
 ```
 
 覆盖安装（先删旧目录），装完新开一个会话生效。

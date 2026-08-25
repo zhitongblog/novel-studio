@@ -2204,6 +2204,8 @@ async function openReader(book) {
   $('#rdRewrite') && $('#rdRewrite').classList.add('hidden');
   $('#rdAdopt') && $('#rdAdopt').classList.add('hidden');
   $('#rdDelete') && $('#rdDelete').classList.add('hidden');
+  $('#rdDelReview') && $('#rdDelReview').classList.add('hidden');
+  $('#rdDelReviewAll') && $('#rdDelReviewAll').classList.add('hidden');
   try {
     const t = await api('/api/book/files?book=' + encodeURIComponent(book.slug));
     renderReaderNav(t);
@@ -2240,6 +2242,8 @@ async function loadReaderFile(rel) {
   $('#rdRewrite') && $('#rdRewrite').classList.toggle('hidden', !rdIsChapter(rel));
   $('#rdAdopt') && $('#rdAdopt').classList.toggle('hidden', !rdIsChapter(rel));
   $('#rdDelete') && $('#rdDelete').classList.toggle('hidden', !rdIsChapter(rel));
+  $('#rdDelReview') && $('#rdDelReview').classList.toggle('hidden', !rdIsReview(rel));
+  $('#rdDelReviewAll') && $('#rdDelReviewAll').classList.toggle('hidden', !rdIsReview(rel));
   try {
     const r = await api('/api/book/read?book=' + encodeURIComponent(RD_BOOK.slug) + '&rel=' + encodeURIComponent(rel));
     RD_RAW = r.content || '';
@@ -2260,6 +2264,8 @@ function exitEdit() {
   $('#rdRewrite') && $('#rdRewrite').classList.toggle('hidden', !rdIsChapter(RD_REL));
   $('#rdAdopt') && $('#rdAdopt').classList.toggle('hidden', !rdIsChapter(RD_REL));
   $('#rdDelete') && $('#rdDelete').classList.toggle('hidden', !rdIsChapter(RD_REL));
+  $('#rdDelReview') && $('#rdDelReview').classList.toggle('hidden', !rdIsReview(RD_REL));
+  $('#rdDelReviewAll') && $('#rdDelReviewAll').classList.toggle('hidden', !rdIsReview(RD_REL));
 }
 $('#rdEdit').addEventListener('click', enterEdit);
 $('#rdCancel').addEventListener('click', exitEdit);
@@ -2411,6 +2417,9 @@ $('#vcCard') && $('#vcCard').addEventListener('click', async () => {
 // ---------- 单章重写：换模型 / 改章名 / 重新给情节 ----------
 // 放在阅读页：作者读到哪一章不满意，当场就能重写那一章，不用回写作台绕一圈。
 const rdIsChapter = (rel) => /^chapters\//.test(rel || '') && /\.txt$/i.test(rel || '');
+// 自检/审稿：reviews/ 下的 .md/.txt。它们不只是产物——contextpack 会把【最近一份】
+// 里的未决项回喂进写作提示词，所以跑偏的那份必须能删掉，否则会一直影响后面每一批。
+const rdIsReview = (rel) => /^reviews\/[^/]+\.(md|txt)$/i.test(rel || '');
 
 let CRAFT_OPTS = null;
 async function loadCraftOpts() {
@@ -2489,6 +2498,23 @@ $('#rdDelete') && $('#rdDelete').addEventListener('click', async () => {
     await openReader(RD_BOOK);          // 目录要刷新，被删的那章不该还在左侧列着
   } catch (e) { toast(e.message); }
 });
+// 删这一份自检 / 清空全部自检
+async function rdDeleteReviews(all) {
+  if (!RD_BOOK) return;
+  if (!all && !rdIsReview(RD_REL)) return;
+  const tip = all
+    ? '清空这本书 reviews/ 下的【全部】自检与审稿？'
+    : `删除《${(RD_REL || '').split('/').pop()}》？`;
+  if (!confirm(tip + '\n\n都会备份到书目录的 .deleted/，可以取回。')) return;
+  try {
+    const r = await api('/api/book/delete-reviews', 'POST',
+      all ? { book: RD_BOOK.slug, all: true } : { book: RD_BOOK.slug, rels: [RD_REL] });
+    toast(`已删 ${r.count} 份自检`);
+    await openReader(RD_BOOK);        // 左侧目录要刷新
+  } catch (e) { toast(e.message); }
+}
+$('#rdDelReview') && $('#rdDelReview').addEventListener('click', () => rdDeleteReviews(false));
+$('#rdDelReviewAll') && $('#rdDelReviewAll').addEventListener('click', () => rdDeleteReviews(true));
 $('#rdRewrite') && $('#rdRewrite').addEventListener('click', openChapterRewrite);
 // 这一章写得对味 → 设为范本。长期看这是最有价值的一条路：书越写越像它自己。
 $('#rdAdopt') && $('#rdAdopt').addEventListener('click', async () => {
