@@ -7,16 +7,19 @@
 //
 // 与长驻模式的关系：这是一个【可开关的并行模式】，不改动 writer.mjs / autopilot.mjs。
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { getModel, detectModel } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { buildBatchPack } from './contextpack.mjs';
 import { bookStats, getBook, participationOf } from './books.mjs';
-import { gitSnapshot } from './scaffold.mjs';
+import { gitSnapshot, refreshContext } from './scaffold.mjs';
 import { reviewOutline, parseReviewItems } from './editor.mjs';   // 卷边界大纲审稿门复用长驻那套主编无头审稿
 import { setPending, takeResume } from './pending.mjs';   // 参与模式：卷口挂起等用户逐条挑 / 用户拍板后恢复
 import { deslopRange } from './deslop.mjs';   // 写后强制排版矫正闸：治「……」雪球+逐句换行，断掉自我模仿的滚雪球
 import { pacingGate } from './pacing.mjs';   // 写后节奏闸：治章长超标/事务流程当主线/量级不换挡/章末假钩子
+import { inspect as inspectLedger, needsSeed, ensureStructure, seedInstruction, snapshotGate } from './ledgersnap.mjs';   // 台账当前态快照：治「每批喂的是开篇旧账」
 
 // 各模型"无头 + 自动批准文件读写"的参数。
 function writeArgs(model) {
@@ -56,6 +59,51 @@ function buildBoundaryRetryPrompt(book, pack, scope, reviewed = false) {
     `1. ${reviewed ? '据修订后的大纲，确保' : '先在 outlines/ 下把'}该卷的【章级分章大纲】${reviewed ? '完整覆盖' : '补好（逐章 beat：核心事件/冲突、推进了什么、章末钩子；并标出本卷伏笔布点 埋设→回收章号），覆盖'}到至少第 ${String(lastNum).padStart(3, '0')} 章。\n` +
     `2. 然后【不要停下、不要输出任何待审哨兵】，直接接着写第 ${String(nextNum).padStart(3, '0')}–${String(lastNum).padStart(3, '0')} 章正文并落盘、更新索引与台账、自检。\n` +
     `（${reviewed ? '大纲审稿已在本轮前置完成' : '无状态模式下大纲审稿改为事后人工复检'}，此刻请连贯地把大纲改好并把正文写出来。）`;
+}
+
+// 台账当前态快照的【一次性迁移 + 首次合成】。只在老书（台账无快照结构）第一次跑无状态写作时发生。
+//
+// 为什么要在这里做，而不是让 ensureStructure 自己在每批前静默跑：
+// 纯代码迁移只能把原文降为历史区、顶部插一个【空骨架】——空快照喂进上下文比喂尾部 8000 字符更糟。
+// 所以迁移必须和"把当前态从历史区收出来"绑成一步，且这一步只有模型做得了。
+// 失败就整个回滚到原文件，退回 contextpack 的取尾部兜底——绝不留一个空快照在那儿祸害后面每一批。
+export async function prepareLedger({ book, model, cfg, onLog = () => {} }) {
+  const maxCh = bookStats(book).maxChapter || 0;
+  const ins = inspectLedger(book.dir);
+  const need = needsSeed(book.dir, maxCh);
+  if (!need.need) return { ok: true, skipped: true };
+
+  onLog({
+    level: 'act',
+    msg: `📌 台账迁移：本书台账 ${(ins.bytes / 1024).toFixed(0)}KB，` +
+      (need.why === 'no-structure'
+        ? `没有当前态快照，此前每批只喂得进前 ${(ins.fedRatio * 100).toFixed(1)}%（=开篇时的旧账）`
+        : `快照结构在但内容是空的（${ins.snapshotChars} 字符 / 实质 ${ins.substance} 字），此前每批喂进去的等于一张空表`) +
+      '。正在合成快照…',
+  });
+
+  const lp = path.join(book.dir, 'continuity_ledger.md');
+  const bak = lp + '.premigrate.bak';
+  try { fs.copyFileSync(lp, bak); } catch (e) { onLog({ level: 'warn', msg: '台账备份失败，放弃迁移（不阻断写作）：' + e.message }); return { ok: false }; }
+
+  ensureStructure(book.dir, book, { roster: book.planMode === 'freehand' });
+  await runHeadless(model, seedInstruction(book, maxCh), {
+    cwd: book.dir, cfg, timeoutMs: cfg?.stateless?.batchTimeoutMs || 900000,
+  });
+
+  const after = inspectLedger(book.dir);
+  if (!needsSeed(book.dir, maxCh).need) {
+    onLog({
+      level: 'act',
+      msg: `📌 快照已建立：${after.snapshotChars} 字符、覆盖到第 ${after.progress > 0 ? after.progress : maxCh} 章` +
+        `——从这批起喂的是当前态，不再是开篇旧账（原文一字未删，都在历史区）`,
+    });
+    return { ok: true, seeded: true };
+  }
+
+  try { fs.copyFileSync(bak, lp); } catch {}
+  onLog({ level: 'warn', msg: '📌 快照合成失败 → 已还原台账原文，本轮退回「喂台账尾部」兜底（不阻断写作）' });
+  return { ok: false };
 }
 
 // 写一批（count 章）。dryRun 时只组装并返回上下文包，不调模型、不写文件。
@@ -148,6 +196,22 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
     } catch (e) { onLog({ level: 'warn', msg: '节奏闸异常（不阻断）：' + (e.message || e) }); }
   }
 
+  // 📌 写后快照闸：台账顶部的「当前态快照」是下一批唯一读得到的状态，它一过期，后面每章都在照旧账写。
+  // 提示词已要求模型就地改写快照，但"要求"从来不等于"做到"——deslop 与 pacing 已经证过两回。
+  // 所以这里用代码查一个【可校验的锚点】：快照里的进度章号必须追上实际最高章号，且快照不能是空骨架。
+  // 没追上 = 这一批没更新快照 → 趁它还没变成下一批的上下文，当批退回让作者补，只自纠一轮。
+  try {
+    const g = snapshotGate(book.dir, after.maxChapter || 0, onLog, { book });
+    if (g.instruction) {
+      onLog({ level: 'act', msg: '📌 快照闸未过 → 退回作者就地刷新台账快照（不写新章）' });
+      await runHeadless(model, g.instruction, { cwd: book.dir, cfg, timeoutMs });
+      const g2 = snapshotGate(book.dir, after.maxChapter || 0, () => {}, { book });
+      onLog(g2.ok
+        ? { level: 'act', msg: '📌 快照闸复检通过' }
+        : { level: 'warn', msg: `📌 快照闸复检仍未过（${g2.why || g2.reason}）→ 放行本批，下一批可能读到过期快照，请人工留意` });
+    }
+  } catch (e) { onLog({ level: 'warn', msg: '快照闸异常（不阻断）：' + (e.message || e) }); }
+
   onLog({ level: 'act', msg: `本批完成：新增 ${grew} 章（最高章号 ${before.maxChapter}→${after.maxChapter}），用时 ${secs}s` });
   return { ok: true, wrote: grew, maxFrom: before.maxChapter, maxTo: after.maxChapter, secs, before, after };
 }
@@ -186,6 +250,15 @@ export async function runStateless({
   }
 
   if (snapshot) { try { const h = gitSnapshot(book.dir, '无状态写作前自动存档'); if (h) onLog({ level: 'info', msg: `已 git 存档：${h}（不满意可回退）` }); } catch {} }
+
+  // 刷新 AGENTS.md/CLAUDE.md/… —— 长驻模式（writer.mjs）写作前一直是这么做的，无状态这条路却漏了，
+  // 结果是：引擎升级后改了写作规范，走无状态的书永远拿不到新规范（AGENTS.md 只在建书/改设定时才重写）。
+  // 台账快照这次改动尤其吃这一条——规范里那套旧的「台账四层维护 + 3 万字符硬上限」与新结构是冲突的。
+  try { refreshContext(book); } catch (e) { onLog({ level: 'warn', msg: '刷新写作规范失败（不阻断）：' + (e.message || e) }); }
+
+  // 老书一次性迁移：把台账的当前态收进顶部快照。在 git 存档之后跑，不满意可整体回退。
+  try { await prepareLedger({ book, model, cfg, onLog }); }
+  catch (e) { onLog({ level: 'warn', msg: '台账迁移异常（不阻断）：' + (e.message || e) }); }
 
   const results = [];
   let done = 0, sinceCheck = 0;

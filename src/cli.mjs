@@ -39,6 +39,7 @@ export async function runCli(argv) {
     case 'books': return bookList(cfg);
     case 'write': return writeCmd(f, cfg);
     case 'stateless': return statelessCmd(f, cfg);
+    case 'ledger': return ledgerCmd(f, cfg);
     case 'sessions': return sessionsCmd(cfg);
     case 'send': return sendCmd(f, cfg);
     case 'watch': return watchCmd(f, cfg);
@@ -50,7 +51,7 @@ export async function runCli(argv) {
     case 'reference': return reference();
     default:
       console.log('未知命令：' + cmd);
-      console.log('可用：doctor | models | local [import] | book new|list | write | stateless | sessions | send | watch | stop | config | reference | mcp | tui');
+      console.log('可用：doctor | models | local [import] | book new|list | write | stateless | ledger | sessions | send | watch | stop | config | reference | mcp | tui');
       process.exitCode = 1;
   }
 }
@@ -328,6 +329,61 @@ async function writeCmd(f, cfg) {
 
 // 无状态分章写作：每批全新无头进程 + 精准重喂上下文包（省 token、防漂移）。
 // 用法：novel stateless --book 书名 [--model codex] [--n 批数] [--batch 每批章数] [--dry]
+// novel ledger [--book 书名] [--migrate] [--model codex]
+// 台账当前态快照的体检 / 迁移。没有快照结构的书，写作时每批只喂得进台账的一小截（且是最早那截），
+// 这个命令让这件事看得见、也能当场补上，而不是只能等下一次写作时顺带跑。
+async function ledgerCmd(f, cfg) {
+  const { inspect: inspectLedger, needsSeed } = await import('./ledgersnap.mjs');
+  const { bookStats } = await import('./books.mjs');
+  const id = f.book || f._[0];
+
+  const rows = id ? [getBook(id)].filter(Boolean) : listBooksWithStats(cfg).map(b => getBook(b.slug) || b);
+  if (!rows.length) { console.log(c.red(id ? '找不到书：' + id : '还没有书')); process.exitCode = 1; return; }
+
+  console.log(c.bold('\n📌 台账当前态快照体检\n') + hr());
+  for (const b of rows) {
+    const ins = inspectLedger(b.dir);
+    const st = bookStats(b);
+    if (!ins.exists) { console.log(`  ${c.gray('—')} ${b.title}：无台账文件`); continue; }
+    const need = needsSeed(b.dir, st.maxChapter || 0);
+    const tag = !need.need ? c.cyan('快照正常') : c.red('要补快照');
+    console.log(`  ${tag}  ${c.bold(b.title)}  ${c.gray(`（已写 ${st.chapters || 0} 章）`)}`);
+    console.log(`         台账 ${(ins.bytes / 1024).toFixed(0)}KB / ${ins.chars.toLocaleString()} 字符`);
+    if (!ins.structured) {
+      // 台账小到能整份喂进去时，"只喂得进 X%"没有意义——缺的只是结构本身
+      console.log(c.red('         ⚠️ 没有快照结构' +
+        (ins.fedRatio < 1 ? `，写作时只喂得进 ${(ins.fedRatio * 100).toFixed(1)}%，且是最早写的那一截` : '（台账还小，目前能整份喂入，但迟早会超）')));
+    } else if (need.need) {
+      // 「有结构但空」——模型照着提示词自己建了半个结构却没填，这比没结构更隐蔽也更糟
+      console.log(c.red(`         ⚠️ 快照结构在、内容是空的（${ins.snapshotChars} 字符 / 实质 ${ins.substance} 字` +
+        `${ins.progress < 0 ? '、无进度锚点' : ''}）——每批喂进去的等于一张空表`));
+    } else {
+      const behind = (st.maxChapter || 0) - ins.progress;
+      console.log(`         快照 ${ins.snapshotChars} 字符、实质 ${ins.substance} 字、进度第 ${ins.progress} 章` +
+        (behind > 0 ? c.red(`（落后实际 ${behind} 章，写后闸会在下批写完时补上）`) : c.gray('（已跟上）')));
+    }
+  }
+  console.log(hr());
+
+  if (!f.migrate) {
+    console.log(c.gray('  补快照：novel ledger --book <书名> --migrate [--model codex]'));
+    console.log(c.gray('  （下一次无状态写作也会自动补，这里只是让你能主动跑）\n'));
+    return;
+  }
+
+  const targets = rows.filter(b => needsSeed(b.dir, bookStats(b).maxChapter || 0).need);
+  if (!targets.length) { console.log(c.cyan('  所有目标书都已有快照结构，无需迁移\n')); return; }
+
+  const { prepareLedger } = await import('./statelessWriter.mjs');
+  for (const b of targets) {
+    const model = f.model || b.model || cfg.defaultModel;
+    console.log(c.bold(`\n▶ ${b.title}`) + c.gray(`（${model}）`));
+    const r = await prepareLedger({ book: b, model, cfg, onLog: (e) => logLine(e) });
+    console.log(r.ok ? c.cyan('  ✅ 快照已建立') : c.red('  ❌ 未建立（台账已还原原文，写作不受影响）'));
+  }
+  console.log('');
+}
+
 async function statelessCmd(f, cfg) {
   const id = f.book || f._[0];
   if (!id) { console.log('用法：novel stateless --book 书名 [--model codex] [--n 1] [--batch 3] [--dry]'); process.exitCode = 1; return; }
@@ -348,7 +404,8 @@ async function statelessCmd(f, cfg) {
     console.log(`    设定圣经摘录   ${String(s.bible).padStart(6)}`);
     console.log(`    本卷分章大纲   ${String(s.outline).padStart(6)}`);
     console.log(`    主线伏笔表     ${String(s.foreshadow).padStart(6)}`);
-    console.log(`    连贯性台账     ${String(s.ledger).padStart(6)}`);
+    console.log(`    连贯性台账     ${String(s.ledger).padStart(6)}` +
+      (s.ledgerStale ? c.red('  ⚠️ 本书无当前态快照，这里只是台账尾部一截（novel ledger --migrate 可补）') : ''));
     console.log(`    上一章结尾     ${String(s.lastTail).padStart(6)}`);
     console.log(`    近期章名表     ${String(s.names).padStart(6)}`);
     console.log(`    最近自检未决   ${String(s.review).padStart(6)}`);
