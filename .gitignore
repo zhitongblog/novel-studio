@@ -22,3 +22,6 @@ dist/
 .vscode/
 .idea/
 *.swp
+
+# SoloMD 预览器的会话缓存
+.solomd/

@@ -1,10 +1,11 @@
 // 番茄小说发布器 —— 从 Tauri 前端 (fanqie-novel-publisher/dist/index.html) 忠实移植到 Node ESM。
 //
 // 逻辑原样不动，只换外部调用层：
-//   - 浏览器自动化仍走 Unzoo Browser REST API (http://127.0.0.1:9399)。
-//     读用 browser_evaluate；写用坐标真实点击 /api/v1/click 与真实键盘 /api/v1/type、browser_press_key。
-//   - 原 `unzooCallTool(tool,args)` / `unzooRequest(path,body)` 经 Tauri invoke 透传，
-//     这里直接用 Node 内置 global fetch 打 REST。
+//   - 浏览器自动化【只走官方 MCP 端点】(POST /api/v1/mcp/tools/call)，统一经 src/unzoo.mjs。
+//     读用 browser_evaluate；写用坐标真实点击 page_click 与可信输入 browser_input_text、browser_press_key。
+//     ⚠️兼容通道(/api/v1/tools/call 与 /api/v1/<动作> 扁平端点)已全面弃用，勿再引入——
+//     理由与实测证据见 src/unzoo.mjs 顶部注释及 docs/Unzoo-问题与需求清单.md。
+//   - 原 `unzooCallTool(tool,args)` 经 Tauri invoke 透传，这里改为统一走 mcpCall。
 //   - 原模块级 `selectedProfilePath` / `selectedBook` → 通过参数/构造函数注入。
 //   - 原 `addLog(msg,level)` → 调用方传入的 onLog({level,msg})。
 //   - 章节来源由调用方传入数组，本模块不读文件、不解析 ZIP。
@@ -13,10 +14,10 @@
 //
 // 纯 Node、零第三方依赖、ESM。只用 node 内置 + global fetch（Node 18+）。
 
-const UNZOO_BASE = process.env.UNZOO_BASE || 'http://127.0.0.1:9399';
-// 单次浏览器调用超时（ms）：番茄页偶发弹阻塞 alert 或卡死时，eval/点击会永久挂起 →
-// 加超时让每次调用最多等这么久，超时即抛错（上层可重试/恢复按钮），绝不无限挂起。
-const UNZOO_TIMEOUT_MS = Number(process.env.UNZOO_TIMEOUT_MS) || 45000;
+import {
+  mcpCall, UNZOO_TIMEOUT_MS,
+  clickAt, inputText, uploadTrusted, handleDialog, launchProfile,
+} from './unzoo.mjs';
 
 // 运行中的发布器（bookId → FanqiePublisher），供「停止发布」按外部请求中断。
 const RUNNING_PUBLISHERS = new Map();
@@ -29,18 +30,9 @@ export function stopPublish(bookId) {
 }
 
 // 尽力清掉某标签页上阻塞的 JS 弹窗（alert/confirm）——它会让 browser_evaluate 永久挂起。
-// best-effort：无弹窗/失败都静默。POST /api/v1/dialog/handle {tab_id, action:'accept'}。
+// best-effort：无弹窗/失败都静默。走 MCP browser_handle_dialog。
 async function dismissDialog(tabId) {
-  if (tabId == null) return false;
-  try {
-    const r = await fetch(`${UNZOO_BASE}/api/v1/dialog/handle`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tab_id: Number(tabId), action: 'accept' }),
-      signal: AbortSignal.timeout(8000),
-    });
-    const d = await r.json().catch(() => null);
-    return !!(d && d.success);
-  } catch { return false; }
+  return handleDialog(tabId, 'accept');
 }
 
 // 判断两个番茄 URL 是否同一目标页（按 pathname 比较，忽略 query）。
@@ -52,61 +44,9 @@ function sameFanqiePage(href, target) {
   } catch { return false; }
 }
 
-// ===== Unzoo 调用层（Node fetch 适配，替换原 Tauri invoke）=====
-
-// 工具调用：POST /api/v1/tools/call  body {"tool":tool,"arguments":args}
-// 对齐原前端 unzooCallTool 的返回语义：返回 data.data（成功载荷）。
-async function unzooCallTool(tool, args = {}, timeoutMs = UNZOO_TIMEOUT_MS) {
-  let resp;
-  try {
-    resp = await fetch(`${UNZOO_BASE}/api/v1/tools/call`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tool, arguments: args }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (e) {
-    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') throw new Error(`调用 ${tool} 超时(${Math.round(timeoutMs / 1000)}s，番茄页可能卡住/弹窗阻塞)`);
-    throw new Error(`Unzoo 连接失败 (${tool}): ${e.message || e}`);
-  }
-  let data;
-  try { data = await resp.json(); } catch { data = null; }
-  if (!resp.ok) {
-    const msg = data?.error?.message || data?.message || `HTTP ${resp.status}`;
-    throw new Error(`调用 ${tool} 失败: ${msg}`);
-  }
-  // Unzoo /tools/call 顶层形如 { success, data, error }
-  if (data && typeof data === 'object' && 'success' in data) {
-    if (!data.success) throw new Error(data.error?.message || '调用失败');
-    return data.data;
-  }
-  // 容错：部分版本直接返回载荷
-  return data;
-}
-
-// 通用 REST 透传：坐标点击 /api/v1/click、真实键盘 /api/v1/type 等。
-// body 直传；返回解析后的 JSON。
-async function unzooRequest(path, body = {}, timeoutMs = UNZOO_TIMEOUT_MS) {
-  let resp;
-  try {
-    resp = await fetch(`${UNZOO_BASE}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (e) {
-    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') throw new Error(`请求 ${path} 超时(${Math.round(timeoutMs / 1000)}s)`);
-    throw new Error(`Unzoo 连接失败 (${path}): ${e.message || e}`);
-  }
-  let data;
-  try { data = await resp.json(); } catch { data = null; }
-  if (!resp.ok) {
-    const msg = data?.error?.message || data?.message || `HTTP ${resp.status}`;
-    throw new Error(`请求 ${path} 失败: ${msg}`);
-  }
-  return data;
-}
+// ===== Unzoo 调用层 =====
+// 实现在 src/unzoo.mjs（只走官方 MCP 端点）。这里保留同名薄封装，让下方几百处调用点不用改。
+const unzooCallTool = (tool, args = {}, timeoutMs = UNZOO_TIMEOUT_MS) => mcpCall(tool, args, timeoutMs);
 
 // ===== UnzooClient 辅助类（从 unzoo-client.ts 搬过来）=====
 // 适配：构造函数注入 profilePath（替换原模块级 selectedProfilePath）与 onLog（替换原全局 addLog）。
@@ -137,14 +77,15 @@ class UnzooClient {
     await this.sleep(delay);
   }
 
-  // 自动启动绑定的 Unzoo profile（窗口被关时用）。POST /api/v1/profiles/launch {profile_path}。
+  // 自动启动绑定的 Unzoo profile（窗口被关时用）。MCP profile_launch {profile_path}。
   // 关键：profile_path 必须是【完整反斜杠路径】，反斜杠被吞会"failed to load profile"。
   async launchProfile() {
     if (!this.selectedProfilePath) return false;
     try {
       this.addLog('该账号浏览器窗口未开 → 正在自动启动绑定的 Unzoo profile…', 'info');
-      const r = await unzooRequest('/api/v1/profiles/launch', { profile_path: this.selectedProfilePath });
-      const ok = !!(r && (r.success === true || r.data?.launched));
+      // MCP 层失败即抛异常；能返回就算启动成功（部分版本回 null 载荷）。
+      const r = await launchProfile(this.selectedProfilePath);
+      const ok = r !== false && r?.launched !== false;
       this.addLog(ok ? '✅ 已启动该账号浏览器窗口' : ('⚠️ 启动 profile 返回异常：' + JSON.stringify(r).slice(0, 120)), ok ? 'info' : 'error');
       return ok;
     } catch (e) { this.addLog('启动 profile 失败：' + (e.message || e), 'error'); return false; }
@@ -263,15 +204,12 @@ class UnzooClient {
     await this.humanDelay(40, 100);
   }
 
-  // 真实鼠标点击（CDP，isTrusted=true）—— 坐标版
+  // 真实鼠标点击（isTrusted=true）—— 坐标版。走 MCP page_click {loc:[x,y]}。
+  // 实测(2.5.28)：命中坐标精确、事件 isTrusted=true。
   async coordClick(x, y) {
     await this.ensureTabId();
     await this.humanDelay(20, 60);
-    await unzooRequest('/api/v1/click', {
-      tab_id: Number(this.tabId),
-      x: Math.round(x),
-      y: Math.round(y)
-    });
+    await clickAt(this.tabId, x, y);
     await this.humanDelay(40, 100);
   }
 
@@ -328,10 +266,12 @@ class UnzooClient {
     return !!ok;
   }
 
-  // 真实键盘输入（/api/v1/type，Unzoo 1.8.4+ 产出可信 keydown/beforeinput/input，isTrusted=true）
+  // 可信输入到【当前焦点元素】（MCP browser_input_text，走 Chromium IME 管线）。
+  // 实测(2.5.28)：beforeinput/input 均 isTrusted=true、inputType=insertText，ProseMirror 认。
+  // 调用前须先 focus 目标元素（见 focusEditor）。
   async typeText(text) {
     await this.ensureTabId();
-    await unzooRequest('/api/v1/type', { tab_id: Number(this.tabId), text: String(text) });
+    await inputText(this.tabId, text);
   }
 
   // 【CDP 可信逐字输入】browser_type：真 WebKeyboardEvent 逐字（isTrusted=true），【后台安全、无需前台】。
@@ -351,12 +291,15 @@ class UnzooClient {
     await unzooCallTool('browser_press_key', { tab_id: Number(this.tabId), key, modifiers: modifiers || [] });
   }
 
-  // 上传文件（可信注入）：走 daemon 独立 REST 端点 `POST /api/v1/set_input_files`——产生 isTrusted 文件事件，
-  // 番茄等硬化站点才认。selector 传【已存在的 <input type=file>】。⚠️旧的 `browser_upload`(MCP工具桥) 番茄改版后
-  // 已失效(files:0)，别再用；这是全站唯一经过验证的上传法(封面/多书名实验/新书封面都走它)。返回 {data:{trusted,uploaded,count},success}。
+  // 上传文件（可信注入）：MCP `browser_upload_trusted`——经 blink SetFilesFromPaths 直接给
+  // <input type=file> 塞文件，change 事件 isTrusted=true，番茄等硬化站点才认
+  //（该工具的官方描述里直接点名了「番茄小说 cover」这个用例）。
+  // selector 传【已存在的 <input type=file>】。
+  // ⚠️别用 browser_upload（番茄改版后失效，files:0）；
+  // ⚠️更别跟 browser_set_input_files 搞混——那个是"预备拦截下一个文件对话框"，语义完全不同。
   async uploadFile(selector, filePaths) {
     await this.ensureTabId();
-    return await unzooRequest('/api/v1/set_input_files', { tab_id: Number(this.tabId), selector, file_paths: filePaths });
+    return await uploadTrusted(this.tabId, selector, filePaths);
   }
 
   // 真实键盘清空：Ctrl+A 全选 + Delete
@@ -492,10 +435,11 @@ class UnzooClient {
     await this.humanDelay(150, 350);
 
     // 2.5) 关键：番茄 ProseMirror 只认【可信输入】才会把"下一步"按钮从禁用变可用；
-    //      合成 paste 只填了 DOM、不触发番茄的内容识别/字数统计。故用 Unzoo 可信键盘(/api/v1/type)
+    //      合成 paste 只填了 DOM、不触发番茄的内容识别/字数统计。故用可信输入
+    //      (browser_input_text，走 Chromium IME 管线，实测 beforeinput/input 均 isTrusted=true)
     //      在正文末尾补一个空格再真实退格删掉 → 触发番茄识别全文、启用"下一步"，且正文零残留。
     try {
-      // 真实键盘(/api/v1/type、Backspace)是 OS 级、发给【前台标签页】→ 必须先激活本标签页，否则键击丢失、下一步不会启用
+      // 保留激活标签页：browser_press_key 仍是键盘事件，前台更稳；且不激活也无副作用。
       if (this.tabId) await this.activateTab(this.tabId);
       await this.humanDelay(150, 300);
       await this.evaluate(`(function(){const ed=document.querySelector(${sel});if(!ed)return;ed.focus();const r=document.createRange();r.selectNodeContents(ed);r.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(r);})()`);
@@ -2997,9 +2941,10 @@ export async function getFanqieBooks({ profilePath, onLog } = {}) {
 // ===== 共用：番茄封面【可信注入 + 全屏遮罩两步确认】=====
 // 换封面 / 多书名实验封面 / 新书封面 都走这两个助手，保证只有一条经过验证的上传路径。
 //
-// injectTrustedCover：番茄唯一认的上传法 = `POST /api/v1/set_input_files`（产生 isTrusted 文件事件；
-//   browser_upload/DataTransfer/拖拽/CDP-shim 都不认）。中文书名目录路径先拷成 ASCII 临时文件避编码坑。
-//   返回 { ok, rmTmp }：⚠️ rmTmp 必须在“确认按钮点亮/上传完成”之后再调用——set_input_files 只是把磁盘
+// injectTrustedCover：番茄唯一认的上传法 = MCP `browser_upload_trusted`（blink SetFilesFromPaths，
+//   产生 isTrusted 文件事件；browser_upload/DataTransfer/拖拽/CDP-shim 都不认）。
+//   中文书名目录路径先拷成 ASCII 临时文件避编码坑。
+//   返回 { ok, rmTmp }：⚠️ rmTmp 必须在“确认按钮点亮/上传完成”之后再调用——注入只是把磁盘
 //   文件引用塞给 input，番茄异步读取上传，删早了上传就失败、确认按钮永不点亮（踩过的坑）。
 async function injectTrustedCover(client, filePath, selectors = ['.byte-upload input[type=file]', '.cover-modal-upload input[type=file]', 'input[type=file]']) {
   let injPath = filePath, tmpFile = null;
@@ -3012,8 +2957,9 @@ async function injectTrustedCover(client, filePath, selectors = ['.byte-upload i
   let ok = false;
   for (const sel of selectors) {
     try {
-      const r = await unzooRequest('/api/v1/set_input_files', { tab_id: Number(client.tabId), selector: sel, file_paths: [injPath] });
-      if (r && (r.success || r.data?.uploaded || r.data?.trusted)) { ok = true; break; }
+      // MCP 层失败即抛异常；能返回就算注入成功（不同版本载荷字段不一，别按字段硬判）。
+      const r = await uploadTrusted(client.tabId, sel, [injPath]);
+      if (r === null || r?.uploaded !== false) { ok = true; break; }
     } catch {}
   }
   return { ok, rmTmp };
@@ -3146,7 +3092,7 @@ export async function changeFanqieCover({ bookId, coverPath, profilePath, autoSu
     // 5. 【可信注入】封面文件（共用助手：set_input_files，番茄唯一认的上传法）
     log('注入封面文件（可信上传 set_input_files）…');
     const { ok: injOk, rmTmp } = await injectTrustedCover(client, coverPath);
-    if (!injOk) { await rmTmp(); return { ok: false, error: 'set_input_files 注入未成功（Unzoo 版本可能不支持 /api/v1/set_input_files，需升级 Unzoo）' }; }
+    if (!injOk) { await rmTmp(); return { ok: false, error: '可信文件注入未成功（browser_upload_trusted 调用失败，请确认 Unzoo 版本 ≥2.5）' }; }
 
     // 6-7. 两步确认（确认上传→确定）直到全屏遮罩关闭（共用助手）。
     //    ⚠️ rmTmp 放确认之后——番茄异步读文件上传，删早了确认按钮永不点亮（坑）。

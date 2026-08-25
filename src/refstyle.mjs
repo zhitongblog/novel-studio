@@ -9,25 +9,19 @@ import { spawnSync } from 'node:child_process';
 import { getModel } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 
-const UNZOO_BASE = process.env.UNZOO_BASE || 'http://127.0.0.1:9399';
+// 浏览器自动化只走官方 MCP 端点，统一经 src/unzoo.mjs（兼容层已全面弃用，理由见该文件顶部注释）。
+import { listTabs, createTab, navigate, getHtml, screenshot, scrollBy, launchProfile } from './unzoo.mjs';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-async function unzoo(pathname, body, method = 'POST') {
-  const opt = { method, headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(40000) };
-  if (method === 'POST') opt.body = JSON.stringify(body || {});
-  const r = await fetch(UNZOO_BASE + pathname, opt);
-  return r.json().catch(() => ({}));
-}
-function tabsOf(j) { return (j && j.data && (j.data.tabs || j.data)) || (j && j.tabs) || (Array.isArray(j) ? j : []); }
 const tabId = (t) => t && (t.id || t.tab_id);
 
 // 在给定 tab 上截 2 屏（滚一屏再截），落到 outDir。prefix 区分多本。
 async function grabShots(tid, outDir, prefix, onLog = () => {}) {
   const shots = [];
   for (let i = 0; i < 2; i++) {
-    if (i > 0) { try { await unzoo('/api/v1/scroll', { tab_id: tid, y: 900 }); } catch {} await sleep(900); }
-    const s = await unzoo('/api/v1/screenshot', { tab_id: tid });
-    const b64 = s && s.data && s.data.image_base64;
+    if (i > 0) { try { await scrollBy(tid, 900); } catch {} await sleep(900); }
+    let b64 = '';
+    try { b64 = await screenshot(tid); } catch (e) { onLog({ level: 'warn', msg: '截图失败：' + (e.message || e) }); }
     if (!b64) break;
     const p = path.join(outDir, prefix + '_shot' + (i + 1) + '.png');
     fs.writeFileSync(p, Buffer.from(String(b64).replace(/^data:image\/\w+;base64,/, ''), 'base64'));
@@ -38,28 +32,28 @@ async function grabShots(tid, outDir, prefix, onLog = () => {}) {
 
 // 把一个 tab 导航到某本书并进正文（若已在 reader 页则不动），然后截图。
 async function shotsForUrl(tid, bookUrl, outDir, prefix, onLog) {
-  const cur = tabsOf(await unzoo('/api/v1/tabs', null, 'GET')).find(t => tabId(t) === tid);
+  const cur = (await listTabs()).find(t => tabId(t) === tid);
   const alreadyReader = cur && /fanqienovel\.com\/reader\//.test(cur.url || '');
   if (!alreadyReader && bookUrl) {
-    await unzoo('/api/v1/navigate', { tab_id: tid, url: bookUrl }); await sleep(3000);
-    const html = await unzoo('/api/v1/get-html', { tab_id: tid });
-    const h = String((html && html.data && (html.data.html || (html.data.result && html.data.result.html) || html.data.text)) || '');
+    await navigate(tid, bookUrl); await sleep(3000);
+    let h = '';
+    try { h = await getHtml(tid, 'html'); } catch {}
     const m = h.match(/href="(\/reader\/\d+[^"]*)"/) || h.match(/(https?:\/\/fanqienovel\.com\/reader\/\d+[^"']*)/);
-    if (m) { const u = m[1].startsWith('http') ? m[1] : ('https://fanqienovel.com' + m[1]); onLog({ level: 'info', msg: '进入正文…' }); await unzoo('/api/v1/navigate', { tab_id: tid, url: u }); await sleep(3500); }
+    if (m) { const u = m[1].startsWith('http') ? m[1] : ('https://fanqienovel.com' + m[1]); onLog({ level: 'info', msg: '进入正文…' }); await navigate(tid, u); await sleep(3500); }
   }
   return grabShots(tid, outDir, prefix, onLog);
 }
 
-// 直接走 Unzoo REST。三种取图方式：
+// 直接走 Unzoo 官方 MCP。三种取图方式：
 //   multi:true          → 截【当前所有已打开的番茄章节(reader)页】，用户开几本就参考几本（最稳，不导航）。
 //   bookUrls:[u1,u2,…]  → 逐本导航到详情页→进第 1 章→截图（可参考多本，但导航偶发失效）。
 //   bookUrl:u（旧）      → 单本，优先用已打开的 reader 页直接截，否则导航。
 export async function readFanqieShots({ profilePath, bookUrl, bookUrls, multi, outDir, onLog = () => {} }) {
   const urls = (bookUrls && bookUrls.length ? bookUrls : (bookUrl ? [bookUrl] : [])).slice(0, 4);
   if (!multi && !urls.length) throw new Error('缺少番茄图书链接');
-  if (profilePath) { try { await unzoo('/api/v1/profiles/launch', { profile_path: profilePath }); await sleep(1200); } catch {} }
+  if (profilePath) { try { await launchProfile(profilePath); await sleep(1200); } catch {} }
   fs.mkdirSync(outDir, { recursive: true });
-  let list = tabsOf(await unzoo('/api/v1/tabs', null, 'GET'));
+  let list = await listTabs();
   const readerTabs = list.filter(t => /fanqienovel\.com\/reader\//.test(t.url || ''));
 
   // 模式 A：多本 —— 截所有已打开的章节页（最稳）
@@ -75,7 +69,7 @@ export async function readFanqieShots({ profilePath, bookUrl, bookUrls, multi, o
     // 章节页不够、又给了链接 → 用一个可用 tab 逐本导航补齐
     if (all.length < 2 && urls.length) {
       let tid = tabId(list.find(t => /fanqienovel\.com/.test(t.url || ''))) || tabId(list[0]);
-      if (!tid && urls[0]) { const c = await unzoo('/api/v1/tabs/create', { url: urls[0] }); tid = (c.data && (c.data.tab_id || c.data.id)) || c.tab_id; await sleep(2500); }
+      if (!tid && urls[0]) { tid = await createTab(urls[0]); await sleep(2500); }
       for (let i = 0; i < urls.length && tid; i++) { onLog({ level: 'act', msg: `导航对标书 ${i + 1}/${urls.length}…` }); const sh = await shotsForUrl(tid, urls[i], outDir, 'nav' + (i + 1), onLog); all.push(...sh); }
     }
     if (!all.length) throw new Error('未截到任何番茄章节页。请先在 Unzoo(所选账号)里打开 1~3 本对标书的【任意一章】，再点分析。');
@@ -91,7 +85,7 @@ export async function readFanqieShots({ profilePath, bookUrl, bookUrls, multi, o
     if (sh.length) { onLog({ level: 'info', msg: `已截 ${sh.length} 屏，交给 claude 视觉分析文风…` }); return sh; }
   }
   let tid = tabId(list.find(t => /fanqienovel\.com/.test(t.url || '')));
-  if (!tid && urls[0]) { const c = await unzoo('/api/v1/tabs/create', { url: urls[0] }); tid = (c.data && (c.data.tab_id || c.data.id)) || c.tab_id; await sleep(2500); }
+  if (!tid && urls[0]) { tid = await createTab(urls[0]); await sleep(2500); }
   if (!tid) throw new Error('未发现番茄标签页。请先在 Unzoo(所选账号)里打开这本番茄书的【任意一章】，再点分析。');
   const sh = await shotsForUrl(tid, urls[0], outDir, 'book1', onLog);
   if (!sh.length) throw new Error('截图失败（Unzoo 可能未连上或页面未加载正文）');

@@ -63,6 +63,45 @@ browser_upload_trusted  | transport: ['mcp', 'cli', 'rest'] | profiles: ['standa
 
 ---
 
+## 🔴 1b【Bug】报错文案给的能力名，API 自己不认
+
+`browser_screenshot` 经 MCP 通道被能力租约拦下时，报错是：
+
+```
+capability lease required for 'browser_screenshot' (channel=mcp):
+no valid lease for capability=DesktopObserve holder=mcp.
+申请:POST /api/v1/lease/request {"capability":"..."} 再 /lease/grant
+```
+
+照着它说的 `DesktopObserve` 去申请，**被拒**：
+
+```bash
+curl -X POST .../api/v1/lease/request -d '{"capability":"DesktopObserve","holder":"mcp"}'
+# → unknown variant `DesktopObserve`, expected one of `browser`, `desktop_input`,
+#   `desktop_observe`, `file_read`, `file_write`, `network`, `shell`
+```
+
+要传蛇形 `desktop_observe` 才行。**报错文案是引导用户自救的，结果它给的名字用不了**——我们只能在代码里做帕斯卡→蛇形转换兜着。
+
+**期望**：报错里的 capability 直接输出 API 接受的形式。
+
+---
+
+## 🟠 1c【一致性】同一能力，MCP 通道要租约，扁平端点不要
+
+| 通道 | `browser_screenshot` / `/api/v1/screenshot` |
+|---|---|
+| MCP `/api/v1/mcp/tools/call` | ❌ 被拒，要 `desktop_observe` 租约 |
+| 扁平 `/api/v1/screenshot` | ✅ 直接出图，无需租约 |
+
+同一台机器、同一个进程、同一个能力，换条通道就绕过了管控。这让租约作为安全控制形同虚设（想绕的人走扁平端点就行），却只惩罚了走官方通道的集成方。
+
+我们已经在自己的调用层里做了「撞到 lease 错误就自动 request+grant 后重试」——实测 request→grant **无需任何人工批准**，300 秒有效。这也说明这层管控目前只是障碍，不是防线。
+
+**期望**：要么两条通道一致管控，要么明确说明租约的威胁模型是什么、程序化自动授予是否是预期用法。
+
+---
+
 ## 🟠 2【一致性】三条调用通道，三种行为
 
 目前同一个能力最多有三个入口，语义和覆盖面都不一样：
@@ -132,10 +171,32 @@ browser_upload_trusted  | transport: ['mcp', 'cli', 'rest'] | profiles: ['standa
 | # | 内容 | 优先级 | 类型 |
 |---|---|---|---|
 | 1 | tools/call 与 CLI 覆盖不全 + 能力清单说谎 | 🔴 高 | Bug |
+| 1b | 报错给的 capability 名 API 自己不认 | 🔴 高（好修） | Bug |
+| 1c | 租约只管 MCP 通道，扁平端点绕过 | 🟠 中 | 设计/安全 |
 | 2 | 三通道行为不一致 | 🟠 中 | 设计 |
 | 3 | OpenAPI 没有指路 | 🟡 中低 | 文档 |
 | 4 | 等待页面就绪的原语 | 🟡 中低 | 需求 |
-| 5 | 点击不触发 | ⚪ — | **先自己复验** |
+| 5 | 点击不触发 | ⚪ 已部分复验 | 见下 |
 | 6 | CDP shim 现状 | ⚪ — | 咨询 |
 
-**只有 #1–#4 建议现在提。** #5 是旧结论没复验，#6 是我们自己的技术债。
+**#1–#4 建议现在提**，#1b 尤其划算（改一行文案的事）。#6 是我们自己的技术债。
+
+---
+
+## 附：我们这侧已完成的迁移（2026-08-25）
+
+已把全部浏览器自动化收敛到**唯一出口 `src/unzoo.mjs`，只走 `/api/v1/mcp/tools/call`**，兼容层全部拆除：
+
+| 原（兼容层） | 现（官方 MCP） | 验证 |
+|---|---|---|
+| `/api/v1/tools/call` | `/api/v1/mcp/tools/call` | 全套 32 项测试通过 |
+| `/api/v1/click {x,y}` | `page_click {loc:[x,y]}` | ✅ 实测 isTrusted=true、坐标精确命中 |
+| `/api/v1/type {text}` | `browser_input_text {text}` | ✅ 实测 beforeinput/input 均 isTrusted=true |
+| `/api/v1/set_input_files` | `browser_upload_trusted` | 语义对齐（该工具描述直接点名番茄封面用例） |
+| `/api/v1/dialog/handle` | `browser_handle_dialog` | — |
+| `/api/v1/profiles/launch` | `profile_launch` | — |
+| `/api/v1/screenshot` | `browser_screenshot` + 自动租约 | ✅ 取租约后正常出图 |
+
+配套加了 `test/unzoo-mcp.test.mjs`：静态扫描 51 个源文件禁止兼容层端点回流，四种响应形状解包，租约自动续租与蛇形转换，以及在本地 `file://` 测试页上实测 `isTrusted`。
+
+**关于 #5**：坐标点击与可信输入这两条在**本地测试页上已复验通过**（isTrusted=true、落点准确）。番茄 Arco 按钮那批「点了没反应」的结论仍未在真实页面复验——那需要登录态和真实书目。
