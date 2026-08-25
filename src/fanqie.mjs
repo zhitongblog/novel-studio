@@ -16,7 +16,7 @@
 
 import {
   mcpCall, UNZOO_TIMEOUT_MS,
-  clickAt, inputText, uploadTrusted, handleDialog, launchProfile,
+  clickAt, inputText, uploadTrusted, handleDialog, launchProfile, waitFor,
 } from './unzoo.mjs';
 
 // 运行中的发布器（bookId → FanqiePublisher），供「停止发布」按外部请求中断。
@@ -205,9 +205,11 @@ class UnzooClient {
   }
 
   // 真实鼠标点击（isTrusted=true）—— 坐标版。走 MCP page_click {loc:[x,y]}。
-  // 实测(2.5.28)：命中坐标精确、事件 isTrusted=true。
+  // 实测(2.5.28)：坐标是【视口坐标】(文档写 "screen coordinates" 是错的)，命中精确、isTrusted=true。
+  // ⚠️必须先保证浏览器窗口在前台，否则【静默无操作】(返回 null 不报错)。
   async coordClick(x, y) {
     await this.ensureTabId();
+    await this.ensureForeground();
     await this.humanDelay(20, 60);
     await clickAt(this.tabId, x, y);
     await this.humanDelay(40, 100);
@@ -227,7 +229,10 @@ class UnzooClient {
       const pg = pages.find(p => String(p.id) === String(this.tabId))
               || pages.find(p => (p.url || '').includes(this.siteHost));
       wsUrl = pg && pg.webSocketDebuggerUrl;
-    } catch (e) { throw new Error(`CDP shim 不可用(${e.message})，请在 Unzoo 设置里开启 CDP(ws://127.0.0.1:${port})`); }
+    // ⚠️别再写"到 Unzoo 设置里开启 CDP"——没有这个设置项（/api/v1/settings/service 返回的键里
+    // 根本没有 managed_mode，UI 也没开关）。shim 未废弃，但被 managed_mode 门控
+    // （unzoo#98：9222 无认证，可绕过 auth/lease/审计），唯一开关是环境变量。
+    } catch (e) { throw new Error(`CDP shim 不可用(${e.message})。它被 Unzoo 的 managed_mode 门控，需以 UNZOO_MANAGED_MODE=0 启动 Unzoo 才会监听 ws://127.0.0.1:${port}（注意：这会绕过 auth/lease/审计）。本项目正在迁离 CDP shim，优先改用官方 MCP 工具。`); }
     if (!wsUrl) throw new Error(`CDP 未找到目标页(tabId=${this.tabId})`);
     const ws = new WebSocket(wsUrl);
     let mid = 0;
@@ -285,10 +290,20 @@ class UnzooClient {
     }, timeoutMs);
   }
 
-  // 真实按键（browser_press_key，支持修饰键，isTrusted=true）
+  // 真实按键（browser_press_key，支持修饰键，isTrusted=true）。
+  // ⚠️OS 级输入：浏览器窗口不在前台时【静默无操作】，故先 ensureForeground。
   async pressKey(key, modifiers) {
     await this.ensureTabId();
+    await this.ensureForeground();
     await unzooCallTool('browser_press_key', { tab_id: Number(this.tabId), key, modifiers: modifiers || [] });
+  }
+
+  // 服务端等待某选择器出现（网关自己轮询，一次往返顶原来 20 次）。返回 true=出现。
+  // 只适合【纯选择器/纯文本】这类简单条件；复合条件（数据行 或 空态 或 登录失效）
+  // 仍要自己轮询同步表达式，见 FanqiePublisher.waitChapterRows。
+  async waitForSelector(selector, { timeoutMs = 10000, state = 'attached' } = {}) {
+    await this.ensureTabId();
+    return waitFor(this.tabId, { selector, state, timeoutMs });
   }
 
   // 上传文件（可信注入）：MCP `browser_upload_trusted`——经 blink SetFilesFromPaths 直接给
@@ -439,7 +454,8 @@ class UnzooClient {
     //      (browser_input_text，走 Chromium IME 管线，实测 beforeinput/input 均 isTrusted=true)
     //      在正文末尾补一个空格再真实退格删掉 → 触发番茄识别全文、启用"下一步"，且正文零残留。
     try {
-      // 保留激活标签页：browser_press_key 仍是键盘事件，前台更稳；且不激活也无副作用。
+      // ⚠️必须激活：下面的 pressKey 是 OS 级输入，窗口不在前台会【静默无操作】，
+      // 那样番茄识别不到正文、"下一步"永远灰着。（pressKey 内部也会 ensureForeground，这里保留显式激活。）
       if (this.tabId) await this.activateTab(this.tabId);
       await this.humanDelay(150, 300);
       await this.evaluate(`(function(){const ed=document.querySelector(${sel});if(!ed)return;ed.focus();const r=document.createRange();r.selectNodeContents(ed);r.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(r);})()`);
@@ -488,6 +504,20 @@ class UnzooClient {
 
   async activateTab(tabId) {
     await unzooCallTool('tab_activate', { tab_id: String(tabId) });
+    this._fgTab = String(tabId);
+    this._fgAt = Date.now();
+  }
+
+  // 保证【浏览器窗口在 OS 前台】——page_click 与 browser_press_key 是 OS 级输入，
+  // 窗口不在前台时它们【静默无操作】：返回 null、不报错、事件一个不产生（2.5.28 实测，
+  // 已提 unzoo issue）。所以这两个动作前必须自己保证前台，不能指望报错来兜底。
+  // 对比：browser_input_text / browser_click(选择器) / browser_type 是标签页定向的，不受此限。
+  // 节流 3s：避免连按时反复把窗口往前提。
+  async ensureForeground() {
+    if (!this.tabId) return;
+    const same = this._fgTab === String(this.tabId);
+    if (same && this._fgAt && (Date.now() - this._fgAt) < 3000) return;
+    try { await this.activateTab(this.tabId); } catch {}
   }
 
   async navigate(url) {
@@ -928,15 +958,8 @@ class FanqiePublisher {
     }
 
     // Step 4: 等待编辑页面加载
-    let editorReady = false;
-    for (let i = 0; i < 20; i++) {
-      const check = await this.client.evaluate(`!!document.querySelector('.ProseMirror')`);
-      if (check) {
-        editorReady = true;
-        break;
-      }
-      await this.client.sleep(500);
-    }
+    // 服务端等待（browser_wait_for 实测是真的等、如实返回 matched），一次往返顶原来 20 次轮询。
+    const editorReady = await this.client.waitForSelector('.ProseMirror', { timeoutMs: 10000 });
 
     if (!editorReady) {
       return { success: false, message: '编辑页面加载超时' };
@@ -1350,15 +1373,8 @@ class FanqiePublisher {
     this.log(`章节注入 - 编号: ${chapterNumber}, 纯标题: "${pureTitle}"`);
 
     // 等待编辑器加载（最多等待10秒）
-    let editorReady = false;
-    for (let i = 0; i < 20; i++) {
-      const check = await this.client.evaluate(`!!document.querySelector('.ProseMirror')`);
-      if (check) {
-        editorReady = true;
-        break;
-      }
-      await this.client.sleep(500);
-    }
+    // 服务端等待（browser_wait_for 实测是真的等、如实返回 matched），一次往返顶原来 20 次轮询。
+    const editorReady = await this.client.waitForSelector('.ProseMirror', { timeoutMs: 10000 });
     if (!editorReady) {
       this.log('⚠️ 等待编辑器超时，尝试继续...');
     }

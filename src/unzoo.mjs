@@ -190,3 +190,22 @@ export async function screenshot(tabId, opts = {}) {
 export async function scrollBy(tabId, deltaY) {
   return mcpCall('browser_scroll', { tab_id: tabId, delta_y: Math.round(deltaY) });
 }
+
+// 服务端等待：网关自己轮询到条件成立。返回 true=命中，false=超时。
+// 只支持 {selector,state} / {text 出现} / {text_gone 消失}——【没有 JS 断言】，
+// 复合条件（如"出现数据行 或 空态 或 登录失效"）表达不了，那种仍需自己轮询同步表达式。
+//
+// ⚠️只有 browser_wait_for 和 browser_delay 是真的会等。同族的
+// browser_wait_for_selector / browser_wait_for_network_idle / browser_wait_for_function
+// 是【空壳】：传 timeout_ms 也只跑 ~100ms 就返回 {} 假成功（schema 与实现读的参数名不一致，
+// 兜底成字面量 true 恒真；且 eval_js 不 await Promise）。已提 unzoo#153，修好前别用。
+// 同理 browser_evaluate 不 await Promise —— 注入的表达式必须是【同步】的。
+export async function waitFor(tabId, { selector, state, text, textGone, timeoutMs = 15000, pollMs = 200 } = {}) {
+  const args = { tab_id: String(tabId), timeout_ms: timeoutMs, poll_ms: pollMs };
+  if (selector) args.selector = selector;
+  if (state) args.state = state;
+  if (text) args.text = text;
+  if (textGone) args.text_gone = textGone;
+  const r = await mcpCall('browser_wait_for', args, Math.max(timeoutMs + 10000, UNZOO_TIMEOUT_MS));
+  return !!r?.matched;
+}

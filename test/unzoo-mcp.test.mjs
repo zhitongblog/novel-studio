@@ -141,6 +141,12 @@ document.getElementById('e').addEventListener('input',e=>__ev.i.push({t:e.isTrus
     assert.ok(tab, '应能新建标签页');
     await new Promise(r => setTimeout(r, 2000));
 
+    // ⚠️page_click / browser_press_key 是 OS 级输入：浏览器窗口不在前台时【静默无操作】
+    //（返回 null、不报错、一个事件都不产生）。生产代码里由 UnzooClient.ensureForeground() 保证，
+    // 这里必须照做，否则本用例会随"当前哪个窗口在前台"随机红/绿。
+    await mcpCall('tab_activate', { tab_id: String(tab) });
+    await new Promise(r => setTimeout(r, 800));
+
     const box = await evaluate(tab, `(function(){var r=document.getElementById('b').getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`);
     await clickAt(tab, box.x, box.y);
     await new Promise(r => setTimeout(r, 700));
@@ -155,6 +161,7 @@ document.getElementById('e').addEventListener('input',e=>__ev.i.push({t:e.isTrus
     assert.ok(inputs?.[0]?.t === true, 'browser_input_text 必须产出 isTrusted=true 的输入（替代已弃用的 /api/v1/type）');
     assert.strictEqual(inputs[inputs.length - 1].v, '可信输入', '文本要真的落进编辑器');
 
+    // browser_input_text 是标签页定向的，不需要前台——这正是它比 press_key 可靠的地方
     console.log('✓ 联机：page_click / browser_input_text 均 isTrusted=true 且落点正确');
   } finally {
     if (tab != null) { try { await mcpCall('tab_close', { tab_id: tab }); } catch {} }

@@ -102,6 +102,46 @@ curl -X POST .../api/v1/lease/request -d '{"capability":"DesktopObserve","holder
 
 ---
 
+## 🔴 1d【Bug·新增 2026-08-25】`page_click` / `browser_press_key` 在窗口非前台时**静默无操作**
+
+迁移到官方 MCP 后实测发现的，比 #1b/#1c 都要命，因为**没有任何错误可以捕获**。
+
+| 条件 | `page_click` 返回 | 实际点击事件 |
+|---|---|---|
+| 浏览器窗口不在 OS 前台 | `{"content":[{"text":"null"}]}` | **0 个** |
+| 窗口在前台（`tab_activate` 之后） | 同样是 `null` | 1 个，`isTrusted=true`，坐标精确 |
+
+**返回值完全一样**——没有 `isError`、没有 `matched:false`、没有任何提示。调用方无法区分「点了」和「没点」。`browser_press_key` 表现完全相同。
+
+对比：`browser_input_text` / `browser_click`（选择器版）/ `browser_type` 是标签页定向的，**不受前台影响**，任何时候都正常。
+
+### 为什么这条危险
+
+我们的番茄发布流程是长时间后台运行的。用户在这期间切到别的窗口是**常态**。按当前行为，发布会「看起来在跑」但每一次坐标点击和按键都落空，最后表现成莫名其妙的卡住——而日志里一行错误都没有。这类静默失效比直接报错难查一个数量级。
+
+### 复现
+
+```bash
+# 让浏览器窗口不在前台（比如点一下终端），然后：
+curl -s -X POST .../api/v1/mcp/tools/call \
+  -d '{"name":"page_click","arguments":{"tab_id":"<TAB>","loc":[200,230]}}'
+# → {"content":[{"text":"null","type":"text"}]}   页面上什么都没发生
+
+# tab_activate 之后同样的调用 → 同样的返回值，但这次真的点了
+```
+
+### 期望
+
+1. 前台条件不满足时**返回错误**（或至少 `{clicked:false, reason:"window_not_foreground"}`），不要静默成功。
+2. 在工具 description 里写明「需要浏览器窗口处于 OS 前台」——目前只字未提。
+3. 顺带：`page_click` 的 `loc` 参数描述写的是 **"[x,y] screen coordinates"**，但实测传**视口坐标**才命中（我们传 `getBoundingClientRect()` 的值，事件里的 `clientX/clientY` 与之完全一致）。描述该改成 viewport coordinates，否则集成方会按屏幕坐标换算、点飞。
+
+### 我们已做的兜底
+
+`UnzooClient.ensureForeground()`：`coordClick` / `pressKey` 调用前自动 `tab_activate`（3s 节流，避免连按时反复抢焦点）。代价是会打断用户当前操作——但这两个工具不这样根本没法用。
+
+---
+
 ## 🟠 2【一致性】三条调用通道，三种行为
 
 目前同一个能力最多有三个入口，语义和覆盖面都不一样：
@@ -173,6 +213,7 @@ curl -X POST .../api/v1/lease/request -d '{"capability":"DesktopObserve","holder
 | 1 | tools/call 与 CLI 覆盖不全 + 能力清单说谎 | 🔴 高 | Bug |
 | 1b | 报错给的 capability 名 API 自己不认 | 🔴 高（好修） | Bug |
 | 1c | 租约只管 MCP 通道，扁平端点绕过 | 🟠 中 | 设计/安全 |
+| 1d | page_click/press_key 非前台时静默无操作 | 🔴 高 | Bug（新增） |
 | 2 | 三通道行为不一致 | 🟠 中 | 设计 |
 | 3 | OpenAPI 没有指路 | 🟡 中低 | 文档 |
 | 4 | 等待页面就绪的原语 | 🟡 中低 | 需求 |
