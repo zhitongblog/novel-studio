@@ -18,6 +18,7 @@ import { recordUsage, currentContextSize } from './usage.mjs';
 import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFolders, clearFlatImport, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { runFinaleClosure } from './finale.mjs';
+import { continueWithVoice } from './voiceprint.mjs';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -381,6 +382,8 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
     };
     autopilot = new Autopilot(mcp, paneId, {
       ...cfg.autopilot,
+      // 每批的续写指令后面接上本书范本原文（见 continueWithVoice 的说明）
+      continueText: continueWithVoice(getBook(slug) || book, cfg.autopilot?.continueText),
       onLog: (e) => onLog({ ...e, source: 'autopilot' }),
       onTokens: (n) => recordUsage(book.slug, tokenKey, n),
       onOutlineReady,

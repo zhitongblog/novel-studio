@@ -5,6 +5,7 @@ import { closeWindow } from './unterm.mjs';
 import { getSession, removeSession, listSessions } from './sessions.mjs';
 import { Autopilot } from './autopilot.mjs';
 import { recordUsage, parseTokens, currentContextSize } from './usage.mjs';
+import { continueWithVoice } from './voiceprint.mjs';
 import { getBook, bookStats } from './books.mjs';
 import { stripCtrl } from './imagegen.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
@@ -122,6 +123,7 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestar
   const gates = buildGateHandlers({ slug, book: getBook(slug), model: sess.model, cfg, onLog });
   const ap = new Autopilot(mcp, pane, {
     ...cfg.autopilot,
+    continueText: continueWithVoice(getBook(slug), cfg.autopilot?.continueText),
     assumeStarted: true,   // 重挂的会话：agent 已在运行，空闲时可直接驱动续写
     onLog: (e) => onLog({ ...e, source: 'autopilot' }),
     onTokens: (n) => recordUsage(slug, tokenKey, n),

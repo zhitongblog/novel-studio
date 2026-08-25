@@ -144,6 +144,20 @@ export function voicePrint(book) {
   return '\n' + lines.join('\n') + '\n';
 }
 
+// 长驻窗口那条路（autopilot 每批往窗口发一句"继续下一批…"）没有上下文包可挂，
+// 但同样需要范本【在眼前】而不是【在文件里】。所以把范本原文接在续写指令后面。
+//
+// 实测差距：同一本书同一份范本，范本进提示词 13.1 字/段，只在 AGENTS.md 写一句
+// "去读 style_refs/" 是 47.7 字/段。agent 读了文件、复述了内容，排版却用回自己的默认。
+export function continueWithVoice(book, text) {
+  const base = String(text || '').trim();
+  let voice = '';
+  try { voice = (voicePrint(book) || '').trim(); } catch { voice = ''; }
+  // 没挂范本时 voicePrint 返回的是四行极简默认，那个 AGENTS.md 里已经有了，不必每批重发
+  if (!voice || !readRefs(book).length) return base;
+  return base + '\n\n' + voice;
+}
+
 export function hasVoicePrint(book) {
   return readRefs(book).length > 0 || !!readCard(book);
 }

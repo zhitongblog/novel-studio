@@ -22,7 +22,7 @@ import { startWriting } from './writer.mjs';
 import { chatComplete } from './apichat.mjs';
 import { sendToBook, sessionAgentAlive } from './attach.mjs';
 import { deslopRange } from './deslop.mjs';
-import { pacingGate } from './pacing.mjs';
+import { pacingGate, refTargets } from './pacing.mjs';
 import { chapterRomanceSection } from './romance.mjs';
 import { paragraphHealth, reflowInstruction } from './craft.mjs';
 // 【通用方法】审美层整个交给范本：MECHANICS 是唯一由代码写死的（与文风无关的硬性要求），
@@ -151,40 +151,9 @@ function bookGist(book) {
 // 【教训】原来只有"别做什么"那一半（删套话、别升华、别凑字、实锚密度），模型就只优化被测量的东西：
 // 拼命塞物件、把句子剁短、绝不抒情 —— 写出来是一堆舞台指示，人物成了摄像机镜头而不是活人，
 // 通篇没有一句内心。读者感受到的"僵硬"正是这么来的。所以必须把"要做什么"明确写出来。
-const STYLE_GUARD = [
-  // ——「要做什么」：治僵硬的那一半 ——
-  '【视角与内心（最重要）】：全程贴着主角的感知写，读者只知道他知道的。',
-  '他的判断、盘算、忌惮、想要什么，要【化进叙述里】（自由间接引语），而不是单开一段“他想……”。',
-  '每有一次冲突或转折，主角必须有【可感的反应】：身体的（手心、后颈、呼吸、牙关）或心理的（认出、犹豫、决定、忍住）。',
-  '写他【注意到什么】就等于写他在意什么——同一个场景，让他看见的东西带着他的处境和目的。',
-  '【世道规矩不许由叙述者科普】：不要写“这类人最怕……”“规矩是……”这种说明文口吻；',
-  '要让规矩通过人物的具体遭遇、别人的一句话、或主角吃过的亏带出来。',
-  '【对话要有来回和分寸】：不是两边各扔一句短话；让人物打断、答非所问、留半句不说。潜台词比台词重要。',
-  // ——「别做什么」：原有的反 AI 味硬标准 ——
-  '【节奏】句长短交错、张弛有度，不要句句等长；也不要通篇一句一段——',
-  '短促独立成段是重锤，只在关键处用；连着十几段都是四五个字，就从利落变成了呆板。',
-  '每 250–400 字有一个可见实锚（物件/身体感觉/具体动作/专有名词与数目），但实锚是为人物服务的，不是堆砌清单。',
-  '删解释性套话（“这不是…而是”“这意味着”“换句话说”“总而言之”）与翻译腔现代词（进行/基于/针对/通过…的方式）；',
-  '段尾别总点题升华；严禁为凑字数重复段落或原地绕圈。',
-
-  // ——【悬念结构】：这是"扣不扣得住人"的骨架，不是可选项 ——
-  // AI 写的场景天然倾向"起—承—转—收"然后干净收尾，读者读完松一口气就走了。
-  // 真正让人追更的章节恰恰相反：读完时手里的问题比读之前更多。
-  '【悬念（每章必须做到）】：',
-  '① 开头三行之内就要有【一个悬着的东西】——迫近的威胁、没答上的问题、不对劲的细节。别用天气或回忆开场。',
-  '② 全章要有一条明确的“悬着的线”：他在等什么 / 怕什么 / 瞒什么 / 想拿到什么。读者要能一直感到它。',
-  '③ 章中至少一次【情况比他以为的更糟】的翻转：他算错了、对方早知道、代价比预想的大。',
-  '④ 章末【停在新的不确定上】，不是停在解决和总结上——把一个更大的问号交给读者。',
-  '   收尾不要抒情、不要点题、不要“他知道，从今往后……”这类总结句。停在动作、物件或一句没接的话上。',
-
-  // ——【像真人写】：AI 味最深的一层，不在句子而在"作者的姿态" ——
-  '【像人写，不像 AI 写】：',
-  '· 信息不要给满。该让读者猜的别解释，该让人物瞒的别揭穿；解释一件事的最佳时机永远比你想的晚一点。',
-  '· 人物会误判、会说错话、会做多余的动作。全程精准得体的人物是假人。',
-  '· 该付代价就付：赢了也要有损失（伤、钱、名声、错过的人）。零成本的胜利读者不信。',
-  '· 允许不整齐：一段可以长，一段可以只有一句；某个细节可以埋下不解释；配角可以有跟主线无关的一句闲话。',
-  '· 不要每章都是同一个形状。这一章可以从中间切入，可以只写一场对话，可以在高点戛然而止。',
-].join('');
+// 【已删】STYLE_GUARD —— 一套写死的文风守则（自由间接引语、每 250–400 字一个实锚、
+// 信息不要给满、收尾不要抒情不要点题）。它夹带的是纯文学审美，网文里条条减分，
+// 早已停用且零引用。文风一律来自 voiceprint.voicePrint(book)：本书的范本原文。
 
 // 每章可调的文风倾向。同一本书里，打戏、对峙、日常该偏重的东西完全不同，
 // 用一条通用 STYLE_GUARD 压所有章节，出来的东西必然一个味道。
@@ -501,29 +470,9 @@ function updateIndexRow(book, num, title, rel, onLog = () => {}) {
 // 为什么要机器量而不是靠提示词：模型对"段落要短"这类单向指标必然滑到极端
 // （实测 155 段 / 3307 字，46% 的段落不到 10 字，读起来像机关枪）。
 // 提示词是软约束，尺子才是硬的。最多打回一次，别为了分段来回折腾。
-async function enforceParagraphs({ body, num, title, model, cfg, onLog }) {
-  const h = paragraphHealth(body);
-  if (h.ok) return body;
-  onLog({ level: 'warn', msg: `  段落过碎（${h.paras} 段/平均 ${h.avgLen} 字/${h.tinyPct}% 是单行），打回重排…` });
-  try {
-    const out = await runCowrite(model, reflowInstruction(h, num, title) + '\n\n【正文】\n' + body,
-      cfg, cwTimeout(model, 'chapter'));
-    const re = parseChapters(out, { onLog })[0];
-    if (!re) { onLog({ level: 'warn', msg: '  重排没按格式返回，保留原分段' }); return body; }
-    // 只该动换行——字数掉太多说明它顺手改写了，宁可不要
-    const before = hanziCount(body), after = hanziCount(re.body);
-    if (after < before * 0.9) {
-      onLog({ level: 'warn', msg: `  重排把字改没了（${before}→${after}），保留原分段` });
-      return body;
-    }
-    const h2 = paragraphHealth(re.body);
-    onLog({ level: 'act', msg: `  ✓ 重排完成：${h.paras} 段 → ${h2.paras} 段，平均 ${h.avgLen} → ${h2.avgLen} 字` });
-    return re.body;
-  } catch (e) {
-    onLog({ level: 'warn', msg: '  重排失败，保留原分段：' + (e.message || e) });
-    return body;
-  }
-}
+// 【已删】enforceParagraphs —— 段落闸，把单行段太多判为不合格并打回重排。
+// 判据是反的：作者认可的网文样章有 76% 的短段，会被它整章判废。零调用点，删。
+// 段落密度现在由 pacing.refTargets() 从本书范本量，deslop 也按范本校准。
 
 // 对【已经写好的章】单独重排段落：一个字不改，只并段。
 // 这是个独立能力，不必跟重写绑在一起——存量章节大多只是分得太碎，
@@ -537,7 +486,10 @@ export async function reflowChapter({ book, rel, model, cfg, onLog = () => {} })
   const title = base.replace(/\.txt$/i, '').replace(/^\d{1,4}/, '');
   const original = fs.readFileSync(abs, 'utf8').trim();
 
-  const h = paragraphHealth(original);
+  // 用本书范本当尺子，而不是写死的健康值（见 craft.paragraphHealth 的说明）
+  const rt = refTargets(book.dir);
+  const pref = rt ? { avgPara: rt.avgPara, tinyPct: null } : null;
+  const h = paragraphHealth(original, pref);
   if (h.ok) {
     onLog({ level: 'info', msg: `第 ${num} 章段落已经健康（${h.paras} 段 / 平均 ${h.avgLen} 字），无需重排` });
     return { num, title, rel, changed: false, before: h, after: h };
@@ -552,7 +504,7 @@ export async function reflowChapter({ book, rel, model, cfg, onLog = () => {} })
   const b = hanziCount(original), a = hanziCount(re.body);
   if (a < b * 0.9) throw new Error(`重排时把字改没了（${b} → ${a}），原文未改动。这一步只该动换行，请重试。`);
 
-  const h2 = paragraphHealth(re.body);
+  const h2 = paragraphHealth(re.body, pref);
   try { fs.writeFileSync(abs + '.bak', original, 'utf8'); } catch {}
   fs.writeFileSync(abs, re.body.endsWith('\n') ? re.body : re.body + '\n', 'utf8');
   onLog({ level: 'act', msg: `  ✓ ${h.paras} 段 → ${h2.paras} 段，平均 ${h.avgLen} → ${h2.avgLen} 字（字数 ${b}→${a}，原文已备份 .bak）` });

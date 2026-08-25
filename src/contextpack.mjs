@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { bookStats, currentVolume, chaptersPerVol, plannedTotalChapters } from './books.mjs';
+import { voicePrint } from './voiceprint.mjs';
 
 function readOr(p, fallback = '') { try { return fs.readFileSync(p, 'utf8'); } catch { return fallback; } }
 function clip(s, max) { s = String(s || ''); return s.length > max ? s.slice(0, max) + `\n…（已截断，完整内容见文件，必要时自行读取）` : s; }
@@ -144,8 +145,13 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
   const sections = [];
 
   sections.push(
-    `你是《${book.title}》的网文作者。本目录已有完整写作规范（见 AGENTS.md / CLAUDE.md，务必遵守，` +
-    `尤其【开篇定位】【题材承诺兑现】【节奏与格局】【反 AI 味】四条最高优先级红线）。\n` +
+    // 【改过】原来这里写"尤其【开篇定位】【题材承诺兑现】【节奏与格局】【反 AI 味】四条最高优先级红线"。
+    // 那把 skill.mjs 里那套句子层的写死规则抬成了最高优先级，而下面 voicePrint 又注入范本原文——
+    // 同一个 prompt 里两套标准并排打架，且写死那套排在前面还挂着"最高优先级"。
+    // 文风的最高依据只能有一个：本书的范本。
+    `你是《${book.title}》的网文作者。本目录已有完整写作规范（见 AGENTS.md / CLAUDE.md），` +
+    `其中【连续性】【章名唯一】【字数达标】【题材承诺】务必遵守；` +
+    `【文风】一律以本书 \`style_refs/\` 的范本原文为准（下面已附上）。\n` +
     `现在请【接着往下写第 ${numList[0]}–${numList[numList.length - 1]} 章，共 ${count} 章】。`
   );
 
@@ -179,11 +185,24 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
     names.recent.map(n => '· ' + n).join('\n')
   );
 
+  // 【文风范本原文】——不是"去读 style_refs/"，是把原文放在这里。
+  //
+  // 实测这两者差一个数量级：同一本书、同一个范本，
+  //   共创路把范本原文塞进提示词  → 13.1 字/段（范本 21.5）
+  //   窗口路只在 AGENTS.md 写一句"去读 style_refs/" → 47.7 字/段
+  // agent 确实读了（材料全接住了），但读文件不等于范本在眼前：
+  // 它复述了范本的内容，排版用回自己的默认。
+  //
+  // 所以这里给的是【文本】不是【指路】。这也不是往提示词里加规则——
+  // 规则是我的审美，范本是作者的选择，两者的方向正好相反。
+  const voice = voicePrint(book);
+  if (voice && voice.trim()) sections.push(voice.trim());
+
   sections.push(
     `## 这一批要做的事\n` +
     `1. 写第 ${numList.join('、')} 章。【字数是硬指标】：每章正文目标 ${tgtLo}–${tgtHi} 字，硬下限 ${minChars} 字，任何一章都不得低于下限。` +
     `${last.hanzi && last.hanzi >= tgtLo ? `（上一章约 ${last.hanzi} 字达标，保持这个体量、别忽长忽短，也不要超过 ${tgtHi} 字太多。）` : last.hanzi ? `⚠️（注意：最近几章只有约 ${last.hanzi} 字、明显偏短——从本批起每章都要写足到 ${tgtLo}–${tgtHi} 字，绝不能跟着上一章的短篇幅继续写短。）` : ''}` +
-    ` 别靠概述凑字数——用【更完整的场景、更多有潜台词的对话、更密的实锚细节、人物内心与动作】把篇幅撑到位，宁可多写一个有信息量的小节。\n` +
+    ` 别靠概述凑字数——用【更完整的场景、更多对话、更多具体细节、人物内心与动作】把篇幅撑到位，宁可多写一个有信息量的小节。\n` +
     `   ⚠️ 收尾前【逐章数汉字】：把每章正文的汉字数过一遍，凡不足 ${minChars} 字的章，回去【就地扩写】到 ${tgtLo}–${tgtHi} 字（补场景细节/对话/心理，不改剧情框架与结局），改够了再交——绝不允许提交任何低于 ${minChars} 字的章。\n` +
     `2. 每章严格对齐本卷大纲对应章号的 beat 与章末钩子；推进"人与冲突"，不要写成办手续/对账/盘点的事务流水账。\n` +
     `3. 落盘到 chapters/${volDir}/。【若本卷大纲章号区间已写满、本批进入下一卷】：先给下一卷起一个【有意境的卷名】（4–6字副标题，贴合本卷主线），把它同时写进 ①该卷大纲文件名 outlines/卷${String(volNum + 1).padStart(2, '0')}<卷名>分章大纲.md（如 卷${String(volNum + 1).padStart(2, '0')}静海旧火分章大纲.md）②novel_bible.md 的“全书规模/卷名”处；再建 chapters/卷${String(volNum + 1).padStart(2, '0')}/ 续写。发布番茄按卷名建卷，卷【必须有名】、绝不能只叫“卷${String(volNum + 1).padStart(2, '0')}”。\n` +
@@ -193,7 +212,7 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
     `   ★ 文件顶部若有「📌 当前态快照」段（LEDGER_HISTORY_BELOW 标记以上），必须【就地改写该快照】——把本批带来的人物现状/未回收伏笔/待查/进度/伤势/关键物件的变化【更新进快照本段】（新增线加进去、已回收的移出/标了结、进度改到最新章），保持它精简且始终代表【最新状态】。这是写作唯一会读的一段，绝不能让它过期。\n` +
     `   ★ 详细增量（本批新增时间线/伏笔布点等）另【追加到 LEDGER_HISTORY_BELOW 标记以下】的历史区，不要动历史区已有内容。\n` +
     `   （若文件还没有「📌 当前态快照」段，按旧法在文中维护人物现状/未回收伏笔/欠债/伤势/关键物件/时间线即可。）\n` +
-    `6. 做一次本批自检（字数/命名/唯一/仅正文/与台账连贯/反 AI 味）。\n` +
+    `6. 做一次本批自检（字数/命名/唯一/仅正文/与台账连贯/文风是否贴着范本）。\n` +
     `完成后简要回报：写了哪几章、各多少字、更新了哪些文件。除非我要求，不要在回复里粘贴整章正文。`
   );
 
@@ -203,7 +222,7 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
   const sizes = {
     bible: bible.length, outline: outline.text.length, foreshadow: foreshadow.length,
     ledger: ledger.length, lastTail: last.tail.length, names: names.recent.join('').length,
-    review: review.length, promptChars: prompt.length,
+    review: review.length, voice: voice.length, promptChars: prompt.length,
     estTokens: Math.round(prompt.length / 1.7),   // 中英混排粗估
   };
   const meta = { nextNum, lastNum, count, volNum, volDir, cpv, total, lastChapter: last.num, totalChapters: names.total };

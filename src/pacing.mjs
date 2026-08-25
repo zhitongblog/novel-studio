@@ -96,13 +96,43 @@ function styleMetrics(text) {
   const chars = clean(text).length || 1;
   const nums = (text.match(/[零〇一二两三四五六七八九十百千万]{2,}|\d+(?:\.\d+)?/g) || []).length;
   const ba = sents.filter(s => /[他她我你][^，。]{0,6}把/.test(s)).length;
+  // 段落密度：网文最显眼的一根轴。句子指标看不出它——同样的句子并进一段还是拆成三段，
+  // shortRatio/avgLen 一模一样，读起来天差地别。实测这本书范本 21.5 字/段、写出来 47.7。
+  const paras = String(text).split(/\n+/).map(x => x.trim()).filter(Boolean);
+  const pl = paras.map(x => x.replace(/\s/g, '').length);
   return {
+    avgPara: +(pl.reduce((a, b) => a + b, 0) / (pl.length || 1)).toFixed(1),
     shortRatio: +(short / n).toFixed(3),          // 短句(≤10字)占比
     longRatio: +(long / n).toFixed(3),            // 长句(>25字)占比——太低说明节奏没被拉开
     avgLen: +(lens.reduce((a, b) => a + b, 0) / n).toFixed(1),
     numPer: nums ? Math.round(chars / nums) : 9999,   // 多少字出现一个数目
     baRatio: +(ba / n).toFixed(3),                // 「X把Y…」句式占比
   };
+}
+
+// 从这本书自己的范本量出目标值。
+//
+// 【为什么必须这样】原来 LIM 是我写死的（短句上限 45%、长句下限 8%），
+// 那是一套纯文学审美。作者认可的网文范本短句占 78%——按写死的闸，
+// 范本自己就是"文风机械"，闸会命令模型把它并回长句。
+// 实测代价：这本书挑了 21.5 字/段的范本，闸打回去一条"把相邻的两三个短句
+// 并成一个带从句的长句"，三章写出来 47.7 / 39.6 / 43.9 字/段——比不挂范本还硬。
+//
+// 所以有范本时一律以范本为准：范本怎么写，就是这本书的"对"。
+// 没范本才退回写死的 LIM。
+export function refTargets(bookDir) {
+  let files = [];
+  const dir = path.join(bookDir, 'style_refs');
+  try { files = fs.readdirSync(dir).filter(f => /\.(txt|md)$/i.test(f)); } catch { return null; }
+  if (!files.length) return null;
+  let text = '';
+  for (const f of files) {
+    try { text += fs.readFileSync(path.join(dir, f), 'utf8') + '\n'; } catch {}
+  }
+  if (clean(text).length < 300) return null;   // 太少量不准，不如不锚
+  const m = styleMetrics(text);
+  return { shortRatio: m.shortRatio, longRatio: m.longRatio, avgPara: m.avgPara, avgLen: m.avgLen,
+           numPer: m.numPer, baRatio: m.baRatio };
 }
 
 // 单章体检
@@ -138,6 +168,7 @@ export function inspectChapter(fp, num, std = {}) {
 
 // 扫一段章号区间，出体检结论。lookback：往前多看几章，用来判断「连续」类问题与量级曲线。
 export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {}) {
+  const tgt = refTargets(bookDir);   // 这本书范本量出来的目标值（没范本就是 null）
   const files = chapterFilesInRange(bookDir, Math.max(1, from - lookback), to);
   const all = [];
   for (const { num, path: fp } of files) {
@@ -219,25 +250,36 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
 
   // 4b) 文风机械度——太守规范反而写成模板。阈值按《重生94》实测基线定，留出题材差异的余量。
   const S = std.styleLimits || {};
+  // 有范本 → 阈值从范本量；没范本 → 退回写死的默认值。
+  // 放宽的余量给得比较松（短句 +12 个百分点、长句打 6 折）：闸是拦【明显跑偏】的，
+  // 不是拿范本当标尺去卡每一章，那会把书写成范本的复读机。
+  const RT = tgt || null;
   const LIM = {
-    shortRatio: S.shortRatio ?? 0.45,   // 短句(≤10字)占比上限（实测 0.49 已明显节拍器化）
-    numPer: S.numPer ?? 150,            // 至少多少字才出现一个数目（实测 92，规范本意是 250–400）
-    baRatio: S.baRatio ?? 0.05,         // 「X把Y…」单一句式占比上限（实测 0.063）
-    longRatio: S.longRatio ?? 0.08,     // 长句(>25字)占比下限——低于此说明节奏全程没被拉开
+    // 【改过】原来 shortRatio 用 Math.max(0.45, …)、numPer/baRatio 直接写死——
+    // 等于给范本留了一层开发者的地板：范本短句只占 20% 的书，闸仍按 45% 判，范本失效。
+    // 数目密度和句式扎堆也一样是文风（有的书就爱报数、有的书就爱用「把」字句），
+    // 一律改成有范本时从范本量，没范本才退回写死的默认值。
+    shortRatio: S.shortRatio ?? (RT ? RT.shortRatio + 0.12 : 0.45),
+    numPer: S.numPer ?? (RT && RT.numPer < 9999 ? Math.round(RT.numPer * 0.6) : 150),
+    baRatio: S.baRatio ?? (RT ? RT.baRatio + 0.03 : 0.05),
+    longRatio: S.longRatio ?? (RT ? RT.longRatio * 0.6 : 0.08),
+    avgPara: RT ? RT.avgPara * 1.5 : 0, // 段落密度：只有有范本时才判（0=不判）
   };
-  const bad = { short: [], num: [], ba: [], flat: [] };
+  const bad = { short: [], num: [], ba: [], flat: [], para: [] };
   for (const c of fresh) {
     const m = c.style || {};
     if (m.shortRatio > LIM.shortRatio) bad.short.push(`${c.num}(${Math.round(m.shortRatio * 100)}%)`);
     if (m.numPer < LIM.numPer) bad.num.push(`${c.num}(每${m.numPer}字)`);
     if (m.baRatio > LIM.baRatio) bad.ba.push(`${c.num}(${Math.round(m.baRatio * 100)}%)`);
     if (m.longRatio < LIM.longRatio) bad.flat.push(`${c.num}`);
+    if (LIM.avgPara && m.avgPara > LIM.avgPara) bad.para.push(`${c.num}(${m.avgPara}字/段)`);
   }
   const styleBits = [];
   if (bad.short.length) styleBits.push(`短句(≤10字)过半：${bad.short.join('、')}——一半句子不到十个字，读起来像节拍器`);
   if (bad.num.length) styleBits.push(`数目堆砌：${bad.num.join('、')}——密到读者记不住，实锚就不再是实锚，是账本`);
   if (bad.ba.length) styleBits.push(`「X把Y…」句式扎堆：${bad.ba.join('、')}`);
   if (bad.flat.length) styleBits.push(`全章没有长句把节奏拉开：${bad.flat.join('、')}`);
+  if (bad.para.length) styleBits.push(`段落比本书范本厚得多（范本 ${RT ? RT.avgPara : '?'} 字/段）：${bad.para.join('、')}`);
   // 【关键】给出【这一章具体要改几处】。模型没法在写的时候统计自己的短句占比——
   // 比例类要求靠 prompt 天生无效（实测：把上限写进 skill 后，短句 0.488→0.480、
   // 数目 95→85 字一个、把字句 0.066→0.091，全无改善甚至更差）。必须换算成可执行的条数。
@@ -258,6 +300,12 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
       bits.push(`「把…」动作句约 ${now} 句，**留不超过 3 句**，其余换写法或直接删掉动作`);
     }
     if (m.longRatio < LIM.longRatio) bits.push(`全章几乎没有 25 字以上的长句，**至少补 ${Math.max(2, Math.round(sents * 0.1))} 个**`);
+    if (LIM.avgPara && m.avgPara > LIM.avgPara) {
+      // 拆段是最好修的一条：一个字都不用改，只动换行。
+      const nowP = Math.max(1, Math.round(c.chars / Math.max(1, m.avgPara)));
+      const wantP = Math.max(1, Math.round(c.chars / Math.max(1, RT.avgPara)));
+      bits.push(`段落 ${m.avgPara} 字/段（本书范本 ${RT.avgPara}），现在约 ${nowP} 段，**拆到 ${wantP} 段上下**——只加换行，一个字都不要改`);
+    }
     if (bits.length) todo.push(`  · **第 ${c.num} 章**：` + bits.join('；'));
   }
   if (styleBits.length) {
@@ -272,13 +320,22 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
         todo.join('\n'),
         '',
         '就地改：',
-        '  · **句长真正拉开**：把相邻的两三个短句并成一个带从句的长句，让节奏有起伏；不要靠堆短句制造"不均匀"——那是另一种单调。',
-        '  · **数目大幅删减**：只在【这一笔钱/这个数改变了局面】时报数字，其余一律换成"块把钱""小半麻袋""一沓"。实锚的主力是物件、身体感觉、具体动作，不是每段砸一个数目。',
-        '  · **动作小节拍不要每句都挂**：三句对白最多一句带动作；「把…往…一磕/一撂/一扔」全章不超过三次，其余换写法或干脆不写。',
-        '  · **别每章开头都报"某月某日礼拜几下午几点，某地"**——那是场景切换的写法，不是章节开头的公式。',
+        // 【实测教训】这几条原来是【无条件】拼上去的：任何一项指标出问题，四条全发。
+        // 结果第 1 章只是数目太密，却收到一条"把相邻的两三个短句并成一个带从句的长句"，
+        // 而它的短句占比是 25%（上限 45%）——闸转头把范本刚拉短的节奏并了回去，
+        // 三章写出 47.7/39.6/43.9 字/段，比不挂范本还硬。所以只发真正触发的那条。
+        ...(bad.short.length || bad.flat.length
+          ? ['  · **句长真正拉开**：把相邻的两三个短句并成一个带从句的长句，让节奏有起伏；不要靠堆短句制造"不均匀"——那是另一种单调。'] : []),
+        ...(bad.para.length
+          ? ['  · **段落拆开**：向本书 `style_refs/` 里范本的换行密度看齐。同一个动作序列可以拆成几段，转折、要害、情绪落点单句成段。**只动换行，一个字不改。**'] : []),
+        ...(bad.num.length
+          ? ['  · **数目大幅删减**：只在【这一笔钱/这个数改变了局面】时报数字，其余一律换成"块把钱""小半麻袋""一沓"。实锚的主力是物件、身体感觉、具体动作，不是每段砸一个数目。'] : []),
+        ...(bad.ba.length
+          ? ['  · **动作小节拍不要每句都挂**：三句对白最多一句带动作；「把…往…一磕/一撂/一扔」全章不超过三次，其余换写法或干脆不写。'] : []),
         '',
+        RT ? '本书文风以 `style_refs/` 里的范本原文为准。上面这些只是量出来的偏差，**改的方向一律向范本看齐**，不要向这几行字看齐。' : '',
         '改完不要重写情节、不要改章名、不要动人物和台词的意思，只调语言。',
-      ].join('\n'),
+      ].filter(Boolean).join('\n'),
     });
   }
 
@@ -326,7 +383,7 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
     });
   }
 
-  return { chapters: fresh, all, issues };
+  return { chapters: fresh, all, issues, targets: tgt };
 }
 
 // 把体检结论写成给模型的「退回自纠」指令。无 error 级问题时返回 null（不打扰）。
@@ -342,11 +399,17 @@ export function writePacingReport(bookDir, scan, tag = '') {
   const dir = path.join(bookDir, 'reviews');
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   const lines = ['# 节奏体检' + (tag ? `（${tag}）` : ''), '',
-    '| 章 | 字数 | 流程主线 | 最大钱数 | 钩子 | 短句占比 | 几字一个数 | 均句长 |',
-    '|---|---|---|---|---|---|---|---|'];
+    '| 章 | 字数 | 流程主线 | 最大钱数 | 钩子 | 短句占比 | 几字一个数 | 均句长 | 字/段 |',
+    '|---|---|---|---|---|---|---|---|---|'];
   for (const c of scan.chapters) {
     const m = c.style || {};
-    lines.push(`| ${c.num}${c.title} | ${c.chars} | ${c.paperwork ? '是' : ''} | ${c.money || ''} | ${c.hookOk ? 'ok' : '假钩子'} | ${Math.round((m.shortRatio || 0) * 100)}% | ${m.numPer || ''} | ${m.avgLen || ''} |`);
+    lines.push(`| ${c.num}${c.title} | ${c.chars} | ${c.paperwork ? '是' : ''} | ${c.money || ''} | ${c.hookOk ? 'ok' : '假钩子'} | ${Math.round((m.shortRatio || 0) * 100)}% | ${m.numPer || ''} | ${m.avgLen || ''} | ${m.avgPara || ''} |`);
+  }
+  if (scan.targets) {
+    lines.push('', `> 阈值锚在本书范本上：短句 ${Math.round(scan.targets.shortRatio * 100)}%、长句 ${Math.round(scan.targets.longRatio * 100)}%、${scan.targets.avgPara} 字/段。`
+      + '判的是「有没有明显跑偏」，不是「像不像范本」。');
+  } else {
+    lines.push('', '> 本书没挂范本，阈值用的是写死的默认值。挂一段范本会更准——闸会改成按范本判。');
   }
   lines.push('', '## 结论', '');
   if (!scan.issues.length) lines.push('全部通过。');
