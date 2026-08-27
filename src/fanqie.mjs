@@ -528,6 +528,18 @@ class UnzooClient {
 
 // ===== FanqiePublisher 发布器类（从 publisher.ts 搬过来）=====
 // 适配：构造函数注入 client（已带 profilePath/onLog）；log() 转发到 onLog。
+// 章节表「翻页后到底算不算渲染完」的判据（纯函数，便于单测）。
+//   state  : 从页面读回的 { currentPage, sig, hasRows, empty }
+//   prevPage/prevSig: 翻页【之前】那一页的页码与行签名（首次加载传 null）
+// ⚠️两个条件缺一不可：页码变了 + 行内容(sig)真的换了。只看页码会读到上一页的残留行——
+// 实测番茄点"下一页"后页码立即变、表格数据 400~800ms 后才换，这段窗口里 hasRows 一直为真。
+export function chapterRowsReady(state, { prevPage = null, prevSig = null } = {}) {
+  if (!state) return false;
+  const paged = prevPage == null || state.currentPage !== prevPage;
+  const swapped = prevSig == null || state.sig !== prevSig;
+  return !!(paged && swapped && (state.hasRows || state.empty));
+}
+
 class FanqiePublisher {
   constructor(client) {
     this.client = client || new UnzooClient();
@@ -625,11 +637,23 @@ class FanqiePublisher {
   // 切卷不再点下拉框，改为直接导航到 chapter-manage/<bookId>&<卷序号>（见 gotoVolumePage）——
   // 番茄章节管理页的卷下拉选择器几经改版且要等 Arco Portal 挂载，导航稳得多。
 
+  // 章节表【行内容】的指纹：条数 + 前三个章号。翻页判据必须用它，不能只看页码——见 waitChapterRows。
+  static ROW_SIG_JS = `(function(){
+    var tt = document.body ? document.body.innerText : '';
+    var g = /第\\s*(\\d+)\\s*章(?![0-9])/g, mm, ns = [];
+    while ((mm = g.exec(tt)) !== null) ns.push(mm[1]);
+    return ns.length + ':' + ns.slice(0, 3).join(',');
+  })()`;
+
   // 等章节表【真正渲染出数据行】再读——番茄后台是 SPA，异步渲染。
   // 原来靠固定 sleep(1500)，表格没渲染完就 evaluate → 读成"没有这一章"(假 notFound) → 连续3次就停。
   // 与 getFanqieMaxChapter 的读取路径同一套硬化：轮询到【确定结果】(有真数据行 / 明确空态 / 硬失败)才停。
-  // prevPage 非空时还要求页码已经翻过去，避免读到上一页的残留行。
-  async waitChapterRows({ prevPage = null, maxMs = 15000 } = {}) {
+  // prevPage 非空时还要求页码已经翻过去；prevSig 非空时还要求【行内容真的换了】。
+  // ⚠️【只看页码是不够的】——实测番茄点"下一页"后页码立刻变、表格数据 400~800ms 后才换，
+  // 这段窗口里 hasRows 一直为真（旧行还在），于是判成"已翻页渲染完"→ 读的是上一页的 15 行。
+  // 后果：整轮遍历错位一页，【最后一页的章永远找不到】→ 连续3次 notFound → 编辑模式停。
+  // 《重生美利坚》第1章在第5页（列表按章号倒序），就是这样"找不到章节"的。
+  async waitChapterRows({ prevPage = null, prevSig = null, maxMs = 15000 } = {}) {
     const probe = `
       (function(){
         var text = document.body ? document.body.innerText : '';
@@ -640,7 +664,8 @@ class FanqiePublisher {
         var currentPage = active ? (parseInt(active.textContent) || 1) : 1;
         var login = /\\/login|passport/.test(location.href) || text.indexOf('扫码登录') >= 0;
         var err = ['ERR_', 'net::', '未连接到互联网', '代理服务器', '无法访问此网站'].some(function(s){ return text.indexOf(s) >= 0; });
-        return { hasRows: hasRows, empty: empty, currentPage: currentPage, login: login, err: err };
+        var sig = ${FanqiePublisher.ROW_SIG_JS};
+        return { hasRows: hasRows, empty: empty, currentPage: currentPage, sig: sig, login: login, err: err };
       })()
     `;
     const deadline = Date.now() + maxMs;
@@ -649,8 +674,7 @@ class FanqiePublisher {
       last = await this.client.evaluate(probe);
       if (last) {
         if (last.login || last.err) return { ...last, ready: false, fatal: true };
-        const paged = prevPage == null || last.currentPage !== prevPage;
-        if (paged && (last.hasRows || last.empty)) return { ...last, ready: true };
+        if (chapterRowsReady(last, { prevPage, prevSig })) return { ...last, ready: true };
       }
       await this.client.sleep(400);
     }
@@ -686,7 +710,8 @@ class FanqiePublisher {
         var next = document.querySelector('.arco-pagination-item-next');
         var cls = next ? (next.className || '') : '';
         var hasNext = !!next && cls.indexOf('disabled') < 0 && next.getAttribute('aria-disabled') !== 'true';
-        return { found: false, currentPage: currentPage, hasNext: hasNext };
+        var sig = ${FanqiePublisher.ROW_SIG_JS};
+        return { found: false, currentPage: currentPage, hasNext: hasNext, sig: sig };
       })()
     `;
 
@@ -708,7 +733,8 @@ class FanqiePublisher {
         for (const item of items) { if ((item.textContent || '').trim() === '1') return item; }
         return null;
       `);
-      if (jumped) await this.waitChapterRows({ prevPage: prev, maxMs: 12000 });
+      // 20s 不是保守：实测番茄换页数据慢起来要十几秒，等不够就会误判"没这一章"。
+      if (jumped) await this.waitChapterRows({ prevPage: prev, prevSig: r?.sig || null, maxMs: 20000 });
     }
 
     const HARD_MAX_PAGES = 300;   // 防御性上限，正常靠"下一页不可用"退出
@@ -717,7 +743,7 @@ class FanqiePublisher {
       if (r?.found) { this.log(`✅ 在第 ${r.currentPage || page} 页找到 ${targetPattern}`); return { success: true }; }
       if (!r?.hasNext) { this.log(`本卷共 ${r?.currentPage || page} 页，没有 ${targetPattern}`); break; }
 
-      const prev = r.currentPage;
+      const prev = r.currentPage, prevSig = r.sig || null;
       const navClicked = await this.client.clickByLocator(`
         const next = document.querySelector('.arco-pagination-item-next');
         if (!next) return null;
@@ -727,9 +753,10 @@ class FanqiePublisher {
       `);
       if (!navClicked) { this.log('⚠️ 无法翻到下一页'); break; }
 
-      const after = await this.waitChapterRows({ prevPage: prev, maxMs: 12000 });
+      const after = await this.waitChapterRows({ prevPage: prev, prevSig, maxMs: 20000 });
       if (after.fatal) return { success: false, fatal: true, message: after.login ? '番茄需要登录' : '番茄页面加载失败' };
-      if (!after.ready) { this.log('⚠️ 翻页后列表未渲染完，停止本卷查找'); break; }
+      // 等不到"行真的换了"就【停下报错】，绝不拿上一页的内容当这一页读——那正是漏掉末页章的老病根。
+      if (!after.ready) { this.log('⚠️ 翻页后列表未换新（等 12s 仍是上一页的行），停止本卷查找'); break; }
     }
 
     return { success: false };
@@ -2227,7 +2254,8 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
         const htmlAll = document.documentElement ? document.documentElement.innerHTML : '';
         const belongsToBook = !wantId ? true : (url.indexOf(wantId) >= 0 && (htmlAll.indexOf(wantId) >= 0 || emptyState));
         const valid = onDomain && !errorPage && !loginPage && belongsToBook && (max > 0 || hasManageChrome || emptyState);
-        return { max, maxRowDate, currentPage, totalPages, valid, belongsToBook, errorPage, loginPage, onDomain, hasArco, hasManageChrome, emptyState, bodyLen: text.length, head: text.slice(0, 80) };
+        const sig = ${FanqiePublisher.ROW_SIG_JS};
+        return { max, maxRowDate, currentPage, totalPages, sig, valid, belongsToBook, errorPage, loginPage, onDomain, hasArco, hasManageChrome, emptyState, bodyLen: text.length, head: text.slice(0, 80) };
       })()
     `;
 
@@ -2260,6 +2288,7 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
       const r0 = await client.evaluate(readPage);
       if (!r0) return { max: 0, latestDate: '', approx: true };
       let max = r0.max || 0, latestDate = r0.maxRowDate || '', approx = false;
+      let lastSig = r0.sig || '';   // 逐次跳页要跟【上一次读到的那页】比，不能一直跟最初那页比
       const totalPages = r0.totalPages || 1;
       if (totalPages > 1) {
         const targets = [1, totalPages].filter((v, i, a) => a.indexOf(v) === i && v !== (r0.currentPage || 1));
@@ -2271,8 +2300,16 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
             return null;
           `);
           if (!jumped) { approx = true; continue; }
-          await client.sleep(1000);
-          const r = await client.evaluate(readPage);
+          // 等【行内容真的换了】再读：只 sleep 固定时长会读到上一页的残留行（见 waitChapterRows 注释）。
+          const prevSig = lastSig, waitUntil = Date.now() + 8000;
+          let r = null;
+          while (Date.now() < waitUntil) {
+            r = await client.evaluate(readPage);
+            if (r && r.sig && r.sig !== prevSig) break;
+            await client.sleep(400);
+          }
+          if (!r || !r.sig || r.sig === prevSig) approx = true;   // 没等到换页数据 → 标近似，不硬当准
+          else lastSig = r.sig;
           if (r && r.max > max) max = r.max;
           if (r && r.maxRowDate && (!latestDate || Date.parse(r.maxRowDate.replace(' ', 'T')) > Date.parse(latestDate.replace(' ', 'T')))) latestDate = r.maxRowDate;
         }
