@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { bookStats, currentVolume, chaptersPerVol, plannedTotalChapters } from './books.mjs';
 import { voicePrint } from './voiceprint.mjs';
+import { hasStructure, splitLedger } from './ledgersnap.mjs';
 
 function readOr(p, fallback = '') { try { return fs.readFileSync(p, 'utf8'); } catch { return fallback; } }
 function clip(s, max) { s = String(s || ''); return s.length > max ? s.slice(0, max) + `\n…（已截断，完整内容见文件，必要时自行读取）` : s; }
@@ -17,18 +18,30 @@ function clip(s, max) { s = String(s || ''); return s.length > max ? s.slice(0, 
 // 台账取用：新台账把合并出的【当前态快照】放在文件最前，并以 LEDGER_HISTORY_BELOW 标记与下方历史原文分隔。
 // 检测到该结构就【整段喂快照】（无论长短，含尾部命名红线全带上），下方几十上百 KB 的历史原文不喂
 // （模型需要某条来龙去脉时自行读文件）——这既治了 clip(前8000字)只读到早期陈旧状态的病根，又不膨胀上下文。
-// 旧式纯 append 台账（无快照结构）回退到取前 maxChars 字。
+// 旧式纯 append 台账（无快照结构）回退到取【尾部】maxChars 字——不是头部。见下方回退分支的注释。
 function ledgerForPack(raw, maxChars = 8000) {
   const s = String(raw || '');
-  const mk = s.indexOf('LEDGER_HISTORY_BELOW');
-  if (mk >= 0 && s.includes('📌 当前态快照')) {
-    const eol = s.indexOf('\n', mk);
-    const head = eol >= 0 ? s.slice(0, eol + 1) : s;
+  // 结构检测统一走 ledgersnap（生产端），不在这里自己再实现一遍——
+  // 这两处判据一旦分叉，就会出现"生产端认为没建、消费端认为建好了"这种谁也查不出来的错位。
+  if (hasStructure(s)) {
+    const head = splitLedger(s).snapshot;
     // 安全阀：快照异常膨胀时仍设个上限（是常规 clip 的 2 倍，够放完整快照又防失控）
     const cap = maxChars * 2;
-    return head.length > cap ? head.slice(0, cap) + '\n…（快照过长已截断，完整见文件）' : head;
+    return { text: head.length > cap ? head.slice(0, cap) + '\n…（快照过长已截断，完整见文件）' : head, stale: false };
   }
-  return clip(s, maxChars);
+  // 【回退路径 / 兜底，不是正解】——这条路径上台账是纯 append 攒出来的，最新状态永远在文件【末尾】。
+  // 原来这里取的是前 maxChars 字，等于每批都把开篇时的旧账当成"当前剧情状态权威快照"喂进去：
+  // 实测重生东京台账 325 KB、只喂到前 2.5%，292 章的书一直照着开头几章的状态在写。
+  // 取尾部至少保证喂的是最近发生的事。真正的解是 ledgersnap.ensureStructure() 把快照结构补出来，
+  // 所以这里同时把 stale 标出去——让调用方能看见降级，不再静默。
+  if (s.length > maxChars) {
+    return {
+      text: `⚠️ 本书台账尚未建立「📌 当前态快照」，下面是台账的【最后 ${maxChars} 字符】` +
+        `（更早的内容未喂入；需要某条来龙去脉时自行读 continuity_ledger.md）：\n…\n` + s.slice(-maxChars),
+      stale: true,
+    };
+  }
+  return { text: s, stale: false };
 }
 
 // 找当前卷的分章大纲文件：outlines/卷NN*.md（NN = 当前卷号）。找不到则退回任意一份/空。
@@ -133,7 +146,8 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
   const bible = clip(readOr(path.join(book.dir, 'novel_bible.md')), 8000);
   const outline = currentOutline(book, volNum);
   const foreshadow = foreshadowTable(book);
-  const ledger = ledgerForPack(readOr(path.join(book.dir, 'continuity_ledger.md')), 8000);
+  const ledgerPack = ledgerForPack(readOr(path.join(book.dir, 'continuity_ledger.md')), 8000);
+  const ledger = ledgerPack.text;
   const last = lastChapterTail(book);
   const names = recentChapterNames(book);
   const review = latestReviewDigest(book);
@@ -169,7 +183,11 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
 
   if (foreshadow) sections.push(`## 全书主线伏笔表\n${clip(foreshadow, 3000)}`);
 
-  sections.push(`## 连贯性台账（continuity_ledger.md，这是当前剧情状态的权威快照）\n${ledger}`);
+  sections.push(
+    ledgerPack.stale
+      ? `## 连贯性台账（continuity_ledger.md ——⚠️ 本书尚未建立当前态快照，下面只是台账尾部节选，不保证覆盖全部当前状态）\n${ledger}`
+      : `## 连贯性台账（continuity_ledger.md，这是当前剧情状态的权威快照）\n${ledger}`
+  );
 
   if (review) sections.push(`## 最近一份自检里的未决项（顺手带着，别漏）\n${review}`);
 
@@ -209,9 +227,11 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
     `   文件名 = 3 位全局章号 + 唯一章名，例如 ${numList[0]}章名.txt；内容【仅正文】，不含标题行/卷名/注释/markdown。\n` +
     `4. 取章名前在 chapter_index.md 全表查重，确保全书唯一；写完把新章登记进 chapter_index.md。\n` +
     `5. 写完更新 continuity_ledger.md：\n` +
-    `   ★ 文件顶部若有「📌 当前态快照」段（LEDGER_HISTORY_BELOW 标记以上），必须【就地改写该快照】——把本批带来的人物现状/未回收伏笔/待查/进度/伤势/关键物件的变化【更新进快照本段】（新增线加进去、已回收的移出/标了结、进度改到最新章），保持它精简且始终代表【最新状态】。这是写作唯一会读的一段，绝不能让它过期。\n` +
+    `   ★ 文件顶部的「📌 当前态快照」段（LEDGER_HISTORY_BELOW 标记以上）必须【就地改写】——把本批带来的人物现状/未回收伏笔/待查/伤势/关键物件的变化【更新进快照本段】（新增线加进去、已回收的移出/标了结），保持它精简且始终代表【最新状态】。\n` +
+    `     ⚠️ 这是【下一批写作唯一会被读进上下文的一段】，历史区不会喂给你的下一批。快照过期 = 后面每一章都在照着旧状态写。\n` +
+    `     ⚠️ 其中「- 进度：已写到第 NNN 章」这一行【格式不能改】（程序要读它做校验），本批写完请改成「- 进度：已写到第 ${String(lastNum).padStart(3, '0')} 章」。\n` +
     `   ★ 详细增量（本批新增时间线/伏笔布点等）另【追加到 LEDGER_HISTORY_BELOW 标记以下】的历史区，不要动历史区已有内容。\n` +
-    `   （若文件还没有「📌 当前态快照」段，按旧法在文中维护人物现状/未回收伏笔/欠债/伤势/关键物件/时间线即可。）\n` +
+    `   ★ 万一本文件还没有「📌 当前态快照」段与 LEDGER_HISTORY_BELOW 标记行（正常情况下程序已铺好），请【先把这个结构建出来】：顶部建快照段（含上述进度行），标记行以下放原有内容。不要跳过、不要退回旧写法。\n` +
     `6. 做一次本批自检（字数/命名/唯一/仅正文/与台账连贯/文风是否贴着范本）。\n` +
     `完成后简要回报：写了哪几章、各多少字、更新了哪些文件。除非我要求，不要在回复里粘贴整章正文。`
   );
@@ -221,7 +241,7 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
   // 体积统计（用于 dry-run 展示与 token 估算）
   const sizes = {
     bible: bible.length, outline: outline.text.length, foreshadow: foreshadow.length,
-    ledger: ledger.length, lastTail: last.tail.length, names: names.recent.join('').length,
+    ledger: ledger.length, ledgerStale: ledgerPack.stale, lastTail: last.tail.length, names: names.recent.join('').length,
     review: review.length, voice: voice.length, promptChars: prompt.length,
     estTokens: Math.round(prompt.length / 1.7),   // 中英混排粗估
   };

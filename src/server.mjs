@@ -1235,9 +1235,14 @@ async function api(p, req, res, u) {
         // profilePath 优先取 body，其次 book.publish.profilePath
         const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
         if (!profilePath) return json(res, 400, { error: '缺少 profilePath（需绑定已登录该聊天站点的 Unzoo 账号）' });
+        const busyWeb = writingBusy(book.slug);
+        if (busyWeb) return json(res, 409, { error: busyWeb + '，不能同时开始写作' });
+        // 后台任务（不 await）也要登记运行态，否则共创那边查不到它、照样能并发写章。
+        rtOf(book.slug).bgWrite = { kind: 'web', t: Date.now() };
         runWebWrite({ book, adapterId, batches, profilePath, cfg, onLog: (e) => pushLog(book.slug, { ...e, source: 'web' }) })
           .then(r => pushLog(book.slug, { level: 'act', source: 'web', msg: `网页版写作结束：共 ${r.batches || 0} 批、新增 ${r.totalWrote || 0} 章` }))
-          .catch(e => pushLog(book.slug, { level: 'error', source: 'web', msg: '网页版写作异常：' + e.message }));
+          .catch(e => pushLog(book.slug, { level: 'error', source: 'web', msg: '网页版写作异常：' + e.message }))
+          .finally(() => { rtOf(book.slug).bgWrite = null; });
         return json(res, 200, { ok: true, started: true, adapterId, batches });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -1255,9 +1260,13 @@ async function api(p, req, res, u) {
           return json(res, 400, { error: `未配置 ${nm} 的 API Key。请在「设置 · API 模型」里填入后再写。` });
         }
         const batches = Math.max(1, Number(body.batches) || 1);
+        const busyApi = writingBusy(book.slug);
+        if (busyApi) return json(res, 409, { error: busyApi + '，不能同时开始写作' });
+        rtOf(book.slug).bgWrite = { kind: 'api', t: Date.now() };
         runApiWrite({ book, provider, batches, cfg, onLog: (e) => pushLog(book.slug, { ...e, source: 'api' }) })
           .then(r => pushLog(book.slug, { level: 'act', source: 'api', msg: `API 写作结束：共 ${r.batches || 0} 批、新增 ${r.totalWrote || 0} 章` }))
-          .catch(e => pushLog(book.slug, { level: 'error', source: 'api', msg: 'API 写作异常：' + e.message }));
+          .catch(e => pushLog(book.slug, { level: 'error', source: 'api', msg: 'API 写作异常：' + e.message }))
+          .finally(() => { rtOf(book.slug).bgWrite = null; });
         return json(res, 200, { ok: true, started: true, provider, batches });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -1443,13 +1452,18 @@ async function api(p, req, res, u) {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
         const model = body.model || book.model || cfg.defaultModel;
         if (!isCowriteModel(model)) return json(res, 400, { error: '共创模式请用 claude 或 codex（也可 gemini/qwen），或任一 API 模型（含本地 Ollama）。当前模型：' + model });
+        const busy = writingBusy(book.slug);
+        if (busy) return json(res, 409, { error: busy + '——两边会抢同一个章号、互相覆盖。请先点「停止」，等它停下来再共创。' });
         // API/本地模型开不了可见窗口 → 走无头模式：同样按作者要求写这一章并落盘，只是没有实时窗口。
         const writeOne = isCowriteWindowModel(model) ? writeChapterInWindow : writeChapterFromIntent;
-        const r = await writeOne({
-          book, model, intent: body.intent, useLastEnding: body.useLastEnding !== false, redoLast: !!body.redoLast, romance: body.romance || null, cfg,
-          onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
-        });
-        return json(res, 200, { ok: true, ...r });
+        rtOf(book.slug).cowriteRun = { kind: 'chapter', t: Date.now() };
+        try {
+          const r = await writeOne({
+            book, model, intent: body.intent, useLastEnding: body.useLastEnding !== false, redoLast: !!body.redoLast, romance: body.romance || null, cfg,
+            onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
+          });
+          return json(res, 200, { ok: true, ...r });
+        } finally { rtOf(book.slug).cowriteRun = null; }
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/cowrite-batch') {   // 探索式·按作者这一段情节连写：AI 自拆 3–5 章并逐章落盘
@@ -1457,11 +1471,16 @@ async function api(p, req, res, u) {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
         const model = body.model || book.model || cfg.defaultModel;
         if (!isCowriteModel(model)) return json(res, 400, { error: '请用 claude 或 codex（也可 gemini/qwen）。当前模型：' + model });
-        const r = await writeChaptersFromPlot({
-          book, model, plot: body.plot, useLastEnding: body.useLastEnding !== false, romance: body.romance || null, cfg,
-          onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
-        });
-        return json(res, 200, { ok: true, ...r });
+        const busy = writingBusy(book.slug);
+        if (busy) return json(res, 409, { error: busy + '——两边会抢同一个章号、互相覆盖。请先点「停止」，等它停下来再共创。' });
+        rtOf(book.slug).cowriteRun = { kind: 'batch', t: Date.now() };
+        try {
+          const r = await writeChaptersFromPlot({
+            book, model, plot: body.plot, useLastEnding: body.useLastEnding !== false, romance: body.romance || null, cfg,
+            onLog: (e) => pushLog(book.slug, { ...e, source: 'cowrite' }),
+          });
+          return json(res, 200, { ok: true, ...r });
+        } finally { rtOf(book.slug).cowriteRun = null; }
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/republish') {   // 重发修正：编辑替换 from..to 章（修发错内容）。limit 可只改前 N 章
@@ -1559,7 +1578,9 @@ async function api(p, req, res, u) {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
         const slug = book.slug;
         if (sessionLive(slug)) return json(res, 409, { error: '该书已有长驻写作窗口在跑，请先停止再用无状态模式（两种模式不要同时跑）' });
-        if (rtOf(slug).statelessRun && !rtOf(slug).statelessRun.stopped) return json(res, 409, { error: '无状态写作已在进行中' });
+        // 原来只查自己这条路径（statelessRun），共创在跑时照样能启动 → 两边抢章号。改用统一判据。
+        const busyNow = writingBusy(slug);
+        if (busyNow) return json(res, 409, { error: busyNow + '，不能同时开始写作' });
         const model = body.model || book.model || cfg.defaultModel;
         if (body.model) { try { setBookModel(slug, body.model); } catch {} }
         if (body.participation != null) { try { setParticipation(slug, body.participation); } catch {} }
@@ -1678,6 +1699,25 @@ function sessionLive(slug) {
   const sess = getSession(slug);
   return !!(sess && instanceIds().has(sess.instanceId));
 }
+
+// 这本书当前有没有【正在写正文】的活儿在跑？返回空串=空闲，否则返回一句人话说明。
+//
+// 为什么必须有这个：三条写作路径都按「当前最高章号 +1」取号并往 chapters/ 落盘，
+// 同时跑两条就会【抢同一个章号、互相覆盖】，台账和索引也会各写各的。
+// 无状态写作自己早有互斥（startStatelessRun 前查 statelessRun），长驻窗口有 autopilot 看着，
+// 唯独【共创】三个端点一道守卫都没有——用户可以在自动写作跑着的时候直接开共创写章。
+// 这里把三条路径的运行态收成一个判据，两边都用它，避免各查各的再次漏掉某一条。
+//
+// 长驻这条只认 autopilot.running，不认 sessionLive：窗口开着但没在自动续写（用户只是开着看）
+// 不该拦住共创——那是共创最自然的用法。
+function writingBusy(slug) {
+  const st = rtOf(slug);
+  if (st.statelessRun && !st.statelessRun.stopped) return '这本书的「放手让它写」正在跑';
+  if (st.cowriteRun) return '这本书的共创正在写（上一段情节还没写完）';
+  if (st.bgWrite) return `这本书的${st.bgWrite.kind === 'web' ? '网页版' : 'API'}写作正在跑`;
+  if (st.session?.autopilot?.running) return '这本书的长驻写作窗口正在自动续写';
+  return '';
+}
 // 确保本进程在监控这本书：窗口活着但没人 autopilot（如另起进程/重启后）就重新挂上，保证插完指令还能自动续。
 async function ensureAutopilot(slug, cfg) {
   const st = rt.get(slug);
@@ -1723,6 +1763,9 @@ async function resumeWriting(slug, cfg, extraTask = '', model = null) {
 async function doWrite(body, cfg, res) {
   const book = getBook(body.book);
   if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+  // 长驻续写：此刻 autopilot 还没起来，writingBusy 认不出"自己"，但认得出共创/无状态/后台写作在跑。
+  const busyDo = writingBusy(book.slug);
+  if (busyDo) return json(res, 409, { error: busyDo + '，不能同时开始写作' });
   const model = body.model || book.model || cfg.defaultModel;
   // 带了模型就持久化（卡片/下次默认值/resume 全跟上）
   if (body.model) { try { setBookModel(book.slug, body.model); } catch {} }

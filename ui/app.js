@@ -703,6 +703,7 @@ function pbFill(book) {
   $('#pbTime').value = pc.scheduledTime || '';
   $('#pbMatchVol').checked = !!pc.matchVolumes;
   $('#pbSyncRw').checked = !!pc.syncRewrites;
+  $('#pbRwLimit').value = Number.isFinite(Number(pc.rewriteSyncLimit)) ? Number(pc.rewriteSyncLimit) : 3;
   $('#pbAuto').checked = !!pc.autoPublish;
   $('#pbUseAI').checked = !!pc.useAI;
 }
@@ -840,6 +841,7 @@ function pbCfg() {
     scheduledTime: $('#pbTime').value.trim(),
     matchVolumes: $('#pbMatchVol').checked,
     syncRewrites: $('#pbSyncRw').checked,
+    rewriteSyncLimit: Math.max(0, Number($('#pbRwLimit').value) || 3),
     autoPublish: $('#pbAuto').checked,
     useAI: $('#pbUseAI').checked,
   };
@@ -984,6 +986,7 @@ $('#pbPreview').addEventListener('click', async () => {
     // 预览要驱动浏览器读番茄（多卷书还要逐卷扫最大章号），常需 60s+；给足 150s，别让"读得慢"被当超时、
     // 导致预览其实成功了、发布按钮却没亮（用户看到"预览之后没有发布按钮"）。
     const r = await pbRace(api('/api/book/publish-preview', 'POST', { book: CUR.slug }), 150000, '预览番茄超时（读取番茄太慢，请重试或检查网络/代理）');
+    PB_PREVIEW = { slug: CUR.slug, data: r };   // 供 pbPublish 判断是否要弹「覆盖已发布章」二次确认
     const out = $('#pbPreviewOut'); out.style.display = '';
     if (r.blocked) {
       out.textContent = `⛔ 无法确认番茄当前章号，已阻止发布：\n${r.reason}\n\n请确认该 Unzoo 账号的浏览器能正常打开番茄章节管理页（检查代理/网络/登录），再重新预览。`;
@@ -992,8 +995,12 @@ $('#pbPreview').addEventListener('click', async () => {
     }
     let rw = '';
     if (r.rewrittenCount > 0) {
-      rw = `\n⟳ 检测到 ${r.rewrittenCount} 个重写章（第 ${(r.rewrittenNums || []).join('、')}${r.rewrittenCount > 8 ? '…' : ''} 章）` +
+      const rwNums = r.rewrittenNums || [];
+      rw = `\n⟳ 检测到 ${r.rewrittenCount} 个重写章（第 ${rwNums.slice(0, 8).join('、')}${rwNums.length > 8 ? '…' : ''} 章）` +
         (r.syncRewrites ? '，发布时将 edit 覆盖同步。' : '，未开「同步重写章」，本次不动它们。');
+      if (r.syncRewrites && r.rewrittenCount > pbRwLimitOf(r)) {
+        rw += `\n⚠️ 超过「覆盖确认阈值」(${pbRwLimitOf(r)} 章)：点发布会先弹一次确认，确认后才覆盖线上。`;
+      }
     }
     // 多卷映射预览
     let vol = '';
@@ -1025,6 +1032,7 @@ $('#pbPreview').addEventListener('click', async () => {
   } catch (e) { $('#pbErr').textContent = '预览失败：' + e.message; }
   finally { stopTick(); btn.disabled = false; btn.textContent = old; }
 });
+let PB_PREVIEW = null;     // 最近一次「预览将发」的结果 {slug,data}：发布时据此决定要不要覆盖确认
 let PB_STREAM = null;      // 发布进度的 SSE（弹窗内实时滚日志）
 let PB_STREAM_SLUG = null; // 当前 SSE 属于哪本书（用于弹窗重开时判断是否已挂着）
 function pbCloseStream() { if (PB_STREAM) { try { PB_STREAM.close(); } catch {} PB_STREAM = null; PB_STREAM_SLUG = null; } }
@@ -1077,14 +1085,31 @@ function pbAttachStream(slug, header) {
   });
   PB_STREAM.onerror = () => {};
 }
+// 覆盖阈值以【预览回传的那个数】为准——服务端拿它拦，UI 就得拿同一个数判断要不要先问一句。
+function pbRwLimitOf(pv) {
+  const n = Number(pv && pv.rewriteSyncLimit);
+  return Number.isFinite(n) && n >= 0 ? n : 3;
+}
 async function pbPublish(limit) {
   $('#pbErr').textContent = '';
   const warn = limit ? `【联调】只发第一个新章到番茄真实账号《${CUR.title}》，确认？` : `把全部新章发布到番茄真实账号《${CUR.title}》。建卷不可逆、发错改不了，确认配置无误？`;
   if (!confirm(warn)) return;
+  // 覆盖线上已发布章不可逆（读者已经看过）。服务端超阈值会中止并要一个明确放行，这道确认就是那个放行：
+  // 把要覆盖的章号摆出来，作者点头才带 confirmRewrites 发。
+  // 【别删】没有它，「同步 N 个重写章」按钮点了必被服务端拦死，UI 再无别的路可走。
+  let confirmRewrites = false;
+  const pv = PB_PREVIEW && PB_PREVIEW.slug === CUR.slug ? PB_PREVIEW.data : null;
+  if (!limit && pv && pv.syncRewrites && pv.rewrittenCount > pbRwLimitOf(pv)) {
+    const nums = pv.rewrittenNums || [];
+    const shown = nums.slice(0, 40).join('、') + (nums.length > 40 ? ` …（共 ${nums.length} 章）` : '');
+    const okRw = confirm(`⚠️ 不可逆：本次会用本地正文【覆盖番茄线上已发布的 ${pv.rewrittenCount} 章】，读者已经看过的内容会被改掉。\n\n涉及章号：第 ${shown} 章\n\n确认覆盖？（取消 → 可先关掉「同步重写章」，只发新章）`);
+    if (!okRw) return;
+    confirmRewrites = true;
+  }
   const slug = CUR.slug;
   try {
     if (!await pbSave()) return;
-    await api('/api/book/publish', 'POST', { book: slug, limit: limit || 0 });
+    await api('/api/book/publish', 'POST', { book: slug, limit: limit || 0, confirmRewrites });
     // 标记这本书正在发布（书卡徽标 + 停止按钮 + 关弹窗后可回来）
     PUBLISHING.add(slug); renderShelf();
     pbSetPublishingUI(true);
@@ -1478,7 +1503,7 @@ let ST_TARGET = 'bible';
 async function openStudio() {
   if (!CUR) return;
   ST_TARGET = 'bible';
-  $('#stAsk').value = ''; $('#stErr').textContent = '';
+  $('#stAsk').value = ''; $('#sdErr').textContent = '';
   $('#stTarget').querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', b.dataset.t === 'bible'));
   $('#stVolWrap').classList.add('hidden');
   $('#studioModal').classList.remove('hidden');
@@ -1531,8 +1556,8 @@ $('#stAiRename') && $('#stAiRename').addEventListener('click', async () => {
 $('#rdNavToggle') && $('#rdNavToggle').addEventListener('click', () => {
   const r = $('#reader'); if (r) r.classList.toggle('nav-collapsed');
 });
-$('#stClose') && $('#stClose').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
-$('#stCancel') && $('#stCancel').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
+$('#sdClose') && $('#sdClose').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
+$('#sdCancel') && $('#sdCancel').addEventListener('click', () => $('#studioModal').classList.add('hidden'));
 $('#stTarget') && $('#stTarget').addEventListener('click', (e) => {
   const b = e.target.closest('.seg-btn'); if (!b) return;
   ST_TARGET = b.dataset.t;
@@ -1542,16 +1567,16 @@ $('#stTarget') && $('#stTarget').addEventListener('click', (e) => {
 $('#stGo') && $('#stGo').addEventListener('click', async () => {
   if (!CUR) return;
   const ask = $('#stAsk').value.trim();
-  if (ask.length < 2) { $('#stErr').textContent = '先用一句话说说你想怎么改'; return; }
+  if (ask.length < 2) { $('#sdErr').textContent = '先用一句话说说你想怎么改'; return; }
   const scope = ST_TARGET === 'outline' ? $('#stVol').value : '';
-  if (ST_TARGET === 'outline' && !scope) { $('#stErr').textContent = '先选要改哪一卷'; return; }
-  $('#stGo').disabled = true; $('#stErr').textContent = 'AI 正在改…（约 1–2 分钟，别关窗）';
+  if (ST_TARGET === 'outline' && !scope) { $('#sdErr').textContent = '先选要改哪一卷'; return; }
+  $('#stGo').disabled = true; $('#sdErr').textContent = 'AI 正在改…（约 1–2 分钟，别关窗）';
   try {
     const r = await api('/api/book/revise-setting', 'POST', { book: CUR.slug, target: ST_TARGET, scope, instruction: ask, model: $('#writeModel').value });
     $('#studioModal').classList.add('hidden');
     if (r.mode === 'opened') { setWriting(true); openStream(CUR.slug); }
     toast(ST_TARGET === 'outline' ? `AI 正在按你的话改【${scope}】大纲（看下方日志/镜像）` : 'AI 正在按你的话改设定/角色（看下方日志/镜像）');
-  } catch (e) { $('#stErr').textContent = '失败：' + e.message; }
+  } catch (e) { $('#sdErr').textContent = '失败：' + e.message; }
   finally { $('#stGo').disabled = false; }
 });
 

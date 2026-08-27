@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { UnzooClient } from './fanqie.mjs';
 import { buildBatchPack } from './contextpack.mjs';
+import { hasStructure, splitLedger, setProgress } from './ledgersnap.mjs';
 import { bookStats, getBook, currentVolume } from './books.mjs';
 import { gitSnapshot } from './scaffold.mjs';
 import { chatOnce } from './webchat/adapter.mjs';
@@ -197,7 +198,19 @@ export function appendLedgerAnchor(book, rows) {
   const first = rows[0], last = rows[rows.length - 1];
   const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
   const line = `- [网页版写作 ${stamp}] 新增第 ${first.num}–${last.num} 章：${rows.map(r => r.num + '《' + r.title + '》').join('、')}（网页模型不写台账，请在下次自检时据正文补全人物现状/伏笔/欠债）`;
-  // 追加到「时间线锚点」小节下，找不到就追到文末
+
+  // 台账已有「📌 当前态快照」结构时：锚点只能进【历史区】。
+  // 快照段每批都会被整段喂进上下文，往里插批次流水行会一路把它撑爆——而且下面那个
+  // indexOf('## 时间线锚点') 会命中快照骨架里的「### 时间线锚点」（子串匹配），正好插错地方。
+  // 顺带把快照的进度行推到最新章：这条路径上模型压根不碰台账（引擎代记是设计如此），
+  // 进度行没人改的话，快照会永远被写后闸判成过期。
+  if (hasStructure(cur)) {
+    const { snapshot, history } = splitLedger(cur);
+    fs.writeFileSync(fp, setProgress(snapshot, last.num) + history.replace(/\s*$/, '') + '\n' + line + '\n', 'utf8');
+    return;
+  }
+
+  // 尚未迁移的旧结构：保持原行为
   const anchorHead = '## 时间线锚点';
   const idx = cur.indexOf(anchorHead);
   let next;

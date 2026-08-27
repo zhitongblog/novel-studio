@@ -3,6 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { contextFiles } from './skill.mjs';
+import { freshLedger } from './ledgersnap.mjs';
+
+// 模板自带一级标题，作为快照结构的历史区正文时要剥掉，免得文件里出现两个标题。
+const stripTitle = (t) => String(t || '').replace(/^#\s[^\n]*\n+/, '');
 
 // 把书目录初始化为 git 仓库：① codex 要求"受信目录"（git 仓库即受信），否则拒绝运行；
 // ② 给小说项目天然的版本管理（每批可提交）。best-effort，git 缺失则跳过。
@@ -49,7 +53,11 @@ export function scaffoldBook(book) {
   writeIfMissing(path.join(dir, 'novel_bible.md'), freehand ? freehandBibleTemplate(book) : bibleTemplate(book));
   writeIfMissing(path.join(dir, 'chapter_index.md'), indexTemplate(book));
   if (!freehand) writeIfMissing(path.join(dir, 'outlines', '卷01分章大纲.md'), outlineTemplate(book));
-  writeIfMissing(path.join(dir, 'continuity_ledger.md'), freehand ? rosterTemplate(book) : ledgerTemplate(book));
+  // 台账一律带上「📌 当前态快照」结构：写作时只喂顶部这段快照，下方历史区不进上下文。
+  // 结构必须由代码铺（而不是等模型自觉建）——消费端 contextpack 早就写好了读快照的分支，
+  // 但从前没有任何地方产出这个结构，导致所有书都退回「喂台账前 8000 字符」= 喂开篇旧账。见 ledgersnap.mjs。
+  writeIfMissing(path.join(dir, 'continuity_ledger.md'),
+    freshLedger(book, { roster: freehand, body: stripTitle(freehand ? rosterTemplate(book) : ledgerTemplate(book)) }));
 
   // 各模型上下文文件（写作 skill），每次刷新以保证最新标准
   const files = contextFiles(book);
