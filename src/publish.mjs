@@ -194,6 +194,13 @@ export function savePublishedHashes(book, map) {
   } catch {}
 }
 
+// 一次同步能覆盖多少章已发布内容的上限（超过就要作者点头）。默认 3；per-book 可在发布弹窗里改。
+// 预览与真发都走这个函数——两边各写一份数字迟早会漂，UI 就会出现"看着能发、点了被拦"。
+export function rewriteSyncLimitOf(pc) {
+  const n = Number((pc || {}).rewriteSyncLimit);
+  return Number.isFinite(n) && n >= 0 ? n : 3;
+}
+
 // 挑出"真被重写过"的已发布章：有基线指纹且对不上的才算。
 // 【没有基线的一律不算重写】——老书第一次跑到这段时指纹库是空的，若把"缺基线"当成"变了"，
 // 会把整本已发布的书重发一遍。宁可漏一次同步，也不能误覆盖线上。
@@ -280,8 +287,8 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
     ok: true, fanqieMax, fanqieRead: fqRead, floored, approx: !!fm.approx, localMax,
     newCount: newCh.length, from: newCh[0]?.num || null, to: newCh[newCh.length - 1]?.num || null,
     titles: newCh.slice(0, 5).map(c => c.title),
-    rewrittenCount: rewritten.length, rewrittenNums: rewritten.slice(0, 8).map(c => c.num),
-    syncRewrites: !!pc.syncRewrites,
+    rewrittenCount: rewritten.length, rewrittenNums: rewritten.map(c => c.num),
+    syncRewrites: !!pc.syncRewrites, rewriteSyncLimit: rewriteSyncLimitOf(pc),
     matchVolumes: !!pc.matchVolumes, volumes,
     fanqieLatestDate: fm.latestDate || '', scheduleStart: sched.start, scheduled: sched.scheduled, scheduleReason: sched.reason,
   };
@@ -351,11 +358,12 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
   // 🛡️覆盖已发布内容是不可逆的（读者已经在看），所以给一道量的闸：一次同步超过 rewriteSyncLimit 章
   // 就中止并把清单摆出来，等人点头。默认 3 章——正常的错字修订就一两章，一次要覆盖几十章
   // 说明是整段重写，那种事必须作者自己知情。传 confirmRewrites=true 放行。
-  const rwLimit = Number.isFinite(Number(pc.rewriteSyncLimit)) ? Number(pc.rewriteSyncLimit) : 3;
+  const rwLimit = rewriteSyncLimitOf(pc);
   if (editCh.length > rwLimit && !confirmRewrites) {
     const nums = editCh.map(c => c.num);
     onLog({ level: 'error', msg: `⛔ 已中止：本次要覆盖线上 ${editCh.length} 章已发布内容（第 ${nums.slice(0, 12).join('、')}${nums.length > 12 ? '…' : ''} 章）。`
-      + `这会改掉读者已经看过的剧情。确认无误请带 confirmRewrites 再发，或把 syncRewrites 关掉只发新章。` });
+      + `这会改掉读者已经看过的剧情。请在发布弹窗里重新「预览将发」，点发布时会弹二次确认；`
+      + `或把「同步重写章」关掉只发新章，也可把「覆盖确认阈值」调大。` });
     return { ok: false, blocked: true, reason: `重写同步 ${editCh.length} 章超过上限 ${rwLimit}，需确认`, rewriteNums: nums, published: 0 };
   }
   if (limit > 0) { newCh = newCh.slice(0, limit); editCh = []; }   // 试发只走新章

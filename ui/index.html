@@ -514,6 +514,7 @@
       </div>
       <label class="check pb-danger"><input type="checkbox" id="pbMatchVol"> <span class="dz-tag">不可逆</span> 按图书分卷建卷（默认关：忽略卷、只追加发，最安全。开启会在番茄真实建卷、无法删除，需卷结构与图书一致）</label>
       <label class="check"><input type="checkbox" id="pbSyncRw"> 同步重写章（默认关：上次发布后被改写的旧章，去番茄找对应章覆盖编辑。仅在已发布过的书生效）</label>
+      <label class="field" style="margin:2px 0 6px"><span>覆盖确认阈值（一次要覆盖超过这么多已发布章时，点发布会弹二次确认；默认 3）</span><input id="pbRwLimit" type="number" min="0" placeholder="3" style="max-width:120px"></label>
       <label class="check"><input type="checkbox" id="pbAuto"> 🤖 自动发布（写满「目标章节数」且节奏+逻辑质检通过后，自动发番茄。需先配好账号+书籍。质检不过会暂缓并提示）</label>
       <label class="check"><input type="checkbox" id="pbUseAI"> 🧠 内容含 AI 生成（发布时番茄「是否AI创作」声明选「是」；不勾=「否」。请如实勾选——AI 生成/AI 辅助建议勾）</label>
       <div class="btn-row" style="margin-top:8px">
