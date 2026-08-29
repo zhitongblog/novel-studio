@@ -514,6 +514,7 @@
       </div>
       <label class="check pb-danger"><input type="checkbox" id="pbMatchVol"> <span class="dz-tag">不可逆</span> 按图书分卷建卷（默认关：忽略卷、只追加发，最安全。开启会在番茄真实建卷、无法删除，需卷结构与图书一致）</label>
       <label class="check"><input type="checkbox" id="pbSyncRw"> 同步重写章（默认关：上次发布后被改写的旧章，去番茄找对应章覆盖编辑。仅在已发布过的书生效）</label>
+      <label class="check pb-danger"><input type="checkbox" id="pbSyncUnbased"> <span class="dz-tag">不可逆</span> 补发未记账章（默认关：番茄已有这个章号、但<b>本工具从没发过它</b>——多见于换绑了番茄上的旧书。这种章既不算新章、也不算重写章，不开这个开关就<b>永远同步不上去</b>。开启后按本地正文 edit 覆盖，仍受下面的「覆盖确认阈值」拦一道）</label>
       <label class="field" style="margin:2px 0 6px"><span>覆盖确认阈值（一次要覆盖超过这么多已发布章时，点发布会弹二次确认；默认 3）</span><input id="pbRwLimit" type="number" min="0" placeholder="3" style="max-width:120px"></label>
       <label class="check"><input type="checkbox" id="pbAuto"> 🤖 自动发布（写满「目标章节数」且节奏+逻辑质检通过后，自动发番茄。需先配好账号+书籍。质检不过会暂缓并提示）</label>
       <label class="check"><input type="checkbox" id="pbUseAI"> 🧠 内容含 AI 生成（发布时番茄「是否AI创作」声明选「是」；不勾=「否」。请如实勾选——AI 生成/AI 辅助建议勾）</label>
@@ -547,6 +548,18 @@
         </div>
         <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="cbCreate">📕 在番茄创建作品 ▶</button></div>
         <div id="cbHint" class="modal-hint" style="margin-top:6px"></div>
+      </details>
+      <details class="pb-volmgr" style="margin-top:10px">
+        <summary style="cursor:pointer;font-weight:500">🩹 重发修正（按章号覆盖番茄已发章）</summary>
+        <p class="modal-hint" style="margin-top:6px">用本地正文<b>编辑替换</b>番茄上已存在的第 from–to 章（章名也会换成本地的）。<b>不可逆——读者已经看过的内容会被改掉</b>。修「发错内容」，或把换绑过来的旧章一段段换成本地正文时用。覆盖成功的章会自动记进指纹基线，以后再改就能被「同步重写章」自动认出来。约 15 秒/章。</p>
+        <div class="pb-grid" style="margin-top:6px">
+          <label class="field"><span>起始章号</span><input id="pbRpFrom" type="number" min="1" placeholder="如 22"></label>
+          <label class="field"><span>结束章号</span><input id="pbRpTo" type="number" min="1" placeholder="如 39"></label>
+        </div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn" id="pbRpTest" title="只改这一段的第1章，验证能找到章、能存上">🧪 只改第1章试</button>
+          <button class="btn" id="pbRpGo">🩹 覆盖这一段 ▶</button>
+        </div>
       </details>
       <details class="pb-volmgr" style="margin-top:10px">
         <summary style="cursor:pointer;font-weight:500">📚 番茄卷管理（改卷名）</summary>
