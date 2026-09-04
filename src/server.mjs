@@ -18,8 +18,8 @@ import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll, getModel } from './models.mjs';
 import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
-import { getSession, removeSession } from './sessions.mjs';
-import { startWriting } from './writer.mjs';
+import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
+import { startWriting, snapshotPaneIds } from './writer.mjs';
 import { runStateless } from './statelessWriter.mjs';
 import { runWebWrite, getAdapter } from './webwriter.mjs';
 import { runApiWrite, isApiProvider } from './apiwriter.mjs';
@@ -152,6 +152,21 @@ function startOrphanWatchdog() {
   if (globalThis.__nsOrphanWatchdog) return;
   globalThis.__nsOrphanWatchdog = setInterval(async () => {
     let cfg; try { cfg = loadConfig(); } catch { return; }
+    // 先按【还活着的 pane】清一遍陈旧会话记录。0.71 起会话记的 pid 是共用的 GUI pid，
+    // 只要 Unterm 开着就永远"活着"，pane 早关了书还挂在写作中 → 下次写作/复检只去穿插指令、
+    // 打进一个不存在的 pane，界面上就是点了没反应。连不上时 snapshotPaneIds 返回空集，
+    // 这里按 null 传下去 → 一个都不删，绝不误杀在跑的会话。
+    try {
+      const panes = await snapshotPaneIds();
+      for (const slug of pruneSessionsByPanes(panes.size ? panes : null)) {
+        pushLog(slug, { level: 'warn', msg: '窗口已不在（pane 没了）→ 清理陈旧会话记录，这本书回到空闲' });
+        const st = rt.get(slug);
+        try { st?.session?.autopilot?.stop('窗口已关闭'); } catch {}
+        try { st?.streamer?.stop(); } catch {}
+        rt.delete(slug);
+        broadcast(slug, 'stopped', { reason: 'pane-gone' });
+      }
+    } catch {}
     for (const s of listSessions()) {
       let st = rt.get(s.slug);
       const ap = st?.session?.autopilot;
