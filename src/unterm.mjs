@@ -118,6 +118,11 @@ export function killProcess(pid, { tree = false } = {}) {
 // 先 session.destroy 把 pane 关掉（agent 随之退出），再杀窗口进程（不带 /T）。
 // 传入 { id, mcp_port, auth_token, pid, pane }（会话记录/实例记录都能直接喂）。
 export async function closeWindow({ id, mcp_port, auth_token, pid, pane }) {
+  // 【绝不能杀共用的 GUI 进程】0.71 起新窗口不再有自己的实例记录，一本书的会话记的 pid 很可能就是
+  // 【作者自己那个 Unterm 的 GUI pid】。关掉一本书的窗口顺手把它杀了 = 全机器所有窗口一起没。
+  // 所以：关掉自己的 pane 之后先数一数还有没有别的 pane 活着，还有就只关 pane、不碰进程。
+  // 老版本(每窗口一个实例)下 session.list 只返回本窗口的 pane，关完就是空的，照旧杀进程，行为不变。
+  let othersLeft = false;
   if (pane != null && mcp_port) {
     let mcp = null;
     try {
@@ -125,9 +130,14 @@ export async function closeWindow({ id, mcp_port, auth_token, pid, pane }) {
       mcp = await connectInstance({ id, mcp_port, auth_token }, {});
       await mcp.destroyPane(pane);
       await new Promise(r => setTimeout(r, 600));   // 给 agent 一点退出时间
+      try {
+        const rest = await mcp.sessionList();
+        othersLeft = (rest || []).some(p => !p.is_dead && String(p.id) !== String(pane));
+      } catch {}
     } catch {}
     finally { try { mcp?.close?.(); } catch {} }
   }
+  if (othersLeft) return true;   // pane 已关掉；进程是别人还在用的，留着
   // 杀完【核实一遍】：窗口进程真的不在了才算收窗成功。
   // 不核实的代价见上：一次假成功就多留一个空窗口，而上层还以为收干净了。
   let killed = false;
@@ -341,6 +351,29 @@ export async function waitForNewInstance({ beforePids, pid, cwd, timeoutMs = 250
     await sleep(400);
   }
   return null;
+}
+
+// 定位"刚 spawn 出来的那个窗口该连哪个实例"。
+//
+// 【0.71 起的破坏性变化，本次卡死的直接原因】`unterm-cli start` 的帮助里仍写着 "Start a new Unterm GUI
+// instance"，但实测 0.71.3：新窗口【不再注册自己的实例记录】——全机器只有一条 ~/.unterm/instances/alpha.json，
+// 一个 unterm.exe(GUI) + 一个 unterm-core.exe，新开的窗口只是这个实例下多出来的 pane。
+// 于是 waitForNewInstance 永远等不到"新 pid"，30s 后抛"未能定位到新实例"，而窗口其实【已经开起来了】、
+// claude 也起来了，只是没人接管它 —— 表现正是"检测不到 unterm 实例，但窗口开着、停在等确认那一步"。
+//
+// 修法：本来就已经有实例在跑时，短探一下没有新实例就【直接复用现有实例】。这在协议上是安全的——
+// 0.65 起所有窗口共用同一个 mcp_port + auth_token，pane 编号也是全机器唯一，
+// 认 pane 靠的是 cwd + spawn 前后的 pane id 差集（见 waitForPane），本来就不依赖"实例是新的"。
+// 一个实例都没有时（Unterm 没开）仍然老老实实等满 timeoutMs，那种情况新实例是真的会出现。
+export async function resolveSpawnedInstance({ beforePids, pid, cwd, timeoutMs = 30000 }) {
+  const hadBefore = (beforePids?.size || 0) > 0;
+  const first = await waitForNewInstance({ beforePids, pid, cwd, timeoutMs: hadBefore ? 8000 : timeoutMs });
+  if (first) return { instance: first, reused: false };
+  if (!hadBefore) return { instance: null, reused: false };
+  const alive = listInstances().filter(i => i.pid == null || processAlive(i.pid));
+  if (!alive.length) return { instance: null, reused: false };
+  alive.sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)));
+  return { instance: alive[0], reused: true };
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

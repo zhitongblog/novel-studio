@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getModel, detectModel } from './models.mjs';
 import {
-  ensureProfile, spawnInstance, instancePids, waitForNewInstance,
+  ensureProfile, spawnInstance, instancePids, waitForNewInstance, resolveSpawnedInstance,
   resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow,
 } from './unterm.mjs';
 import { connectInstance } from './mcpclient.mjs';
@@ -205,9 +205,11 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   const pid = spawnInstance({ profile: profileName, cwd: book.dir, launchScript: launch });
   onLog({ msg: `已启动 unterm 进程 pid=${pid}，等待实例注册…` });
 
-  const instance = await waitForNewInstance({ beforePids, pid, cwd: book.dir, timeoutMs: 30000 });
-  if (!instance) throw new Error('未能定位到新实例（30s 超时）。请确认 Unterm 正常启动。');
-  onLog({ msg: `新实例：${instance.id}  mcp_port=${instance.mcp_port}  v${instance.version}` });
+  const { instance, reused } = await resolveSpawnedInstance({ beforePids, pid, cwd: book.dir, timeoutMs: 30000 });
+  if (!instance) throw new Error('未能定位到 Unterm 实例（30s 超时）。请确认 Unterm 正常启动。');
+  onLog({ msg: reused
+    ? `复用实例：${instance.id}  mcp_port=${instance.mcp_port}  v${instance.version}（0.71 起新窗口不再注册独立实例，按 pane 认归属）`
+    : `新实例：${instance.id}  mcp_port=${instance.mcp_port}  v${instance.version}` });
 
   // 连 MCP（实例刚起，端口可能稍迟，做几次重试）
   let mcp = null;

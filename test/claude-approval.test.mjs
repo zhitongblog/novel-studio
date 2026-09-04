@@ -10,7 +10,7 @@
 // 覆盖：①四种带框弹窗都要认成 menu；②默认高亮是否定项时改按编号；
 //      ③正常空闲屏幕不能被误判成弹窗（否则永远不续写）。
 import assert from 'node:assert';
-import { Autopilot, stripBox, affirmativeOption } from '../src/autopilot.mjs';
+import { Autopilot, stripBox, optionChoice } from '../src/autopilot.mjs';
 
 const ap = new Autopilot({}, 1, { confirmOnly: true });
 // autopilot 送进 classify 的就是"去掉空行后的屏幕尾部"，这里照抄同一道预处理
@@ -92,6 +92,39 @@ assert.strictEqual(by.kind, 'menu');
 assert.strictEqual(by.pick, '2', 'bypass 警告默认停在 "1. No, exit"，必须改按 2');
 console.log(`✓ bypass 警告：不闭眼回车（那是 exit），改选第 ${by.pick} 项`);
 
+// 2026-09-04 从卡死现场（pane 2）原样抄下来的屏幕。claude 把信任目录框整个重写了：
+// 没有方框、没有编号、未选中那行一个记号都没有，而且【默认高亮就是 No, exit】。
+// 旧代码在这里会命中 "Enter to confirm" 里的 confirm → 走 yn → 打 y 再回车 → 正好选中 No, exit，
+// 等于 autopilot 亲手把刚起来的 agent 关掉。
+const TRUST_NEW = [
+  '== Novel Studio :: 《走进修仙：我把金丹练成了核反应》 / Claude Code ==',
+  '[proxy] 本会话已启用 http://127.0.0.1:7897',
+  '[agent] 启动 claude ，初始指令已注入…',
+  '',
+  '────────────────────────────────────────────────────────────────────────────────',
+  ' Accessing workspace:',
+  '',
+  ' C:\\Users\\Alex\\AppData\\Local\\Novel Studio\\books\\走进修仙：我把金丹练成了核反应',
+  '',
+  ' Quick safety check: Is this a project you created or one you trust? (Like your',
+  " own code, a well-known open source project, or work from your team). If not,",
+  ' take a moment to review what\'s in this folder first.',
+  '',
+  " Claude Code'll be able to read, edit, and execute files here.",
+  '',
+  ' Security guide',
+  '',
+  ' ❯ No, exit',
+  '   Yes, I trust this folder',
+  '',
+  ' Enter to confirm · Esc to cancel',
+].join('\n');
+const tn = kindOf(TRUST_NEW);
+assert.strictEqual(tn.kind, 'menu', `新版信任框应认成 menu，实际 ${tn.kind}`);
+assert.ok(!tn.pick, '这个框没有编号，按不了编号');
+assert.deepStrictEqual(tn.move, { dir: 'down', steps: 1 }, '必须先下移一格到 "Yes, I trust this folder" 再回车');
+console.log('✓ 新版信任目录框（无框无编号、默认停在 No, exit）：下移 1 格再回车');
+
 console.log('— 不能误伤正常空闲屏 —');
 assert.strictEqual(kindOf(IDLE).kind, 'continue', '空闲屏应继续驱动写作');
 console.log('✓ 写完一批的空闲屏仍判 continue');
@@ -101,9 +134,11 @@ console.log('✓ 输出总结里的 "1. 2." 不会被当菜单去回车');
 console.log('— 工具函数 —');
 assert.strictEqual(stripBox('│ ❯ 1. Yes                    │'), '❯ 1. Yes');
 assert.strictEqual(stripBox('│ │  12 - 旧的一行   │ │'), '12 - 旧的一行');
-assert.strictEqual(affirmativeOption(['❯ 1. Yes', '  2. No']), null, '高亮已是肯定项 → 不用挑');
-assert.strictEqual(affirmativeOption(['  1. No, exit', '❯ 2. Yes, I accept']), null);
-assert.strictEqual(affirmativeOption(['❯ 1. 取消', '  2. 确认执行']), '2');
-console.log('✓ stripBox / affirmativeOption 正确');
+assert.deepStrictEqual(optionChoice(['❯ 1. Yes', '  2. No']), {}, '高亮已是肯定项 → 照旧回车');
+assert.deepStrictEqual(optionChoice(['  1. No, exit', '❯ 2. Yes, I accept']), {});
+assert.deepStrictEqual(optionChoice(['❯ 1. 取消', '  2. 确认执行']), { pick: '2' });
+assert.deepStrictEqual(optionChoice(['❯ No, exit', '  Yes, I trust this folder']), { move: { dir: 'down', steps: 1 } });
+assert.deepStrictEqual(optionChoice(['  Yes, proceed', '❯ No, exit']), { move: { dir: 'up', steps: 1 } });
+console.log('✓ stripBox / optionChoice 正确');
 
 console.log('\n全部通过 ✅  claude 换了同意问法/画了方框，autopilot 照样接得住');
