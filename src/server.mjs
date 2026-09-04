@@ -848,6 +848,14 @@ async function api(p, req, res, u) {
       const book = getBook(body.book);
       if (!book) return json(res, 400, { error: '找不到书：' + body.book });
       const instruction = buildReviewInstruction(book, body.range, body.dims, body.note);
+      // 复检会【就地改正文】（逻辑硬伤直接改、文风直接润色），和重写/AI改名/删章一样是不可逆的，
+      // 却一直没有存档点——《金丹》那本实证：一次全书复检把 103 章全改了一遍，而 chapters/ 从来没被
+      // git 收过（初始提交发生在导入之前），36 万字改完没有任何东西可回退。gitSnapshot 走的是 add -A，
+      // 开窗前调一次就把 chapters/ 一并收进去。
+      try {
+        const h = gitSnapshot(book.dir, `复检前存档：${body.range || '全书'}`);
+        if (h) pushLog(book.slug, { level: 'info', msg: `已 git 存档：${h}（复检会就地改正文，不满意可回退到这里）` });
+      } catch {}
       const running = listSessions().some(s => s.slug === book.slug);
       try {
         if (running) {
