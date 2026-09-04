@@ -163,7 +163,11 @@ export class Autopilot {
     // bypass 模式下 codex 会 spawn 子 shell 执行命令，前台进程名会变成 pwsh —— 但屏幕仍是 agent 的 TUI。
     // 只有"裸 shell 提示符 + 无 TUI 标记 + 进程级也看不到 agent"才算它退出 → 绝不向裸 shell 注入指令。
     const agentTui = /(esc to interrupt|tokens used|gpt-[0-9]|claude|gemini|❯|›|•\s*(running|working|ran|queued)|▌|\? for shortcuts|to interrupt|to view transcript|press enter)/i.test(tail);
-    const bareShell = !agentTui && agentPresent !== true && /(^|\n)\s*(PS\s+)?[A-Za-z]:[\\/][^\n]*>\s*$/.test(tail.replace(/\s+$/, '') + '\n');
+    // ⚠️ agentTui 会被【滚动历史里的残影】骗到：agent 退出后，它刚才那个弹窗还留在屏幕上（❯、press enter
+    //    全都还在），于是"回到 shell 了"永远判不出来，autopilot 继续对着裸命令行按键。
+    //    所以最后一行是不是 shell 提示符要单独看，且它说了算——这是"现在"，弹窗残影是"刚才"。
+    const atShell = endsAtShellPrompt(tail);
+    const bareShell = atShell && agentPresent !== true && !(agentState === 'working' || agentState === 'waiting');
     // agentPresent（进程级）/ working·waiting（hook 级）都是"它还在"的正面证据，比屏幕正则可靠。
     // ⚠️ 但 idle/done 不算：agent 退出后 hook 状态可能残留成 done，若据此认定"在场"，就会绕过下面
     //    "回到裸 shell 就停手"的保护 → 把续写指令直接打进命令行。
@@ -470,6 +474,10 @@ export class Autopilot {
       if (p && low.includes(String(p).toLowerCase())) return { kind: 'stop', reason: '命中完成短语：' + p };
     }
 
+    // 【停在 shell 提示符就一个键都不能按】agent 退出后，它刚才那个弹窗仍留在滚动历史里、tail 里照样读得到；
+    // 再当"待选菜单"去按方向键/回车，按的就是【裸 PowerShell 命令行】——现场看到的就是一串空 PS> 提示符。
+    if (endsAtShellPrompt(t)) return { kind: 'none', reason: '窗口停在 shell 提示符（弹窗只是滚动历史里的残影）' };
+
     // y/n 型提问：既认英文 (y/n) 记号，也认中文「是否…/要不要…/需要我…吗/继续吗/写下一批(章)吗…？」，
     // 中文一律【锚定在屏幕末尾】(问句结尾)判定，避免误伤正文里出现的“是否”。
     // 必须以「吗？」或「？」结尾（真提问），避免误伤正文里出现的“是否/继续”等（正文多以。！结尾）。
@@ -553,6 +561,19 @@ export class Autopilot {
     // 没有明显问题、但出现输入态特征
     return idleHints.test(lastNonEmpty(trimmed, 4));
   }
+}
+
+// 屏幕是不是停在【裸 shell 提示符】上（= agent 已经不在了）。
+// 关键细节：80 列窗口里长路径会把提示符折成两行——
+//     PS C:\Users\Alex\AppData\Local\Novel Studio\books\走进修仙：我把金丹练成了核反应
+//     >
+// 单看最后一行只有一个 ">"，单看倒数第二行没有 ">"，两边都匹配不上；把最后两行【拼起来】再判才认得出。
+// 现场就是栽在这上面：claude 早退出了，引擎还以为 agent 在，对着命令行一路回车。
+const SHELL_PROMPT = /^\s*(PS\s+)?([A-Za-z]:[\\/]|~|\/)[^\n]*[>$#]\s*$/;
+export function endsAtShellPrompt(s) {
+  const ls = String(s).split(/\r?\n/).map(l => l.replace(/\s+$/, '')).filter(l => l.trim());
+  if (!ls.length) return false;
+  return SHELL_PROMPT.test(ls[ls.length - 1]) || SHELL_PROMPT.test(ls.slice(-2).join(''));
 }
 
 // 剥掉 TUI 方框边框：claude/gemini 把审批弹窗画成 ╭─╮ │ … │ ╰─╯，每行开头是 │ 而不是选项本身，

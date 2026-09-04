@@ -141,4 +141,27 @@ assert.deepStrictEqual(optionChoice(['❯ No, exit', '  Yes, I trust this folder
 assert.deepStrictEqual(optionChoice(['  Yes, proceed', '❯ No, exit']), { move: { dir: 'up', steps: 1 } });
 console.log('✓ stripBox / optionChoice 正确');
 
-console.log('\n全部通过 ✅  claude 换了同意问法/画了方框，autopilot 照样接得住');
+// —— 弹窗残影：agent 已退出、窗口回到 shell 提示符，滚动历史里还留着刚才那个框 ——
+// 现场（pane 2）：claude 选了 No, exit 后退出，PowerShell 提示符被 80 列折成两行，
+// 旧代码看不出"回到 shell 了"（❯ 还在，agentTui 恒真），会继续对着裸命令行按键 → 一串空 PS> 提示符。
+import { endsAtShellPrompt } from '../src/autopilot.mjs';
+console.log('— 弹窗残影 / 已回到 shell —');
+const GHOST = [
+  ' Quick safety check: Is this a project you created or one you trust?',
+  ' ❯ No, exit',
+  '   Yes, I trust this folder',
+  '',
+  ' Enter to confirm · Esc to cancel',
+  '',
+  'PS C:\\Users\\Alex\\AppData\\Local\\Novel Studio\\books\\走进修仙：我把金丹练成了核反应',
+  '>',
+].join('\n');
+assert.strictEqual(kindOf(GHOST).kind, 'none', '回到 shell 后一个键都不能按');
+console.log('✓ agent 退出后残留的弹窗不再被当成待选菜单');
+assert.ok(endsAtShellPrompt('PS C:\\Users\\Alex\\books\\某某书\n>'), '折行的 PS 提示符要认得出');
+assert.ok(endsAtShellPrompt('PS D:\\code\\story> '), '不折行的也要认得出');
+assert.ok(!endsAtShellPrompt(TRUST_NEW), '真弹窗不能被当成 shell 提示符');
+assert.ok(!endsAtShellPrompt(IDLE), 'claude 的输入态不是 shell 提示符');
+console.log('✓ endsAtShellPrompt 认得出折行的提示符，且不误伤真弹窗');
+
+console.log('\n全部通过 ✅  claude 换了同意问法/画了方框/退出后留残影，autopilot 都接得住');
