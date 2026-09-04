@@ -204,12 +204,16 @@ export class Autopilot {
           // 【作者主导】模式下，"要不要接着写"一律回【不】——否则"只确认不续写"就成了空话（见 classify 里的血泪注释）。
           const denyContinue = this.opt.confirmOnly && pa.continueAsk;
           const denyText = this.opt.declineContinueText || '不用继续。就写到这里停下，等作者给下一段要求；在此之前不要再写任何新章。';
-          if (pa.kind === 'menu') await this.mcp.enter(this.paneId);
+          // pick=某个编号 → 高亮项是"No/退出"这类否定项，必须按编号选肯定项，不能闭眼回车。
+          if (pa.kind === 'menu') {
+            if (pa.pick) await this.mcp.submitText(this.paneId, String(pa.pick));
+            else await this.mcp.enter(this.paneId);
+          }
           else if (pa.kind === 'yn') await this.mcp.submitText(this.paneId, denyContinue ? denyText : (this.opt.affirmativeText || 'y'));
           else await this.mcp.submitText(this.paneId, denyContinue ? denyText : pa.send);
           this._lastPromptSendAt = now; this.stats.approvals++;
           const what = denyContinue ? '它在问"要不要接着写" → 作者主导模式，已回绝并让它停下'
-            : pa.kind === 'menu' ? '选择/信任提示 → 回车采纳推荐项'
+            : pa.kind === 'menu' ? (pa.pick ? `选择/信任提示 → 高亮项是否定项，改选第 ${pa.pick} 项（肯定项）` : '选择/信任提示 → 回车采纳推荐项')
             : pa.kind === 'yn' ? 'y/n 提问 → 应答 ' + (this.opt.affirmativeText || 'y')
             : '开放式提问 → 自动应答';
           this.log('检测到' + what + ' ｜ ' + pa.reason, 'act');
@@ -464,12 +468,22 @@ export class Autopilot {
     const ynTailRe = /(是否|要不要|需不需要|需要我|可否|可以|行不行|好不好|继续|接着写|写下一[批章]|再写|确认|对)[^\n。！!]{0,10}(吗[?？]?|[?？])\s*$/;
     const ynRe = /\((y\/n|yes\/no|y\/N|是\/否)\)|\[y\/n\]|\[y\/N\]|\(y\/N\)|是否继续|是否执行|确认执行[?？]?\s*$/i;
     const isYn = (s) => ynRe.test(s) || ynTailRe.test(String(s).trimEnd());
-    const approveKw = /(approve|allow this|allow command|do you want to proceed|proceed\?|confirm|apply this change|run this command|授权|允许执行|是否允许|要继续吗)/i;
-    // 信任目录类提示（codex/claude 首次进入新目录）
-    const trusty = /(do you trust|trust the contents of this directory|信任(该|这个)?目录)/i.test(t);
+    // 【剥边框】——审批弹窗都画在方框里，每行真正的开头是 │ 而不是 ❯，下面所有菜单正则(^\s*[❯›]…)会全部落空。
+    // 血泪（复检卡死）：弹窗既认不出菜单、也认不出提问 → 只会被当"空闲"；在 confirmOnly（复检/立项/AI改名）下
+    // 更会被 doneIdle 计数当成【任务完成】把窗口收掉，界面显示"✅ 本次任务完成"，实际一个字都没改。
+    const bare = stripBox(t);
+    // Claude Code 的审批问句【不止一句】"Do you want to proceed?"：
+    //   改文件 → "Do you want to make this edit to 第012章.md?"   新建 → "Do you want to create 复检-全书.md?"
+    //   跑命令 → "Do you want to proceed?"                       取网页 → "Do you want to make this request?"
+    // 只认死 proceed 那一句，它换个问法就再也接不上——这正是"claude 的同意变了、复检没法自动执行"的直接原因。
+    // 故改按 "do you want to" 这个稳定前缀认，并把选项文案（Yes, allow all edits / don't ask again /
+    // No, and tell Claude what to do differently）也算作证据：将来问句再改，凭选项也还认得出这是审批弹窗。
+    const approveKw = /(approve|allow this|allow command|allow all edits|do you want to|proceed\?|confirm|apply this change|run this command|don'?t ask again|tell claude what to do differently|授权|允许执行|是否允许|要继续吗)/i;
+    // 信任目录类提示（codex/claude 首次进入新目录）。claude 现在的措辞是 "Do you trust the files in this folder?"
+    const trusty = /(do you trust|trust the (contents|files) (of|in) this (directory|folder)|信任(该|这个)?目录)/i.test(bare);
 
-    // 选择型菜单识别
-    const lines = t.split(/\r?\n/);
+    // 选择型菜单识别（一律在【剥掉边框】的文本上做，否则弹窗里的选项一行都认不出来）
+    const lines = bare.split(/\r?\n/);
     const numbered = lines.filter(l => /^\s*[>❯➤*●○›]?\s*\d+\s*[.)]\s+\S/.test(l));
     const radio = lines.filter(l => /^\s*[❯➤›]\s+\S/.test(l) || /^\s*[●○]\s+\S/.test(l));
     const hasMenu = numbered.length >= 2 || radio.length >= 2;
@@ -477,24 +491,27 @@ export class Autopilot {
     const cursorOnOption = lines.some(l => /^\s*[›❯➤]\s{0,3}\d+\s*[.)]\s+\S/.test(l));
     // agent 空闲态特征：底部有 "gpt-x.x medium · 路径" 模型页脚，或 codex 的输入占位提示。
     // 这类屏幕里的 "1. … 2. …" 是 agent 的【输出总结】，不是待选菜单——绝不能当菜单去回车。
-    const agentIdleFooter = /\b(gpt|claude|gemini|o\d)[-\s][\w.]*\s+(medium|default|high|low|minimal|xhigh|fast)\b[\s\S]{0,40}·/i.test(t)
-      || /(Use \/skills|Implement \{feature\}|Find and fix a bug|Run \/review|\/model to change|to list available skills)/i.test(t);
+    const agentIdleFooter = /\b(gpt|claude|gemini|o\d)[-\s][\w.]*\s+(medium|default|high|low|minimal|xhigh|fast)\b[\s\S]{0,40}·/i.test(bare)
+      || /(Use \/skills|Implement \{feature\}|Find and fix a bug|Run \/review|\/model to change|to list available skills)/i.test(bare);
 
-    const endsQuestion = /[?？]\s*$/.test(t.trimEnd()) || /[:：]\s*$/.test(t.trimEnd());
-    const selectionHint = /(press enter|enter to (continue|select|confirm|apply)|use arrows|↑|↓|请选择)/i.test(t);
+    const endsQuestion = /[?？]\s*$/.test(bare.trimEnd()) || /[:：]\s*$/.test(bare.trimEnd());
+    const selectionHint = /(press enter|enter to (continue|select|confirm|apply)|use arrows|↑|↓|请选择)/i.test(bare);
 
     // 「要不要继续写下去」这一类提问必须和"信任目录/审批/一般确认"区分开：
     // 在【作者主导】模式(confirmOnly)下，它的正确答案永远是【不】——继续与否是作者的事。
     // 血泪：不区分时，共创批次写完 agent 问一句"要我接着写下一段吗？"，autopilot 回 y，
     // 它就接着写、再问、再 y……一夜滚出 44 章(用户："我让他写三五章，直接写了好几十章")。
     const continueAsk = /(继续|接着写|接下来|下一[批章段]|再写|写下去|往下写)[^\n。！!]{0,12}(吗[?？]?|[?？])\s*$/.test(String(t).trimEnd());
+    // 菜单的默认高亮项【不一定是"同意"】：claude 的 bypass 警告框默认停在 "1. No, exit"，
+    // 闭眼回车就是把窗口关掉。故凡是走菜单，都先看清高亮项是不是否定项；是的话改按肯定项的编号。
+    const pickAffirmative = () => affirmativeOption(lines);
     if (isYn(t)) return { kind: 'yn', reason: continueAsk ? '续写征询' : 'y/n 模式', continueAsk };
-    if ((approveKw.test(t) || trusty) && hasMenu) return { kind: 'menu', reason: trusty ? '信任目录提示' : '审批选择菜单' };
-    if (approveKw.test(t) || trusty) return { kind: 'yn', reason: trusty ? '信任目录(y)' : '审批关键词' };
+    if ((approveKw.test(bare) || trusty) && hasMenu) return { kind: 'menu', reason: trusty ? '信任目录提示' : '审批选择菜单', pick: pickAffirmative() };
+    if (approveKw.test(bare) || trusty) return { kind: 'yn', reason: trusty ? '信任目录(y)' : '审批关键词' };
     // 仅当光标停在编号选项上（真菜单）才按菜单处理
-    if (cursorOnOption) return { kind: 'menu', reason: `选择菜单(${Math.max(numbered.length, radio.length)}项)` };
+    if (cursorOnOption) return { kind: 'menu', reason: `选择菜单(${Math.max(numbered.length, radio.length)}项)`, pick: pickAffirmative() };
     // 带明确"请选择/按回车"提示且非 agent 空闲态的菜单
-    if (!agentIdleFooter && hasMenu && (endsQuestion || selectionHint)) return { kind: 'menu', reason: '提示型菜单' };
+    if (!agentIdleFooter && hasMenu && (endsQuestion || selectionHint)) return { kind: 'menu', reason: '提示型菜单', pick: pickAffirmative() };
 
     // 空闲且像在等待（无明确提问）→ 续写
     if (this.looksIdleWaiting(t)) return { kind: 'continue', reason: '空闲等待，驱动下一批' };
@@ -506,11 +523,42 @@ export class Autopilot {
   looksIdleWaiting(t) {
     const trimmed = t.trimEnd();
     if (!trimmed) return false;
+    // 兜底闸：屏幕上摆着 "❯ 1. Yes / 2. No" 这种待选项 = 它在等人点头，绝不是空闲。
+    // 上面的关键词认漏了(CLI 又改文案)时，至少不会把审批弹窗当"写完了"——那会在 confirmOnly 下把窗口收掉。
+    if (/^\s*[›❯➤]?\s*\d+\s*[.)]\s*(yes|no|y|n|是|否|同意|拒绝|允许|取消|退出)\b/im.test(stripBox(t))) return false;
     // 常见 agent 输入提示符尾部特征
     const idleHints = /(›|❯|\$|＞|>|tokens used|esc to interrupt|type a message|输入|input)/i;
     // 没有明显问题、但出现输入态特征
     return idleHints.test(lastNonEmpty(trimmed, 4));
   }
+}
+
+// 剥掉 TUI 方框边框：claude/gemini 把审批弹窗画成 ╭─╮ │ … │ ╰─╯，每行开头是 │ 而不是选项本身，
+// 不剥就没有一条菜单正则能命中（"│ ❯ 1. Yes" 的 ^ 后面是 │）。逐行去掉首尾的框线字符即可，
+// 嵌套框（diff 预览是框中框）也一并去掉，行内的 ❯ › 光标字符不在框线区段里，不会被误删。
+const BOX_EDGE = /^[\s─-╿|｜]+|[\s─-╿|｜]+$/g;
+export function stripBox(s) {
+  return String(s).split(/\r?\n/).map(l => l.replace(BOX_EDGE, '')).join('\n');
+}
+
+// 在一组（已剥边框的）菜单行里挑出"肯定项"的编号——仅在高亮项是【否定项】时才需要它。
+// 由来：claude 加了 --dangerously-skip-permissions 后的 bypass 警告框，默认高亮的是 "1. No, exit"，
+// 闭眼回车 = 直接退出 agent。返回 null 表示"高亮的就是肯定项/看不明白"，照旧回车采纳高亮项。
+const NEG_OPT = /^(no\b|n\b|don'?t|cancel|exit|quit|reject|deny|否|不|拒绝|取消|退出)/i;
+const POS_OPT = /^(yes\b|y\b|proceed|accept|allow|approve|continue|ok\b|是|好|同意|允许|确认|接受|继续)/i;
+export function affirmativeOption(lines) {
+  const opts = [];
+  let cursorIdx = -1;
+  for (const l of lines) {
+    const m = /^\s*([›❯➤]?)\s*(\d+)\s*[.)]\s+(.+?)\s*$/.exec(l);
+    if (!m) continue;
+    if (m[1]) cursorIdx = opts.length;
+    opts.push({ num: m[2], text: m[3] });
+  }
+  if (cursorIdx < 0 || opts.length < 2) return null;          // 没看出高亮项 → 照旧回车
+  if (!NEG_OPT.test(opts[cursorIdx].text)) return null;       // 高亮的本来就是肯定项 → 照旧回车
+  const pos = opts.find(o => POS_OPT.test(o.text));
+  return pos ? pos.num : null;
 }
 
 function lastLines(s, n) {
