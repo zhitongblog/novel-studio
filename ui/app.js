@@ -549,7 +549,10 @@ $('#rvStart').addEventListener('click', async () => {
   const model = (STATE.books.find(b => b.slug === CUR.slug) || CUR).model || STATE.config.defaultModel;
   $('#rvStart').disabled = true; $('#rvErr').textContent = '启动复检…';
   try {
-    const r = await api('/api/book/review', 'POST', { book: CUR.slug, range, dims, model });
+    // note = 重点要求：buildReviewInstruction 一直支持，之前前端没传 → 想让它"只处理报告里的某一条"
+    // 就只能绕去重写弹窗。填了它才能拿着复检报告一条一条地改。
+    const note = $('#rvNote')?.value.trim() || '';
+    const r = await api('/api/book/review', 'POST', { book: CUR.slug, range, dims, model, note });
     $('#reviewModal').classList.add('hidden'); $('#rvStart').disabled = false;
     setWriting(true); openStream(CUR.slug);
     toast(r.mode === 'inserted' ? '已穿插复检：' + range : '复检已开始：' + range);

@@ -84,7 +84,7 @@ export class Autopilot {
     // outBytes: pane 的累计输出字节，单调递增——判"还在动"比 diff 整屏更准（不受光标闪烁、idle 占位符干扰）。
     const ag = await this._call('agentStatus', this.paneId);
     const idleInfo = await this._call('sessionIdle', this.paneId);
-    const agentState = ag?.state || null;
+    let agentState = ag?.state || null;   // 可能被下面的「陈旧 working」判定推翻 → 置 null 回退到屏幕判据
     const outBytes = idleInfo?.outBytes ?? null;
     const bytesGrew = outBytes != null && this._lastOutBytes != null && outBytes > this._lastOutBytes;
     if (outBytes != null) this._lastOutBytes = outBytes;
@@ -107,6 +107,26 @@ export class Autopilot {
       try { await this.mcp.input(this.paneId, '\x1b[1;5F'); await sleep(300); screen = (await this.mcp.screenText(this.paneId).catch(() => '')) || screen; } catch {}
     }
     const screenChanged = this.prevScreen !== null && screen !== this.prevScreen;
+
+    // 【陈旧 working】——agent.status 是 claude 侧 hook 上报的，hook 一旦挂了，状态就【永远停在 working】。
+    // 现场（《走进修仙》pane 7）：写完 104–106 章后 Stop 钩子报错（屏幕上一串 Hookify error），
+    // agent.status 报 state=working、forSecs=37577（10.4 小时），而 session.idle 明说 idle=true、
+    // 输出字节不涨、屏幕一动不动。忙判据只认 working → autopilot 认定"它还在写"，再也不发续写指令；
+    // 表现就是【写完一批就再也不动了，日志一片空白】，人还以为是写完了。
+    // 交叉验证后不再采信：session.idle 说空闲 + 输出不涨 + 屏幕不变，连续几拍即判陈旧；
+    // 或者 working 已经挂了半小时以上而 session.idle 说空闲——那不可能是真在干活。
+    if (agentState === 'working' && idleInfo?.idle === true && !screenChanged && !bytesGrew) {
+      this._staleWorking = (this._staleWorking || 0) + 1;
+      const longGone = (ag?.forSecs || 0) >= (this.opt.staleWorkingSecs || 1800);
+      if (longGone || this._staleWorking >= (this.opt.staleWorkingPolls || 5)) {
+        if (!this._staleLogged) {
+          this.log(`agent.status 一直报 working（已 ${Math.round((ag?.forSecs || 0) / 60)} 分钟），但 session.idle 说空闲、输出与屏幕都不动`
+            + ` → 判定是 agent 侧 hook 挂了留下的陈旧状态，改用屏幕判据继续`, 'warn');
+          this._staleLogged = true;
+        }
+        agentState = null;
+      }
+    } else { this._staleWorking = 0; this._staleLogged = false; }
     // 用"非空行"的尾部：codex/claude 的 TUI 常把提问渲染在顶部、下面大片空行，
     // 若取最后 N 个原始行会全是空行 → 漏判提问。故过滤空行后再取尾部。
     const tail = screen.split(/\r?\n/).filter(l => l.trim()).slice(-40).join('\n');
