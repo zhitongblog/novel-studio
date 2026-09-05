@@ -104,8 +104,13 @@ export function killProcess(pid, { tree = false } = {}) {
     } catch { return false; }
   }
   const sig = (target, s) => { try { process.kill(target, s); return true; } catch { return false; } };
+  // ⚠️ 同 Windows 分支的病根，POSIX 这边当初漏修：signal 发没发出去必须如实返回。
+  // process.kill 对不存在的 pid 抛 ESRCH、对没权限的抛 EPERM，被 sig() 吃成 false——
+  // 原来这里无条件 return true，于是【杀没杀掉都报成功】，上层照打「已收起窗口」，
+  // 窗口其实还活着 → 下一批发现没有活会话又开一个，窗口越堆越多。
   // tree 时才杀进程组（负 pid，spawnInstance 用 detached 起的是新进程组）
-  if (tree) { if (!sig(-pid, 'SIGTERM')) sig(pid, 'SIGTERM'); } else sig(pid, 'SIGTERM');
+  const ok = tree ? (sig(-pid, 'SIGTERM') || sig(pid, 'SIGTERM')) : sig(pid, 'SIGTERM');
+  if (!ok) return false;
   setTimeout(() => {
     if (tree) { if (!sig(-pid, 'SIGKILL')) sig(pid, 'SIGKILL'); } else sig(pid, 'SIGKILL');
   }, 1500).unref?.();

@@ -5,9 +5,16 @@
 // 能正常打开（实测 openPublish 无异常、hidden 正常变 false），但用户浏览器加载的是缓存里的旧版。
 // 这类 bug 在开发机上永远复现不出来，因为开发者总在强刷。
 import assert from 'node:assert';
+import net from 'node:net';
 import { spawn } from 'node:child_process';
 
-const PORT = 8791;
+// 端口写死会被机器上任何一个占了该口的无关进程撞停（实测撞过一次，报成"测试服务未能启动"，
+// 看着像产品坏了其实是环境噪音）。改成向内核要一个空闲口。
+const PORT = await new Promise((resolve, reject) => {
+  const s = net.createServer();
+  s.once('error', reject);
+  s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+});
 const srv = spawn(process.execPath, ['bin/novel.mjs', 'serve', '--port', String(PORT)], {
   cwd: process.cwd(), stdio: 'ignore', detached: false,
 });
