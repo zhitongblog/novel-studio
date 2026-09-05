@@ -183,3 +183,23 @@ console.log('✓ 长回显行被排除，不再被判成「提示型菜单」');
 const REAL = ['请选择一项：', '❯ 是，继续', '  否，退出'].join('\n');
 assert.strictEqual(kindOf(REAL).kind, 'menu', '短选项仍应认成菜单');
 console.log('✓ 短选项照常认得出');
+
+// —— 认不出肯定项时，绝不能闭眼回车 ——
+// 现场：首次带 --dangerously-skip-permissions 进书目录，SessionStart 钩子先刷了一大段上下文，
+// 把 "Quick safety check" 挤出了 tail → trusty 没命中 → 落到「提示型菜单」→ 闭眼回车 →
+// 按中的正是 "No, exit"，claude 当场退出，日志里只留五条"回车采纳推荐项"。
+console.log('— 高亮是否定项、又找不到肯定项 —');
+const BLIND = [
+  '  #8427 | 11:08 PM | 重构 | 把硬编码颜色换成主题变量',
+  '  #8428 | 11:09 PM | 重构 | 代码镜像背景接主题变量',
+  '❯ No, exit',
+  '  Enter to confirm · Esc to cancel',
+].join('\n');
+const bl = kindOf(BLIND);
+assert.strictEqual(bl.kind, 'menu', '它确实是个待选项');
+assert.ok(bl.danger, '认不出肯定项时必须标 danger，让上层一个键都别按');
+assert.ok(!bl.pick && !bl.move, 'danger 时不该给出任何按键方案');
+console.log('✓ 标成 danger → 不闭眼回车（改由卡住告警提醒人来处理）');
+// 能认出肯定项时照常处理，别因为这道闸把正常情况也堵了
+assert.deepStrictEqual(kindOf(TRUST_NEW).move, { dir: 'down', steps: 1 }, '认得出肯定项就照常走');
+console.log('✓ 认得出肯定项的照常下移一格再回车');

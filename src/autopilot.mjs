@@ -255,6 +255,16 @@ export class Autopilot {
           const denyText = this.opt.declineContinueText || '不用继续。就写到这里停下，等作者给下一段要求；在此之前不要再写任何新章。';
           // pick / move = 高亮项是"No/退出"这类否定项，必须先挪到肯定项，绝不能闭眼回车（那是关 agent）。
           if (pa.kind === 'menu') {
+            // danger = 高亮的是否定项、又认不出肯定项在哪 → 一个键都不按，交给人（卡住告警会喊）。
+            if (pa.danger) {
+              if (!this._dangerLogged) {
+                this.log('⚠️ 屏幕上是个待选项，但高亮的是「否定/退出」项，又认不出肯定项在哪 —— 不敢闭眼回车'
+                  + '（回车很可能就是 No, exit，等于把 agent 关掉）。请去窗口手动选一下。', 'warn');
+                this._dangerLogged = true;
+              }
+              this.prevScreen = screen;
+              return;
+            }
             if (pa.pick) await this.mcp.submitText(this.paneId, String(pa.pick));
             else if (pa.move) {
               const key = pa.move.dir === 'up' ? '\x1b[A' : '\x1b[B';
@@ -672,7 +682,12 @@ export function optionChoice(lines) {
       return { move: { dir: i > idx ? 'down' : 'up', steps: Math.abs(i - idx) } };
     }
   }
-  return {};
+  // 高亮的是否定项，却找不到肯定项在哪 —— 这时【绝不能闭眼回车】，回车按下去就是 "No, exit"。
+  // 血泪：第一次带 --dangerously-skip-permissions 进书目录时弹的信任框，因为 SessionStart 钩子
+  // 先刷了一大段上下文，把 "Quick safety check" 那几行挤出了 tail，trusty 没命中 → 落到最后那条
+  // 「提示型菜单」规则 → 闭眼回车 → claude 当场退出，日志里只留五条"回车采纳推荐项"。
+  // 宁可不应答（人来处理 / 卡住告警会喊），也不能亲手把 agent 关掉。
+  return { danger: true };
 }
 
 function lastLines(s, n) {
