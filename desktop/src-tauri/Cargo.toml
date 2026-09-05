@@ -1,6 +1,6 @@
 [package]
 name = "novel-studio-desktop"
-version = "1.8.3"
+version = "1.8.4"
 description = "Novel Studio - 网文工作室桌面端"
 edition = "2021"
 
