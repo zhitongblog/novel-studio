@@ -165,3 +165,21 @@ assert.ok(!endsAtShellPrompt(IDLE), 'claude 的输入态不是 shell 提示符')
 console.log('✓ endsAtShellPrompt 认得出折行的提示符，且不误伤真弹窗');
 
 console.log('\n全部通过 ✅  claude 换了同意问法/画了方框/退出后留残影，autopilot 都接得住');
+
+// —— claude 回显的历史指令行不是菜单选项 ——
+// 现场：屏幕上有两条 "❯ 继续下一批。动笔前先重建上下文：…"（几百字一行），照样命中 ^\s*❯\s+\S，
+// 凑够 hasMenu 后撞上任意 selectionHint 就被判「提示型菜单」，每 5 秒往输入框敲一次回车
+// （日志刷了十几条"回车采纳推荐项 ｜ 提示型菜单"）。真菜单的选项都是一行几个字。
+console.log('— 回显的长指令不能当选项 —');
+const ECHO = [
+  '● 三章已写完，自检通过。',
+  '❯ 继续下一批。动笔前先重建上下文：读 continuity_ledger.md，再读最近 2 章正文与本卷 outlines/ 中对应章号段的分章大纲；据此确认当前最新章号、主角处境、未回收伏笔、欠债与伤势。',
+  '❯ 对《走进修仙》做一次【复检】，范围：全书。本次复检的【重点要求】：只处理 2.1 结丹写了三遍这一条，按报告给的方案合并，其余一律不动。请按文件名顺序逐章通读该范围内的正文。',
+  '  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents 请选择',
+].join('\n');
+assert.notStrictEqual(kindOf(ECHO).kind, 'menu', '几百字的回显指令行不是待选项，不能去回车');
+console.log('✓ 长回显行被排除，不再被判成「提示型菜单」');
+// 但真选项（短）照样要认出来
+const REAL = ['请选择一项：', '❯ 是，继续', '  否，退出'].join('\n');
+assert.strictEqual(kindOf(REAL).kind, 'menu', '短选项仍应认成菜单');
+console.log('✓ 短选项照常认得出');

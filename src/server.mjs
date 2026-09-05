@@ -133,6 +133,16 @@ export function runServer(port = 8787) {
   return server;
 }
 
+// 穿插一条新任务（复检/收束令/改名/重写/修订…）。
+// 【必须走这个包装，别直接调 sendToBook】：穿插新任务 = 作者还要它干活，得先撤销之前那次「优雅停止」。
+// 血泪现场（2026-09-05）：先点【停止】(autopilot 进入 draining)，紧接着点【复检】——
+// 复检指令确实穿进去了、git 也存档了，但 draining 还挂着，claude 一跑到待续点就被
+// "当前批次已完成 → 已关闭窗口"收掉，复检跑了一半窗口没了，日志里只有那一句，谁也看不出因果。
+async function injectToBook(slug, text, cfg) {
+  try { rt.get(slug)?.session?.autopilot?.cancelDrain?.(); } catch {}
+  return sendToBook(slug, text, cfg);
+}
+
 // 引擎(重)启动时，把 autopilot 重新挂到仍在运行的写作会话上，避免重启后会话失去监控。
 async function reattachLiveSessions() {
   const cfg = loadConfig();
@@ -271,7 +281,7 @@ async function checkOutlineGate(slug, cfg) {
     // 审稿已在 → 门其实已过、作者卡着没回头 → 催一次让它据审稿修订并继续（每 scope 只催一次）
     if (handled.has(scope + ':nudge')) return;
     handled.add(scope + ':nudge');
-    try { await sendToBook(slug, buildReviseInstruction(book, scope, reviewFile), cfg); pushLog(slug, { level: 'act', msg: `🐕 看门狗：${scope}审稿已在 → 已催作者据此修订并继续写作` }); } catch {}
+    try { await injectToBook(slug, buildReviseInstruction(book, scope, reviewFile), cfg); pushLog(slug, { level: 'act', msg: `🐕 看门狗：${scope}审稿已在 → 已催作者据此修订并继续写作` }); } catch {}
     return;
   }
   if (handled.has(scope + ':gen')) return;   // 正在生成，勿重入
@@ -279,7 +289,7 @@ async function checkOutlineGate(slug, cfg) {
   pushLog(slug, { level: 'act', msg: `🐕 看门狗：检测到卡在【${scope}大纲审稿门】→ 自动生成审稿（codex）并放行…` });
   try {
     const r = await reviewOutline({ book, scope, cfg, authorModel: book.model || cfg.defaultModel, onLog: (e) => pushLog(slug, { ...e, source: 'editor' }) });
-    await sendToBook(slug, buildReviseInstruction(book, scope, r.file), cfg);
+    await injectToBook(slug, buildReviseInstruction(book, scope, r.file), cfg);
     pushLog(slug, { level: 'act', msg: `🐕 看门狗：${scope}审稿已生成（${r.editorModel}）→ 已让作者据此修订并继续写作` });
   } catch (e) {
     pushLog(slug, { level: 'warn', msg: `看门狗自动过门失败：${e.message}（下一轮重试）` });
@@ -875,7 +885,7 @@ async function api(p, req, res, u) {
       try {
         if (running) {
           // 已在写 → 穿插一条复检指令（排在当前批之后）
-          const r = await sendToBook(book.slug, instruction, cfg);
+          const r = await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: `已穿插复检指令（范围 ${body.range || '全书'}）` });
           return json(res, 200, { ok: true, mode: 'inserted', ...r });
         }
@@ -896,7 +906,7 @@ async function api(p, req, res, u) {
         // 若该书正在写作 → 顺手把修订指令穿插给作者
         if (body.inject && sessionLive(book.slug)) {
           const { buildReviseInstruction } = await import('./editor.mjs');
-          try { await sendToBook(book.slug, buildReviseInstruction(book, scope, r.file), cfg); } catch {}
+          try { await injectToBook(book.slug, buildReviseInstruction(book, scope, r.file), cfg); } catch {}
         }
         return json(res, 200, { ok: true, scope, editorModel: r.editorModel, file: path.basename(r.file), critique: r.critique });
       } catch (e) { pushLog(slugOf(body.book), { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -908,7 +918,7 @@ async function api(p, req, res, u) {
         const on = body.on !== false;
         const b = setBookStatus(book.slug, on ? '收尾中' : '连载中');
         if (on && sessionLive(book.slug)) {
-          try { await sendToBook(book.slug, buildFinaleInstruction(book, { first: true }), cfg); pushLog(book.slug, { level: 'act', msg: '已进入收尾 → 穿插收束令' }); } catch {}
+          try { await injectToBook(book.slug, buildFinaleInstruction(book, { first: true }), cfg); pushLog(book.slug, { level: 'act', msg: '已进入收尾 → 穿插收束令' }); } catch {}
         }
         return json(res, 200, { ok: true, status: b.status, live: sessionLive(book.slug) });
       } catch (e) { return json(res, 500, { error: e.message }); }
@@ -922,7 +932,7 @@ async function api(p, req, res, u) {
         try { gitSnapshot(book.dir, `AI改名前存档：${from}→${to}`); } catch {}
         const instruction = buildRenameInstruction(book, from, to);
         if (sessionLive(book.slug)) {
-          await sendToBook(book.slug, instruction, cfg);
+          await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: `已让 AI 上下文改名：${from}→${to}（辨认所有叫法、不误伤、不写正文）` });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
@@ -989,7 +999,7 @@ async function api(p, req, res, u) {
         const target = body.target === 'outline' ? 'outline' : 'bible';
         const instruction = buildReviseSettingInstruction(book, { target, scope: body.scope, instruction: ask });
         if (sessionLive(book.slug)) {
-          await sendToBook(book.slug, instruction, cfg);
+          await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: `已让 AI 按你的话改${target === 'outline' ? '大纲' : '设定/角色'}（不写新正文）` });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
@@ -1003,7 +1013,7 @@ async function api(p, req, res, u) {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
         const instruction = buildRebuildOutlineInstruction(book);
         if (sessionLive(book.slug)) {
-          await sendToBook(book.slug, instruction, cfg);
+          await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: '已穿插指令：重建设定圣经 + 各卷大纲（不写新正文）' });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
@@ -1018,7 +1028,7 @@ async function api(p, req, res, u) {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
         const instruction = buildAfterwordInstruction(book);
         if (sessionLive(book.slug)) {
-          await sendToBook(book.slug, instruction, cfg);
+          await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: '已穿插指令：写《完本感言 / 尾声》' });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
@@ -1070,7 +1080,7 @@ async function api(p, req, res, u) {
         }
         clearPending(book.slug);
         if (sessionLive(book.slug)) {
-          try { await sendToBook(book.slug, instr, cfg); } catch {}
+          try { await injectToBook(book.slug, instr, cfg); } catch {}
         } else {
           // 无状态模式没有长驻会话：把修订指令存为 resume，重启无状态循环 → 到卷口自动应用并接着写
           setResume(book.slug, instr);
@@ -1116,7 +1126,7 @@ async function api(p, req, res, u) {
           clearPending(book.slug);
         } else if (pend && pend.kind === 'outline' && level === 'auto') {
           try { snapshotOutline(book, pend.scope); } catch {}
-          if (sessionLive(book.slug)) { try { await sendToBook(book.slug, buildReviseInstruction(book, pend.scope, pend.file), cfg); } catch {} }
+          if (sessionLive(book.slug)) { try { await injectToBook(book.slug, buildReviseInstruction(book, pend.scope, pend.file), cfg); } catch {} }
           clearPending(book.slug);
         }
         pushLog(book.slug, { level: 'act', msg: `已切到【${label}】` });
@@ -1557,7 +1567,7 @@ async function api(p, req, res, u) {
         // 只有【窗口在且 AI 真的在跑】才穿插指令；若 AI 已退出到命令行（只剩 shell 提示符），
         // 绝不能把指令打进命令行——改为开新窗口重启 AI（治"没打开 ai 就给命令行发命令"）。
         if (sessionLive(book.slug) && await sessionAgentAlive(book.slug, cfg)) {
-          const r = await sendToBook(book.slug, instruction, cfg);
+          const r = await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 指令已穿插' + (hash ? '（已存档 ' + hash + '）' : '') });
           await ensureAutopilot(book.slug, cfg);
           return json(res, 200, { ...r, mode: 'inserted', snapshot: hash });
@@ -1585,7 +1595,7 @@ async function api(p, req, res, u) {
           instruction = buildReviseInstruction(book, scope, path.join(book.dir, 'reviews', '大纲审稿-' + safe + '.md'));
         }
         if (sessionLive(book.slug)) {
-          const r = await sendToBook(book.slug, instruction, cfg);
+          const r = await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: '已让作者按审稿意见修订（穿插进当前窗口）' });
           await ensureAutopilot(book.slug, cfg);
           return json(res, 200, { ...r, mode: 'inserted' });
@@ -1634,7 +1644,7 @@ async function api(p, req, res, u) {
             return json(res, 200, { ok: true, mode: 'switched', model: targetModel, instance: session.instance.id, pane: session.paneId });
           }
           // 窗口还活着且模型一致 → 直接穿插，并确保有人监控（插完还能自动续）
-          const r = await sendToBook(slug, task, cfg);
+          const r = await injectToBook(slug, task, cfg);
           pushLog(slug, { level: 'act', msg: '穿插指令：' + task });
           await ensureAutopilot(slug, cfg);
           return json(res, 200, { ...r, mode: 'inserted' });
@@ -1817,7 +1827,7 @@ async function doWrite(body, cfg, res) {
       rt.delete(slug);
     } else {
       try {
-        const r = await sendToBook(slug, instruction, cfg);
+        const r = await injectToBook(slug, instruction, cfg);
         pushLog(slug, { level: 'act', msg: '窗口已在运行 → 直接续写指令已送达' });
         await ensureAutopilot(slug, cfg);
         return json(res, 200, { ...r, mode: 'inserted' });

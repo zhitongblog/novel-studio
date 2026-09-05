@@ -72,6 +72,16 @@ export class Autopilot {
     this.log('已请求优雅停止：写完当前批次后自动关闭', 'act');
   }
 
+  // 撤销"优雅停止"。穿插新任务时必须调——作者又给活干了，就不该再按之前那次停止把窗口收掉。
+  // 血泪：点【停止】(挂起 drain) 后紧接着点【复检】，复检指令是穿进去了，但 draining 还在，
+  // claude 一跑到待续点就被"当前批次已完成 → 已关闭窗口"收掉，复检跑了一半窗口没了、也没人告诉你为什么。
+  cancelDrain() {
+    if (!this.draining) return false;
+    this.draining = false; this.drainCb = null;
+    this.log('收到新任务 → 撤销之前的「写完就停」请求，窗口保留', 'act');
+    return true;
+  }
+
   async _tick() {
     // pane 还在吗
     const sessions = await this.mcp.sessionList().catch(() => []);
@@ -524,7 +534,19 @@ export class Autopilot {
     // 选择型菜单识别（一律在【剥掉边框】的文本上做，否则弹窗里的选项一行都认不出来）
     const lines = bare.split(/\r?\n/);
     const numbered = lines.filter(l => /^\s*[>❯➤*●○›]?\s*\d+\s*[.)]\s+\S/.test(l));
-    const radio = lines.filter(l => /^\s*[❯➤›]\s+\S/.test(l) || /^\s*[●○]\s+\S/.test(l));
+    // ⚠️ 选项行必须【短】：claude 会把用户发过的指令原样回显成 "❯ 继续下一批。动笔前先重建上下文：…"，
+    //    几百字一行，照样命中 ^\s*❯\s+\S。屏幕上只要有两条这样的历史指令就凑够 hasMenu，
+    //    再撞上任意一个 selectionHint 就被判成「提示型菜单」，于是每 5 秒往输入框里敲一次回车
+    //    （现场日志刷了十几条"回车采纳推荐项 ｜ 提示型菜单"）。真菜单的选项都是一行几个字。
+    // ⚠️ 更坑的一条：`●` 是 claude【每一行输出的项目符号】（"● 三章已写完，自检通过。"），
+    //    而它同时是单选组的"已选中"记号。只要屏幕上有两行 ● 输出就凑够 hasMenu → 判「提示型菜单」去回车。
+    //    判别法：真正的单选组一定【● 和 ○ 同时出现】（选中的和没选中的）；claude 只会吐 ●，从不吐 ○。
+    const OPT_MAX = 80;
+    const short = (l) => l.trim().length <= OPT_MAX;
+    const cursorRadio = lines.filter(l => short(l) && /^\s*[❯➤›]\s+\S/.test(l));
+    const dotRadio = lines.filter(l => short(l) && /^\s*[●○]\s+\S/.test(l));
+    const dotIsMenu = dotRadio.some(l => /^\s*●/.test(l.trim() ? l : '')) && dotRadio.some(l => /^\s*○/.test(l));
+    const radio = dotIsMenu ? [...cursorRadio, ...dotRadio] : cursorRadio;
     const hasMenu = numbered.length >= 2 || radio.length >= 2;
     // 真·选择菜单的关键：高亮光标(›/❯)正停在某个【编号选项】上，如 "› 1. Yes"
     const cursorOnOption = lines.some(l => /^\s*[›❯➤]\s{0,3}\d+\s*[.)]\s+\S/.test(l));
@@ -548,7 +570,8 @@ export class Autopilot {
     // 未选中那行【一个记号都没有】→ radio 只数到 1 行 → hasMenu 为假 → 以前会掉进下面 approveKw 的 yn 分支
     //（"Enter to confirm" 里的 confirm 正好命中关键词），打个 y 再回车——而回车采纳的正是高亮的
     // "No, exit"，等于 autopilot 亲手把 agent 关掉。故凡是"有高亮光标 + 明说按回车确认"就按菜单处理。
-    const cursorMenu = radio.length >= 1 && !agentIdleFooter
+    // 只认【光标记号】(❯ › ➤)：那才代表"高亮停在这一项上"。● 不算——它就是 claude 的输出符号。
+    const cursorMenu = cursorRadio.length >= 1 && !agentIdleFooter
       && /(enter to confirm|enter to (continue|select|apply)|press enter|请选择|回车确认)/i.test(bare);
     // 菜单的默认高亮项【不一定是"同意"】：新版信任框默认停在 "No, exit"，bypass 警告框默认停在 "1. No, exit"，
     // 闭眼回车都是把 agent 关掉。故凡是走菜单，先看清高亮项是不是否定项；是就改选肯定项（有编号按编号、
