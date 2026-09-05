@@ -40,17 +40,24 @@ export function parseCommentItem(raw) {
   const at = chap ? chap[3] : (flat.match(/(\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2}|\d+分钟前|\d+小时前|昨天|今天)/) || [])[1] || '';
 
   // 用户名 = 「评论了第N章」之前的那一段，里面还混着粉丝/打赏标签（"打赏第十四名""真爱粉"…）
-  const head = chap ? flat.slice(0, flat.indexOf('评论了第')) : '';
-  const tags = (head.match(/打赏第[一二三四五六七八九十百千\d]+名|殿堂粉|真爱粉|铁杆粉|追更读者/g) || []);
+  // 书评/书圈那几个页签没有「评论了第N章」这个锚点，头部就是第一行（含标签），得单独取。
+  const TAG_RE = /打赏第[一二三四五六七八九十百千\d]+名|殿堂粉|真爱粉|铁杆粉|追更读者|作者赞过/g;
+  const head = chap ? flat.slice(0, flat.indexOf('评论了第'))
+    : (text.split('\n').map(l => l.trim()).filter(Boolean)[0] || '');
+  const tags = head.match(TAG_RE) || [];
   let user = head;
   for (const t of tags) user = user.replace(t, '');
   user = user.trim();
+  // 首行可能只是操作区（点赞数 / N条回复 / 禁言…），那不是用户名——清掉，好让下面的"啥都没有"判空生效
+  if (/^\d+$/.test(user) || /^(禁言|举报删除|举报|删除|回复|\d+条回复)$/.test(user)) user = '';
 
   // 正文 = 去掉表头那行、再削掉行尾的操作区（点赞数 / N条回复 / 禁言 / 举报删除）
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const bodyLines = [];
   for (const l of lines) {
     if (/评论了第\s*\d+\s*章/.test(l)) continue;
+    if (l === head) continue;                                            // 无章号时的头部行（用户名+标签）
+    if (/^(\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2}|\d+分钟前|\d+小时前|昨天|今天)$/.test(l)) continue;  // 单独一行的日期
     if (/^\d+$/.test(l)) continue;                       // 单独一行的点赞数
     if (/^\d+条回复$/.test(l)) continue;
     if (/^(禁言|举报删除|举报|删除|回复)$/.test(l)) continue;
@@ -141,7 +148,25 @@ async function selectAllChapters(client, onLog) {
       (o.closest('[class*="option"]') || o).click();
       return 'ok';
     })()`);
-    if (String(picked).includes('ok')) { await client.sleep(2500); return true; }
+    if (String(picked).includes('ok')) {
+      await client.sleep(2500);
+      // 【点了不等于切了】首版栽在这：click() 返回 ok，筛选器其实还停在「最新10章」，
+      // 于是 3440 条的书只抓到 4 条，还一路报"完成"。
+      // 第二版又栽了一次：回读时"任意一个文字是 全部章节 的元素"会命中【还展开着的下拉选项】本身，
+      // 于是验证恒真。必须锁定 Arco 的【显示值】元素 .arco-select-view-value，并先把下拉收起来。
+      await client.evaluate(`(function(){ document.body && document.body.click(); return 1; })()`);
+      await client.sleep(600);
+      const now = await client.evaluate(`(function(){
+        var v = document.querySelector('.arco-select-view-value');
+        if (v) return (v.innerText||'').trim();
+        var t = Array.prototype.slice.call(document.querySelectorAll('[class*="select-view"]'))
+          .map(function(e){ return (e.innerText||'').trim(); })
+          .filter(function(x){ return /^(最新\\d+章|全部章节)$/.test(x); })[0];
+        return t || 'unknown';
+      })()`);
+      if (String(now).includes('全部章节')) return true;
+      onLog && onLog({ level: 'warn', msg: `点了「全部章节」但筛选器仍显示「${String(now).slice(0, 12)}」，重试…` });
+    }
     await client.sleep(800);
   }
   onLog && onLog({ level: 'warn', msg: '⚠️ 没能把章节范围切到「全部章节」——默认是「最新10章」，完本/老书在这个默认下几乎抓不到评论，本次结果可能严重偏少' });
@@ -212,6 +237,21 @@ export async function fetchBookComments({
       throw new Error(`【${tab}】页面自报 ${r.selfTotal} 条评论，却一条都没解析出来 —— 番茄的评论区结构变了，`
         + '解析器需要重新校准。这不是"没有评论"，别把空结果写进磁盘。');
     }
+  }
+
+  // 【两个数不是一回事，别拿来互相校验】实测《岳飞》：页头写"共收到评论数：3440条"，
+  // 而筛选器已经是「全部章节」、页签也确实在切，列表就只有「章评数量 · 1」。
+  // 结论：3440 是【书级历史累计】，"章评数量 · N" 才是这个后台视图当前能列出的条数。
+  // 我一度拿 3440 去卡抓取结果（少于 10% 就抛错），那是误报——把正确结果也拦下了。
+  // 真正该卡的是【每个页签自报 N 条、却一条都没解析出来】，那条闸在 harvestTab 之后已经有了。
+  const claimed = Number((String(first.book || '').match(/共收到评论数[：:]\s*(\d+)/) || [])[1] || 0);
+  const tabTotal = Object.values(perTab).reduce((s, t) => s + (t.selfTotal || 0), 0);
+  if (claimed > 0) {
+    onLog({ level: 'info', msg: `书级累计 ${claimed} 条（历史总数）；本视图各页签自报合计 ${tabTotal} 条，抓到 ${all.length} 条` });
+  }
+  // 页签自报合计明显多于抓到的 → 多半是分页没走完，值得提醒，但不至于把结果丢掉。
+  if (tabTotal > 0 && all.length < tabTotal * 0.8) {
+    onLog({ level: 'warn', msg: `⚠️ 页签自报合计 ${tabTotal} 条，只抓到 ${all.length} 条 —— 分页可能没走完，本次结果偏少` });
   }
 
   const dir = path.join(bookDir, 'comments');
