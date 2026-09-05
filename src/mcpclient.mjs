@@ -141,7 +141,26 @@ export class UntermMcp {
     }
   }
 
-  async destroyPane(paneId) { return this.call('session.destroy', this._target(paneId), 8000); }
+  // 关 pane。
+  // ⚠️ Unterm 0.71 实测：`session.destroy` 【不回包】——三键/单键参数都试过、带不带 agent 身份都试过，
+  //    一律 6–8s 超时；meta.surface 里这个方法明明还在，同名调用走 GUI 那条 MCP 通道又是秒回。
+  //    关不掉 pane 的连带后果很重，而且是静默的：closeBookOrphans 清不掉孤儿窗口 → 同一本书被两个
+  //    agent 同时改（《走进修仙》实证：pane 5 和 pane 6 各跑了一遍全书复检，引擎只认得其中一个）；
+  //    autopilot 干完活也收不了窗，窗口越攒越多。
+  // 兜底：session.input 这条通道一直是通的，就用它优雅收——Esc 退掉可能还开着的弹窗、
+  //    Ctrl-C 两下中断 agent、再 exit 让 shell 自己退出（launch 脚本是 -NoExit，只能靠 exit 收）。
+  // 每一步都给短超时：0.71 上这些调用都是"不回包"而不是报错，用默认 15s 的话关一个 pane 要半分钟，
+  // 清几个孤儿窗口就把开窗流程整个拖死了。按键本身是发出去就生效的，不必等回执。
+  async destroyPane(paneId) {
+    try { return await this.call('session.destroy', this._target(paneId), 4000); }
+    catch (e) {
+      const key = (k) => this.call('session.input', { ...this._target(paneId), input: k, text: k }, 2000).catch(() => {});
+      for (const k of ['\x1b', '\x03', '\x03']) { await key(k); await pause(250); }
+      await key('exit\r');
+      await pause(800);
+      return { ok: true, fallback: 'input', reason: e.message };
+    }
+  }
 
   // 0.22 实例要求键名为 input；reference 文档写的是 text。两者都带上。
   async input(paneId, text) { return this.call('session.input', { ...this._target(paneId), input: text, text }); }
@@ -164,3 +183,5 @@ export async function connectInstance(instance, opts = {}) {
   await c.connect();
   return c;
 }
+
+function pause(ms) { return new Promise(r => setTimeout(r, ms)); }

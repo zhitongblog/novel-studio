@@ -549,7 +549,10 @@ $('#rvStart').addEventListener('click', async () => {
   const model = (STATE.books.find(b => b.slug === CUR.slug) || CUR).model || STATE.config.defaultModel;
   $('#rvStart').disabled = true; $('#rvErr').textContent = '启动复检…';
   try {
-    const r = await api('/api/book/review', 'POST', { book: CUR.slug, range, dims, model });
+    // note = 重点要求：buildReviewInstruction 一直支持，之前前端没传 → 想让它"只处理报告里的某一条"
+    // 就只能绕去重写弹窗。填了它才能拿着复检报告一条一条地改。
+    const note = $('#rvNote')?.value.trim() || '';
+    const r = await api('/api/book/review', 'POST', { book: CUR.slug, range, dims, model, note });
     $('#reviewModal').classList.add('hidden'); $('#rvStart').disabled = false;
     setWriting(true); openStream(CUR.slug);
     toast(r.mode === 'inserted' ? '已穿插复检：' + range : '复检已开始：' + range);
@@ -703,6 +706,7 @@ function pbFill(book) {
   $('#pbTime').value = pc.scheduledTime || '';
   $('#pbMatchVol').checked = !!pc.matchVolumes;
   $('#pbSyncRw').checked = !!pc.syncRewrites;
+  $('#pbSyncUnbased').checked = !!pc.syncUnbased;
   $('#pbRwLimit').value = Number.isFinite(Number(pc.rewriteSyncLimit)) ? Number(pc.rewriteSyncLimit) : 3;
   $('#pbAuto').checked = !!pc.autoPublish;
   $('#pbUseAI').checked = !!pc.useAI;
@@ -841,6 +845,7 @@ function pbCfg() {
     scheduledTime: $('#pbTime').value.trim(),
     matchVolumes: $('#pbMatchVol').checked,
     syncRewrites: $('#pbSyncRw').checked,
+    syncUnbased: $('#pbSyncUnbased').checked,
     rewriteSyncLimit: Math.max(0, Number($('#pbRwLimit').value) || 3),
     autoPublish: $('#pbAuto').checked,
     useAI: $('#pbUseAI').checked,
@@ -998,9 +1003,16 @@ $('#pbPreview').addEventListener('click', async () => {
       const rwNums = r.rewrittenNums || [];
       rw = `\n⟳ 检测到 ${r.rewrittenCount} 个重写章（第 ${rwNums.slice(0, 8).join('、')}${rwNums.length > 8 ? '…' : ''} 章）` +
         (r.syncRewrites ? '，发布时将 edit 覆盖同步。' : '，未开「同步重写章」，本次不动它们。');
-      if (r.syncRewrites && r.rewrittenCount > pbRwLimitOf(r)) {
-        rw += `\n⚠️ 超过「覆盖确认阈值」(${pbRwLimitOf(r)} 章)：点发布会先弹一次确认，确认后才覆盖线上。`;
-      }
+    }
+    // 未记账章：番茄已有这个章号、但本工具没发过它。不摆出来的话，这批章既不算新章也不算重写章，
+    // 界面只会显示"无新章可发"，作者根本不知道自己的正文永远同步不上去（《重生美利坚》就是这么卡死的）。
+    if (r.unbasedCount > 0) {
+      const ubNums = r.unbasedNums || [];
+      rw += `\n🧩 有 ${r.unbasedCount} 章番茄已有该章号、但本工具没发过（第 ${ubNums.slice(0, 8).join('、')}${ubNums.length > 8 ? '…' : ''} 章）——无法判断线上是不是这一版` +
+        (r.syncUnbased ? '，发布时将用本地正文 edit 覆盖。' : '，未开「补发未记账章」：这批章既不算新章、也不算重写章，本次不动，也永远发不上去。');
+    }
+    if (pbEditCountOf(r) > pbRwLimitOf(r)) {
+      rw += `\n⚠️ 本次要覆盖 ${pbEditCountOf(r)} 章，超过「覆盖确认阈值」(${pbRwLimitOf(r)} 章)：点发布会先弹一次确认，确认后才覆盖线上。`;
     }
     // 多卷映射预览
     let vol = '';
@@ -1024,10 +1036,10 @@ $('#pbPreview').addEventListener('click', async () => {
       $('#pbGo').disabled = !!volBlocked; $('#pbGo').textContent = volBlocked ? '⛔ 番茄卷读取失败，重试预览' : `📤 发布全部 ${r.newCount} 个新章 ▶`;
     } else {
       out.textContent = `番茄已发到第 ${r.fanqieMax} 章${r.approx ? '(近似)' : ''}，本地第 ${r.localMax} 章 —— 无新章可发。` + rw + vol + sched;
-      // 仅有重写章且已开同步：也允许发布
-      const canEditOnly = r.rewrittenCount > 0 && r.syncRewrites;
-      $('#pbGo').disabled = !canEditOnly;
-      $('#pbGo').textContent = canEditOnly ? `📤 同步 ${r.rewrittenCount} 个重写章 ▶` : '📤 发布全部新章 ▶';
+      // 没有新章、但有要 edit 覆盖的章（重写章 / 未记账章，各自的开关已开）：也允许发布
+      const nEdit = pbEditCountOf(r);
+      $('#pbGo').disabled = !nEdit;
+      $('#pbGo').textContent = nEdit ? `📤 edit 覆盖 ${nEdit} 章 ▶` : '📤 发布全部新章 ▶';
     }
   } catch (e) { $('#pbErr').textContent = '预览失败：' + e.message; }
   finally { stopTick(); btn.disabled = false; btn.textContent = old; }
@@ -1041,6 +1053,9 @@ function pbSetPublishingUI(on) {
   const stop = $('#pbStop');
   if (stop) { stop.style.display = on ? '' : 'none'; stop.disabled = !on; stop.textContent = '⏹ 停止发布'; }
   $('#pbTest').disabled = !!on; $('#pbPreview').disabled = !!on;
+  // 重发修正也驱动同一个浏览器，发布中必须一起锁掉，否则两个流程会互相抢页面
+  const rpT = $('#pbRpTest'), rpG = $('#pbRpGo');
+  if (rpT) rpT.disabled = !!on; if (rpG) rpG.disabled = !!on;
   // 发布中禁用发布并显示"发布中…"；结束后仍保持禁用（需重新预览确认最新章号，避免重发）。
   $('#pbGo').disabled = true;
   $('#pbGo').textContent = on ? '📤 发布中…' : '🔍 请先点「预览将发」';
@@ -1090,6 +1105,19 @@ function pbRwLimitOf(pv) {
   const n = Number(pv && pv.rewriteSyncLimit);
   return Number.isFinite(n) && n >= 0 ? n : 3;
 }
+// 本次会 edit 覆盖多少章线上内容 = 重写章(开了同步才算) + 未记账章(开了补发才算)。
+// 服务端把这两批合成一个 editCh 拿阈值拦，UI 必须按同一个口径算，否则又会出现"看着能发、点了被拦"。
+function pbEditCountOf(pv) {
+  if (!pv) return 0;
+  return (pv.syncRewrites ? (pv.rewrittenCount || 0) : 0) + (pv.syncUnbased ? (pv.unbasedCount || 0) : 0);
+}
+// 本次要覆盖的章号清单（同上口径），给二次确认弹窗摆出来。
+function pbEditNumsOf(pv) {
+  if (!pv) return [];
+  const a = pv.syncRewrites ? (pv.rewrittenNums || []) : [];
+  const b = pv.syncUnbased ? (pv.unbasedNums || []) : [];
+  return [...a, ...b].sort((x, y) => x - y);
+}
 async function pbPublish(limit) {
   $('#pbErr').textContent = '';
   const warn = limit ? `【联调】只发第一个新章到番茄真实账号《${CUR.title}》，确认？` : `把全部新章发布到番茄真实账号《${CUR.title}》。建卷不可逆、发错改不了，确认配置无误？`;
@@ -1099,10 +1127,10 @@ async function pbPublish(limit) {
   // 【别删】没有它，「同步 N 个重写章」按钮点了必被服务端拦死，UI 再无别的路可走。
   let confirmRewrites = false;
   const pv = PB_PREVIEW && PB_PREVIEW.slug === CUR.slug ? PB_PREVIEW.data : null;
-  if (!limit && pv && pv.syncRewrites && pv.rewrittenCount > pbRwLimitOf(pv)) {
-    const nums = pv.rewrittenNums || [];
+  if (!limit && pv && pbEditCountOf(pv) > pbRwLimitOf(pv)) {
+    const nums = pbEditNumsOf(pv);
     const shown = nums.slice(0, 40).join('、') + (nums.length > 40 ? ` …（共 ${nums.length} 章）` : '');
-    const okRw = confirm(`⚠️ 不可逆：本次会用本地正文【覆盖番茄线上已发布的 ${pv.rewrittenCount} 章】，读者已经看过的内容会被改掉。\n\n涉及章号：第 ${shown} 章\n\n确认覆盖？（取消 → 可先关掉「同步重写章」，只发新章）`);
+    const okRw = confirm(`⚠️ 不可逆：本次会用本地正文【覆盖番茄线上已发布的 ${nums.length} 章】，读者已经看过的内容会被改掉。\n\n涉及章号：第 ${shown} 章\n\n确认覆盖？（取消 → 可先关掉「同步重写章」/「补发未记账章」，只发新章）`);
     if (!okRw) return;
     confirmRewrites = true;
   }
@@ -1123,6 +1151,31 @@ async function pbPublish(limit) {
     $('#pbErr').textContent = '发布失败：' + e.message;
   }
 }
+// 🩹 重发修正：用本地正文 edit 覆盖番茄第 from–to 章。后端 /api/book/republish 早就有，
+// 以前只有 API、界面没入口——于是"番茄已有但对不上的章"在 UI 里彻底没救。limit=1 只改第一章试手。
+async function pbRepublish(limit) {
+  if (!CUR) return;
+  $('#pbErr').textContent = '';
+  const from = Number($('#pbRpFrom').value) || 0, to = Number($('#pbRpTo').value) || 0;
+  if (!(from >= 1) || !(to >= from)) { $('#pbErr').textContent = '重发修正：请填合法的起止章号（起始 ≥1、结束 ≥ 起始）'; return; }
+  const range = limit ? `第 ${from} 章（只改这1章试手）` : `第 ${from}–${to} 章（共 ${to - from + 1} 章）`;
+  if (!confirm(`⚠️ 不可逆：用本地正文【覆盖】番茄《${CUR.title}》的 ${range}，读者已经看过的内容会被改掉，章名也会换成本地的。\n\n确认覆盖？`)) return;
+  const slug = CUR.slug;
+  try {
+    if (!await pbSave()) return;
+    await api('/api/book/republish', 'POST', { book: slug, from, to, limit: limit || 0 });
+    PUBLISHING.add(slug); renderShelf();
+    pbSetPublishingUI(true);
+    pbAttachStream(slug, '⏳ 已开始重发修正，进度：\n');
+    toast(limit ? '已开始试改 1 章，进度见下方' : '已开始覆盖，进度见下方');
+  } catch (e) {
+    PUBLISHING.delete(slug); renderShelf();
+    pbSetPublishingUI(false);
+    $('#pbErr').textContent = '重发修正失败：' + e.message;
+  }
+}
+$('#pbRpTest')?.addEventListener('click', () => pbRepublish(1));
+$('#pbRpGo')?.addEventListener('click', () => pbRepublish(0));
 // ⏹ 停止发布：请求后台停发（发完当前章即停），保留状态直到 SSE 报结束。
 $('#pbStop').addEventListener('click', async () => {
   if (!CUR) return;

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getModel, detectModel } from './models.mjs';
 import {
-  ensureProfile, spawnInstance, instancePids, waitForNewInstance,
+  ensureProfile, spawnInstance, instancePids, waitForNewInstance, resolveSpawnedInstance,
   resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow,
 } from './unterm.mjs';
 import { connectInstance } from './mcpclient.mjs';
@@ -159,7 +159,7 @@ export function writeLaunchScript(book, model, instruction, cfg) {
 
 // 主流程。返回 { instance, mcp, autopilot, paneId }。
 // autopilotConfirmOnly：只挂"自动确认提问"的极简 autopilot，绝不自动续写（共创窗口模式用）。
-export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true, autopilotConfirmOnly = false, onFreshRestart = null }) {
+export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true, autopilotConfirmOnly = false, onFreshRestart = null, onTerminalStop = null }) {
   const m = getModel(model);
   if (!m) throw new Error('未知模型：' + model);
   assertCliModel(m, model);
@@ -205,9 +205,11 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   const pid = spawnInstance({ profile: profileName, cwd: book.dir, launchScript: launch });
   onLog({ msg: `已启动 unterm 进程 pid=${pid}，等待实例注册…` });
 
-  const instance = await waitForNewInstance({ beforePids, pid, cwd: book.dir, timeoutMs: 30000 });
-  if (!instance) throw new Error('未能定位到新实例（30s 超时）。请确认 Unterm 正常启动。');
-  onLog({ msg: `新实例：${instance.id}  mcp_port=${instance.mcp_port}  v${instance.version}` });
+  const { instance, reused } = await resolveSpawnedInstance({ beforePids, pid, cwd: book.dir, timeoutMs: 30000 });
+  if (!instance) throw new Error('未能定位到 Unterm 实例（30s 超时）。请确认 Unterm 正常启动。');
+  onLog({ msg: reused
+    ? `复用实例：${instance.id}  mcp_port=${instance.mcp_port}  v${instance.version}（0.71 起新窗口不再注册独立实例，按 pane 认归属）`
+    : `新实例：${instance.id}  mcp_port=${instance.mcp_port}  v${instance.version}` });
 
   // 连 MCP（实例刚起，端口可能稍迟，做几次重试）
   let mcp = null;
@@ -242,6 +244,8 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       ...cfg.autopilot, confirmOnly: true,
       onLog: (e) => onLog({ ...e, source: 'autopilot' }),
       onTokens: (n) => recordUsage(book.slug, tokenKey, n),
+      // 终止性停止(撞用量上限/agent 已退出/已完本…)→ 让上层清掉会话记录，别让书永远挂在"写作中"
+      onTerminalStop: (r) => { try { onTerminalStop && onTerminalStop(r); } catch {} },
       // 任务干完 → 自动收窗 + 从会话表移除(状态转"写作完成")。续写与否由作者决定。
       onDone: () => {
         try { onLog({ level: 'act', source: 'autopilot', msg: '✅ 本次任务完成，已收起窗口（要不要继续由你定）' }); } catch {}
@@ -386,6 +390,8 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       continueText: continueWithVoice(getBook(slug) || book, cfg.autopilot?.continueText),
       onLog: (e) => onLog({ ...e, source: 'autopilot' }),
       onTokens: (n) => recordUsage(book.slug, tokenKey, n),
+      // 终止性停止(撞用量上限/agent 已退出/已完本…)→ 让上层清掉会话记录，别让书永远挂在"写作中"
+      onTerminalStop: (r) => { try { onTerminalStop && onTerminalStop(r); } catch {} },
       onOutlineReady,
       onRevisionDone,
       finaleCheck,

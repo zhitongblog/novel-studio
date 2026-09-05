@@ -215,6 +215,18 @@ function pickRewritten(all, fanqieMax, hashes) {
   return out;
 }
 
+// 挑出"未记账章"：番茄已有这个章号(num≤fanqieMax)，但指纹库里没有它的基线——即【本工具从没发过/编辑过它】。
+//
+// 病根（《重生美利坚》实证）：番茄上是一本更早的书(73章)，本地新书换绑了同一个 bookId。
+// 于是本地第 22–39 章两条路都进不去——num≤73 不算新章、没基线又被 pickRewritten 跳过——
+// 预览只显示"无新章可发"，作者看到的现象是"这本书突然不能编辑同步了"，还查不出为什么。
+// 这里把这批章单独挑出来：预览【永远】把它们摆出来讲清楚，是否覆盖则由 syncUnbased 显式决定。
+// 【默认必须是关】——老书第一次跑到这里时整段已发章都没有基线，默认打开会把整本书重发一遍。
+// 真要覆盖时仍然走 rewriteSyncLimit 那道量的闸，超量照样要作者点头。
+function pickUnbased(all, fanqieMax, hashes) {
+  return all.filter(c => c.num <= fanqieMax && !hashes[String(c.num)]);
+}
+
 export function loadPublishChapters(book, { fromNum = 1 } = {}) {
   const cdir = path.join(book.dir, 'chapters');
   const out = [];
@@ -269,7 +281,11 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
   const newCh = all.filter(c => c.num > fanqieMax);
   // 重写章：番茄已有(num≤fanqieMax)但本地正文在上次发布之后被改动 → 需 edit 同步
   const lastAt = pc.lastPublishAt || 0;
-  const rewritten = pickRewritten(all, fanqieMax, loadPublishedHashes(book));   // 按内容指纹判定，不看 mtime
+  const hashes = loadPublishedHashes(book);
+  const rewritten = pickRewritten(all, fanqieMax, hashes);   // 按内容指纹判定，不看 mtime
+  // 未记账章【无论开没开 syncUnbased 都要报】——它们正是"两条路都进不去"的那批，
+  // 预览不摆出来，界面就只剩一句"无新章可发"，作者无从知道自己的正文根本同步不上去。
+  const unbased = pickUnbased(all, fanqieMax, hashes);
   // 多卷预览：matchVolumes 开时给出 图书卷→番茄卷 映射；本批新章涉及的缺卷会【自动新建】
   let volumes = null;
   if (pc.matchVolumes) {
@@ -288,7 +304,8 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
     newCount: newCh.length, from: newCh[0]?.num || null, to: newCh[newCh.length - 1]?.num || null,
     titles: newCh.slice(0, 5).map(c => c.title),
     rewrittenCount: rewritten.length, rewrittenNums: rewritten.map(c => c.num),
-    syncRewrites: !!pc.syncRewrites, rewriteSyncLimit: rewriteSyncLimitOf(pc),
+    unbasedCount: unbased.length, unbasedNums: unbased.map(c => c.num),
+    syncRewrites: !!pc.syncRewrites, syncUnbased: !!pc.syncUnbased, rewriteSyncLimit: rewriteSyncLimitOf(pc),
     matchVolumes: !!pc.matchVolumes, volumes,
     fanqieLatestDate: fm.latestDate || '', scheduleStart: sched.start, scheduled: sched.scheduled, scheduleReason: sched.reason,
   };
@@ -352,9 +369,12 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
   let newCh = all.filter(c => c.num > fanqieMax).map(c => ({ ...c, mode: 'new' }));
   // 重写章同步(可选)：把上次发布后改动过的旧章，用 edit 模式找番茄对应章覆盖。
   const hashes = loadPublishedHashes(book);
-  let editCh = pc.syncRewrites
-    ? pickRewritten(all, fanqieMax, hashes).map(c => ({ ...c, mode: 'edit' }))
-    : [];
+  const rewritten = pc.syncRewrites ? pickRewritten(all, fanqieMax, hashes) : [];
+  // 未记账章（番茄已有该章号、本工具没发过）：只有显式开了 syncUnbased 才动，理由见 pickUnbased。
+  const unbased = pc.syncUnbased ? pickUnbased(all, fanqieMax, hashes) : [];
+  // 两批都走 edit：pickRewritten 要"有基线"、pickUnbased 要"没基线"，天然不重叠，直接合并按章号排。
+  let editCh = [...rewritten, ...unbased].sort((a, b) => a.num - b.num).map(c => ({ ...c, mode: 'edit' }));
+  if (unbased.length) onLog({ level: 'info', msg: `补发未记账章：${unbased.length} 章（第 ${unbased.map(c => c.num).slice(0, 12).join('、')}${unbased.length > 12 ? '…' : ''} 章，番茄已有该章号但本工具没发过）` });
   // 🛡️覆盖已发布内容是不可逆的（读者已经在看），所以给一道量的闸：一次同步超过 rewriteSyncLimit 章
   // 就中止并把清单摆出来，等人点头。默认 3 章——正常的错字修订就一两章，一次要覆盖几十章
   // 说明是整段重写，那种事必须作者自己知情。传 confirmRewrites=true 放行。
@@ -362,8 +382,9 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
   if (editCh.length > rwLimit && !confirmRewrites) {
     const nums = editCh.map(c => c.num);
     onLog({ level: 'error', msg: `⛔ 已中止：本次要覆盖线上 ${editCh.length} 章已发布内容（第 ${nums.slice(0, 12).join('、')}${nums.length > 12 ? '…' : ''} 章）。`
+      + `（其中重写章 ${rewritten.length} 个、未记账章 ${unbased.length} 个）`
       + `这会改掉读者已经看过的剧情。请在发布弹窗里重新「预览将发」，点发布时会弹二次确认；`
-      + `或把「同步重写章」关掉只发新章，也可把「覆盖确认阈值」调大。` });
+      + `或把「同步重写章」「补发未记账章」关掉只发新章，也可把「覆盖确认阈值」调大。` });
     return { ok: false, blocked: true, reason: `重写同步 ${editCh.length} 章超过上限 ${rwLimit}，需确认`, rewriteNums: nums, published: 0 };
   }
   if (limit > 0) { newCh = newCh.slice(0, limit); editCh = []; }   // 试发只走新章
@@ -471,14 +492,14 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
   let editRes = null, newRes = null;
 
   if (editCh.length) {
-    onLog({ level: 'act', msg: `同步 ${editCh.length} 个重写章(edit)：第 ${editCh.map(c => c.num).join('、')} 章` });
+    onLog({ level: 'act', msg: `edit 覆盖 ${editCh.length} 章（重写 ${rewritten.length}、未记账 ${unbased.length}）：第 ${editCh.map(c => c.num).join('、')} 章` });
     editRes = await publishBook({
       profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title,
       chapters: editCh, config: { ...baseConfig, editMode: true }, onLog,
     });
     runs.push(editRes);
     if (!editRes.ok) {
-      onLog({ level: 'warn', msg: `⚠️ 重写章只同步了 ${editRes.published || 0}/${editCh.length} 章（${editRes.error || editRes.status}）——新章照常继续发` });
+      onLog({ level: 'warn', msg: `⚠️ edit 覆盖只完成了 ${editRes.published || 0}/${editCh.length} 章（${editRes.error || editRes.status}）——新章照常继续发` });
     }
   }
 

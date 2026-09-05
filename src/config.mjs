@@ -17,6 +17,9 @@ const DEFAULTS = {
   untermExe: '',
   untermCli: '',
   codexBypassSandbox: true,          // codex Windows 沙箱常失败 → 默认绕过（书目录是独立 git 仓库）
+  // claude 启动带 --dangerously-skip-permissions：不弹审批框，autopilot 就不必靠"认屏幕"去点同意。
+  // 理由与边界见 models.mjs 里 claude.seedArgs 上方的长注释。设 false 恢复弹窗（届时靠 autopilot 识别）。
+  claudeSkipPermissions: true,
   gemini: {                          // Google Gemini / Imagen（用于 AI 生成封面底图、把中文题材翻成英文画面提示）
     apiKey: '',                      // Google AI Studio API key（AIza...）。存在用户配置文件里，不写进源码
     proxy: 'http://127.0.0.1:7897',  // 访问 generativelanguage.googleapis.com 走的代理（国内必需）；'' = 直连
@@ -159,6 +162,10 @@ const DEFAULTS = {
     // freshFallbackBatches：读不到上下文大小的模型(gemini 等)的兜底——每写够 N 批重开一次（0=关闭）。
     freshContextLimit: 180000,
     freshFallbackBatches: 0,
+    // 卡住告警：屏幕不变 + 输出字节不涨【连续这么久】就在日志里报一次警（之后每满一个周期再报一次）。
+    // 由来：窗口在、进程在、autopilot 也挂着，就是什么都不发生，日志一片空白，只能靠人去翻现场。
+    // 0=关闭。confirmOnly（复检/立项/改名）不报——那类任务干完本来就该静止。
+    stallAlarmMs: 1200000,           // 20 分钟
     affirmativeText: 'y',            // y/n 类提问的肯定答复
     preferRecommended: true,         // 选择型菜单优先按回车接受高亮的推荐项
     stopOnPhrases: ['全部完成', '已完成全部', '没有更多', 'all done', 'nothing left to write'],

@@ -23,8 +23,28 @@ export const MODELS = {
     name: 'Claude Code',
     bin: 'claude',
     untermAgentId: 'claude-code',
-    seedArgs: (instruction, _cfg) => [instruction],
-    note: '读取本书目录 CLAUDE.md 作为写作规范。',
+    // 默认加 --dangerously-skip-permissions：这一条把【认审批弹窗】整类问题从根上去掉。
+    //
+    // 为什么值得（2026-09-05 血泪）：claude 一次 TUI 改版就同时打断四处——审批框加了边框、
+    // 改文件的问句从 "Do you want to proceed?" 换成 "Do you want to make this edit to X?"、
+    // 信任目录框重写成无编号且默认高亮 "No, exit"、退出后弹窗残影留在滚动历史里。
+    // 每一处都要靠截屏猜它长什么样，它每改一次界面我们就断一次。不弹窗就没有这一整类问题。
+    //
+    // 安全边界：书目录是【独立 git 仓库】，开窗前还会 gitSnapshot 存档；agent 全程由 autopilot 驱动、
+    // 只干写作那点事。而且【本来也没有真正的把关】——autopilot 的职责就是无条件替作者点同意，
+    // 加这个开关只是把"每次都点一遍"变成"一次都不用点"，并没有放宽实际权限。
+    // codex 早就是这么干的（codexBypassSandbox，见上）。要关就设 config.claudeSkipPermissions=false。
+    //
+    // ⚠️ 首次在一个目录用这个开关，claude 会弹一次 bypass 警告框，且【默认高亮是 "1. No, exit"】——
+    // 闭眼回车就是把 agent 关掉。autopilot 的 optionChoice() 已经能识别并改选肯定项（有回归测试）。
+    seedArgs: (instruction, cfg) => {
+      const args = [];
+      if (!cfg || cfg.claudeSkipPermissions !== false) args.push('--dangerously-skip-permissions');
+      args.push(instruction);
+      return args;
+    },
+    note: '读取本书目录 CLAUDE.md 作为写作规范。默认带 --dangerously-skip-permissions（不弹审批框，'
+      + 'autopilot 不必靠认屏幕来点同意）；要恢复弹窗设 claudeSkipPermissions=false。',
   },
   gemini: {
     id: 'gemini',

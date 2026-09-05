@@ -18,8 +18,8 @@ import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
 import { detectAll, getModel } from './models.mjs';
 import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
-import { getSession, removeSession } from './sessions.mjs';
-import { startWriting } from './writer.mjs';
+import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
+import { startWriting, snapshotPaneIds } from './writer.mjs';
 import { runStateless } from './statelessWriter.mjs';
 import { runWebWrite, getAdapter } from './webwriter.mjs';
 import { runApiWrite, isApiProvider } from './apiwriter.mjs';
@@ -133,13 +133,41 @@ export function runServer(port = 8787) {
   return server;
 }
 
+// autopilot 因【终止性原因】停下来时的收尾：把会话记录清掉，让这本书回到空闲。
+// 不清的后果（《大宋第一女帝：我成了李清照》实证）：撞上模型用量上限 → autopilot 停并说
+// "不再重试，等额度恢复后手动继续" → 60 秒后孤儿看门狗看见"在册会话没有活着的 autopilot"
+// → 补挂一个 → 新的立刻又撞上限 → 停 → 再补挂…… 日志里来回刷，而书永远挂在"写作中"，
+// 界面上写作/复检/发布全被那个状态挡着，什么都点不动。
+// 记录一清，看门狗自然不会再补挂（它遍历的就是在册会话），状态也跟着回正。
+// 窗口本身留着不动——agent 可能还能用，作者要么手动继续，要么下次开写时 closeBookOrphans 会清掉它。
+function mkTerminalStop(slug) {
+  return (reason) => {
+    try { pushLog(slug, { level: 'warn', msg: `autopilot 终止性停止（${reason}）→ 已清理会话记录，这本书回到空闲；窗口留着没关，你可以去窗口手动继续` }); } catch {}
+    try { removeSession(slug); } catch {}
+    const st = rt.get(slug);
+    try { st?.streamer?.stop(); } catch {}
+    rt.delete(slug);
+    try { broadcast(slug, 'stopped', { reason: 'terminal', detail: reason }); } catch {}
+  };
+}
+
+// 穿插一条新任务（复检/收束令/改名/重写/修订…）。
+// 【必须走这个包装，别直接调 sendToBook】：穿插新任务 = 作者还要它干活，得先撤销之前那次「优雅停止」。
+// 血泪现场（2026-09-05）：先点【停止】(autopilot 进入 draining)，紧接着点【复检】——
+// 复检指令确实穿进去了、git 也存档了，但 draining 还挂着，claude 一跑到待续点就被
+// "当前批次已完成 → 已关闭窗口"收掉，复检跑了一半窗口没了，日志里只有那一句，谁也看不出因果。
+async function injectToBook(slug, text, cfg) {
+  try { rt.get(slug)?.session?.autopilot?.cancelDrain?.(); } catch {}
+  return sendToBook(slug, text, cfg);
+}
+
 // 引擎(重)启动时，把 autopilot 重新挂到仍在运行的写作会话上，避免重启后会话失去监控。
 async function reattachLiveSessions() {
   const cfg = loadConfig();
   for (const s of listSessions()) {
     if (rt.get(s.slug)?.session?.autopilot?.running) continue;   // 只有【活着的】autopilot 才跳过
     try {
-      const h = await attachAutopilot(s.slug, cfg, (e) => pushLog(s.slug, e), mkFresh(s.slug, cfg));
+      const h = await attachAutopilot(s.slug, cfg, (e) => pushLog(s.slug, e), mkFresh(s.slug, cfg), mkTerminalStop(s.slug));
       rtOf(s.slug).session = { autopilot: h.autopilot, mcp: h.mcp, reattached: true };
       pushLog(s.slug, { msg: '引擎启动 → 已重新挂载 autopilot 继续监控' });
     } catch (e) { /* 会话可能已死，listSessions 会自动清理 */ }
@@ -152,6 +180,21 @@ function startOrphanWatchdog() {
   if (globalThis.__nsOrphanWatchdog) return;
   globalThis.__nsOrphanWatchdog = setInterval(async () => {
     let cfg; try { cfg = loadConfig(); } catch { return; }
+    // 先按【还活着的 pane】清一遍陈旧会话记录。0.71 起会话记的 pid 是共用的 GUI pid，
+    // 只要 Unterm 开着就永远"活着"，pane 早关了书还挂在写作中 → 下次写作/复检只去穿插指令、
+    // 打进一个不存在的 pane，界面上就是点了没反应。连不上时 snapshotPaneIds 返回空集，
+    // 这里按 null 传下去 → 一个都不删，绝不误杀在跑的会话。
+    try {
+      const panes = await snapshotPaneIds();
+      for (const slug of pruneSessionsByPanes(panes.size ? panes : null)) {
+        pushLog(slug, { level: 'warn', msg: '窗口已不在（pane 没了）→ 清理陈旧会话记录，这本书回到空闲' });
+        const st = rt.get(slug);
+        try { st?.session?.autopilot?.stop('窗口已关闭'); } catch {}
+        try { st?.streamer?.stop(); } catch {}
+        rt.delete(slug);
+        broadcast(slug, 'stopped', { reason: 'pane-gone' });
+      }
+    } catch {}
     for (const s of listSessions()) {
       let st = rt.get(s.slug);
       const ap = st?.session?.autopilot;
@@ -161,7 +204,7 @@ function startOrphanWatchdog() {
       if (!ap || !ap.running) {
         try { st?.session?.mcp?.close?.(); } catch {}                 // 清掉停掉的旧连接，避免泄漏
         try {
-          const h = await attachAutopilot(s.slug, cfg, (e) => pushLog(s.slug, e), mkFresh(s.slug, cfg));
+          const h = await attachAutopilot(s.slug, cfg, (e) => pushLog(s.slug, e), mkFresh(s.slug, cfg), mkTerminalStop(s.slug));
           rtOf(s.slug).session = { ...(st?.session || {}), autopilot: h.autopilot, mcp: h.mcp, reattached: true };
           pushLog(s.slug, { level: 'act', msg: ap ? '🐕 看门狗：写作窗口的 autopilot 已停掉/掉线 → 重新补挂继续盯' : '🐕 看门狗：发现写作窗口无人监控 → 已补挂 autopilot 继续盯' });
           st = rt.get(s.slug);
@@ -256,7 +299,7 @@ async function checkOutlineGate(slug, cfg) {
     // 审稿已在 → 门其实已过、作者卡着没回头 → 催一次让它据审稿修订并继续（每 scope 只催一次）
     if (handled.has(scope + ':nudge')) return;
     handled.add(scope + ':nudge');
-    try { await sendToBook(slug, buildReviseInstruction(book, scope, reviewFile), cfg); pushLog(slug, { level: 'act', msg: `🐕 看门狗：${scope}审稿已在 → 已催作者据此修订并继续写作` }); } catch {}
+    try { await injectToBook(slug, buildReviseInstruction(book, scope, reviewFile), cfg); pushLog(slug, { level: 'act', msg: `🐕 看门狗：${scope}审稿已在 → 已催作者据此修订并继续写作` }); } catch {}
     return;
   }
   if (handled.has(scope + ':gen')) return;   // 正在生成，勿重入
@@ -264,7 +307,7 @@ async function checkOutlineGate(slug, cfg) {
   pushLog(slug, { level: 'act', msg: `🐕 看门狗：检测到卡在【${scope}大纲审稿门】→ 自动生成审稿（codex）并放行…` });
   try {
     const r = await reviewOutline({ book, scope, cfg, authorModel: book.model || cfg.defaultModel, onLog: (e) => pushLog(slug, { ...e, source: 'editor' }) });
-    await sendToBook(slug, buildReviseInstruction(book, scope, r.file), cfg);
+    await injectToBook(slug, buildReviseInstruction(book, scope, r.file), cfg);
     pushLog(slug, { level: 'act', msg: `🐕 看门狗：${scope}审稿已生成（${r.editorModel}）→ 已让作者据此修订并继续写作` });
   } catch (e) {
     pushLog(slug, { level: 'warn', msg: `看门狗自动过门失败：${e.message}（下一轮重试）` });
@@ -839,7 +882,7 @@ async function api(p, req, res, u) {
       if (freehand) pushLog(book.slug, { level: 'info', msg: '🌱 探索式立项：圣经只写【写作手法 + 主角名 + 故事概述】，不出全书大纲、不出卷大纲——剧情你一段一段给，AI 自拆 3–5 章' });
       rtOf(book.slug).logs = [];
       try {
-        const session = await startWriting({ book, model: launchModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
+        const session = await startWriting({ book, model: launchModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, book: { ...book, stats: { chapters: 0, kb: 0 }, tokens: 0 }, instance: session.instance.id, pane: session.paneId, planOnly: isWebModel });
       } catch (e) { pushLog(book.slug, { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -848,17 +891,25 @@ async function api(p, req, res, u) {
       const book = getBook(body.book);
       if (!book) return json(res, 400, { error: '找不到书：' + body.book });
       const instruction = buildReviewInstruction(book, body.range, body.dims, body.note);
+      // 复检会【就地改正文】（逻辑硬伤直接改、文风直接润色），和重写/AI改名/删章一样是不可逆的，
+      // 却一直没有存档点——《金丹》那本实证：一次全书复检把 103 章全改了一遍，而 chapters/ 从来没被
+      // git 收过（初始提交发生在导入之前），36 万字改完没有任何东西可回退。gitSnapshot 走的是 add -A，
+      // 开窗前调一次就把 chapters/ 一并收进去。
+      try {
+        const h = gitSnapshot(book.dir, `复检前存档：${body.range || '全书'}`);
+        if (h) pushLog(book.slug, { level: 'info', msg: `已 git 存档：${h}（复检会就地改正文，不满意可回退到这里）` });
+      } catch {}
       const running = listSessions().some(s => s.slug === book.slug);
       try {
         if (running) {
           // 已在写 → 穿插一条复检指令（排在当前批之后）
-          const r = await sendToBook(book.slug, instruction, cfg);
+          const r = await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: `已穿插复检指令（范围 ${body.range || '全书'}）` });
           return json(res, 200, { ok: true, mode: 'inserted', ...r });
         }
         // 未在写 → 开一个会话专门做复检
         rtOf(book.slug).logs = [];
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, pane: session.paneId });
       } catch (e) { pushLog(book.slug, { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -873,7 +924,7 @@ async function api(p, req, res, u) {
         // 若该书正在写作 → 顺手把修订指令穿插给作者
         if (body.inject && sessionLive(book.slug)) {
           const { buildReviseInstruction } = await import('./editor.mjs');
-          try { await sendToBook(book.slug, buildReviseInstruction(book, scope, r.file), cfg); } catch {}
+          try { await injectToBook(book.slug, buildReviseInstruction(book, scope, r.file), cfg); } catch {}
         }
         return json(res, 200, { ok: true, scope, editorModel: r.editorModel, file: path.basename(r.file), critique: r.critique });
       } catch (e) { pushLog(slugOf(body.book), { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -885,7 +936,7 @@ async function api(p, req, res, u) {
         const on = body.on !== false;
         const b = setBookStatus(book.slug, on ? '收尾中' : '连载中');
         if (on && sessionLive(book.slug)) {
-          try { await sendToBook(book.slug, buildFinaleInstruction(book, { first: true }), cfg); pushLog(book.slug, { level: 'act', msg: '已进入收尾 → 穿插收束令' }); } catch {}
+          try { await injectToBook(book.slug, buildFinaleInstruction(book, { first: true }), cfg); pushLog(book.slug, { level: 'act', msg: '已进入收尾 → 穿插收束令' }); } catch {}
         }
         return json(res, 200, { ok: true, status: b.status, live: sessionLive(book.slug) });
       } catch (e) { return json(res, 500, { error: e.message }); }
@@ -899,11 +950,11 @@ async function api(p, req, res, u) {
         try { gitSnapshot(book.dir, `AI改名前存档：${from}→${to}`); } catch {}
         const instruction = buildRenameInstruction(book, from, to);
         if (sessionLive(book.slug)) {
-          await sendToBook(book.slug, instruction, cfg);
+          await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: `已让 AI 上下文改名：${from}→${to}（辨认所有叫法、不误伤、不写正文）` });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -966,11 +1017,11 @@ async function api(p, req, res, u) {
         const target = body.target === 'outline' ? 'outline' : 'bible';
         const instruction = buildReviseSettingInstruction(book, { target, scope: body.scope, instruction: ask });
         if (sessionLive(book.slug)) {
-          await sendToBook(book.slug, instruction, cfg);
+          await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: `已让 AI 按你的话改${target === 'outline' ? '大纲' : '设定/角色'}（不写新正文）` });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -980,11 +1031,11 @@ async function api(p, req, res, u) {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
         const instruction = buildRebuildOutlineInstruction(book);
         if (sessionLive(book.slug)) {
-          await sendToBook(book.slug, instruction, cfg);
+          await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: '已穿插指令：重建设定圣经 + 各卷大纲（不写新正文）' });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -995,11 +1046,11 @@ async function api(p, req, res, u) {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
         const instruction = buildAfterwordInstruction(book);
         if (sessionLive(book.slug)) {
-          await sendToBook(book.slug, instruction, cfg);
+          await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: '已穿插指令：写《完本感言 / 尾声》' });
           return json(res, 200, { ok: true, mode: 'inserted' });
         }
-        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), autopilotConfirmOnly: true });
+        const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -1047,7 +1098,7 @@ async function api(p, req, res, u) {
         }
         clearPending(book.slug);
         if (sessionLive(book.slug)) {
-          try { await sendToBook(book.slug, instr, cfg); } catch {}
+          try { await injectToBook(book.slug, instr, cfg); } catch {}
         } else {
           // 无状态模式没有长驻会话：把修订指令存为 resume，重启无状态循环 → 到卷口自动应用并接着写
           setResume(book.slug, instr);
@@ -1093,7 +1144,7 @@ async function api(p, req, res, u) {
           clearPending(book.slug);
         } else if (pend && pend.kind === 'outline' && level === 'auto') {
           try { snapshotOutline(book, pend.scope); } catch {}
-          if (sessionLive(book.slug)) { try { await sendToBook(book.slug, buildReviseInstruction(book, pend.scope, pend.file), cfg); } catch {} }
+          if (sessionLive(book.slug)) { try { await injectToBook(book.slug, buildReviseInstruction(book, pend.scope, pend.file), cfg); } catch {} }
           clearPending(book.slug);
         }
         pushLog(book.slug, { level: 'act', msg: `已切到【${label}】` });
@@ -1534,13 +1585,13 @@ async function api(p, req, res, u) {
         // 只有【窗口在且 AI 真的在跑】才穿插指令；若 AI 已退出到命令行（只剩 shell 提示符），
         // 绝不能把指令打进命令行——改为开新窗口重启 AI（治"没打开 ai 就给命令行发命令"）。
         if (sessionLive(book.slug) && await sessionAgentAlive(book.slug, cfg)) {
-          const r = await sendToBook(book.slug, instruction, cfg);
+          const r = await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 指令已穿插' + (hash ? '（已存档 ' + hash + '）' : '') });
           await ensureAutopilot(book.slug, cfg);
           return json(res, 200, { ...r, mode: 'inserted', snapshot: hash });
         }
         rtOf(book.slug).logs = [];
-        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
+        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug) });
         rtOf(book.slug).session = session;
         pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 已开窗' + (hash ? '（已存档 ' + hash + '，可回退）' : '') });
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, snapshot: hash });
@@ -1562,13 +1613,13 @@ async function api(p, req, res, u) {
           instruction = buildReviseInstruction(book, scope, path.join(book.dir, 'reviews', '大纲审稿-' + safe + '.md'));
         }
         if (sessionLive(book.slug)) {
-          const r = await sendToBook(book.slug, instruction, cfg);
+          const r = await injectToBook(book.slug, instruction, cfg);
           pushLog(book.slug, { level: 'act', msg: '已让作者按审稿意见修订（穿插进当前窗口）' });
           await ensureAutopilot(book.slug, cfg);
           return json(res, 200, { ...r, mode: 'inserted' });
         }
         rtOf(book.slug).logs = [];
-        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg) });
+        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug) });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, pane: session.paneId });
       } catch (e) { pushLog(slugOf(body.book), { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
@@ -1611,7 +1662,7 @@ async function api(p, req, res, u) {
             return json(res, 200, { ok: true, mode: 'switched', model: targetModel, instance: session.instance.id, pane: session.paneId });
           }
           // 窗口还活着且模型一致 → 直接穿插，并确保有人监控（插完还能自动续）
-          const r = await sendToBook(slug, task, cfg);
+          const r = await injectToBook(slug, task, cfg);
           pushLog(slug, { level: 'act', msg: '穿插指令：' + task });
           await ensureAutopilot(slug, cfg);
           return json(res, 200, { ...r, mode: 'inserted' });
@@ -1723,7 +1774,7 @@ async function ensureAutopilot(slug, cfg) {
   const st = rt.get(slug);
   if (st?.session?.autopilot) return false;
   try {
-    const h = await attachAutopilot(slug, cfg, (e) => pushLog(slug, e), mkFresh(slug, cfg));
+    const h = await attachAutopilot(slug, cfg, (e) => pushLog(slug, e), mkFresh(slug, cfg), mkTerminalStop(slug));
     rtOf(slug).session = { ...(st?.session || {}), autopilot: h.autopilot, mcp: h.mcp };
     pushLog(slug, { level: 'act', msg: '已重新接管监控（autopilot）' });
     return true;
@@ -1755,7 +1806,7 @@ async function resumeWriting(slug, cfg, extraTask = '', model = null) {
   if (extraTask) instruction += '；另外，本次还需：' + String(extraTask).replace(/[\r\n]+/g, ' ');
   const useModel = model || book.model || cfg.defaultModel;
   pushLog(slug, { level: 'act', msg: `会话已停止 → 用 ${useModel} 重新打开 Unterm 并继续写作…` });
-  const session = await startWriting({ book, model: useModel, instruction, cfg, onLog: (e) => pushLog(slug, e), onFreshRestart: mkFresh(slug, cfg) });
+  const session = await startWriting({ book, model: useModel, instruction, cfg, onLog: (e) => pushLog(slug, e), onFreshRestart: mkFresh(slug, cfg), onTerminalStop: mkTerminalStop(slug) });
   rtOf(slug).session = session;
   return session;
 }
@@ -1794,7 +1845,7 @@ async function doWrite(body, cfg, res) {
       rt.delete(slug);
     } else {
       try {
-        const r = await sendToBook(slug, instruction, cfg);
+        const r = await injectToBook(slug, instruction, cfg);
         pushLog(slug, { level: 'act', msg: '窗口已在运行 → 直接续写指令已送达' });
         await ensureAutopilot(slug, cfg);
         return json(res, 200, { ...r, mode: 'inserted' });

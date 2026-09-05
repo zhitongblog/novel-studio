@@ -58,10 +58,22 @@ export class Autopilot {
     }
   }
 
+  // 【终止性停止】——这些原因下再补挂一个 autopilot 也是白搭，它会立刻撞上同样的东西再停。
+  // 血泪（《大宋第一女帝：我成了李清照》）：撞到模型用量上限 → stop("不再重试，等额度恢复后手动继续")
+  // → 60 秒后孤儿看门狗看见"在册会话没有活着的 autopilot" → 补挂 → 新的立刻又撞上限 → 停 → 再补挂…
+  // 日志里 停止/补挂 来回刷，而会话记录一直在，那本书就永远挂在"写作中"，界面上什么都点不动。
+  // 判定为终止性时通知上层把会话记录清掉：记录没了，看门狗自然不会再补挂，书也回到空闲。
+  static TERMINAL = /(用量|速率上限|额度|配额|agent 已退出|agent 未能启动|已完本|窗口\/pane 已关闭|agent 进程已退出)/;
+
   stop(reason) {
     if (!this.running) return;
     this.running = false;
+    const terminal = !!reason && Autopilot.TERMINAL.test(String(reason));
+    this.terminalReason = terminal ? String(reason) : null;
     this.log('autopilot 已停止' + (reason ? '：' + reason : ''), 'info');
+    if (terminal) {
+      try { this.opt.onTerminalStop && this.opt.onTerminalStop(String(reason)); } catch {}
+    }
   }
 
   // 优雅停止：不再驱动新批次/收尾/体检，等当前批次写完(回到待续点)后调 cb(关闭窗口)。
@@ -70,6 +82,16 @@ export class Autopilot {
     this.draining = true;
     this.drainCb = cb;
     this.log('已请求优雅停止：写完当前批次后自动关闭', 'act');
+  }
+
+  // 撤销"优雅停止"。穿插新任务时必须调——作者又给活干了，就不该再按之前那次停止把窗口收掉。
+  // 血泪：点【停止】(挂起 drain) 后紧接着点【复检】，复检指令是穿进去了，但 draining 还在，
+  // claude 一跑到待续点就被"当前批次已完成 → 已关闭窗口"收掉，复检跑了一半窗口没了、也没人告诉你为什么。
+  cancelDrain() {
+    if (!this.draining) return false;
+    this.draining = false; this.drainCb = null;
+    this.log('收到新任务 → 撤销之前的「写完就停」请求，窗口保留', 'act');
+    return true;
   }
 
   async _tick() {
@@ -84,7 +106,7 @@ export class Autopilot {
     // outBytes: pane 的累计输出字节，单调递增——判"还在动"比 diff 整屏更准（不受光标闪烁、idle 占位符干扰）。
     const ag = await this._call('agentStatus', this.paneId);
     const idleInfo = await this._call('sessionIdle', this.paneId);
-    const agentState = ag?.state || null;
+    let agentState = ag?.state || null;   // 可能被下面的「陈旧 working」判定推翻 → 置 null 回退到屏幕判据
     const outBytes = idleInfo?.outBytes ?? null;
     const bytesGrew = outBytes != null && this._lastOutBytes != null && outBytes > this._lastOutBytes;
     if (outBytes != null) this._lastOutBytes = outBytes;
@@ -107,6 +129,48 @@ export class Autopilot {
       try { await this.mcp.input(this.paneId, '\x1b[1;5F'); await sleep(300); screen = (await this.mcp.screenText(this.paneId).catch(() => '')) || screen; } catch {}
     }
     const screenChanged = this.prevScreen !== null && screen !== this.prevScreen;
+
+    // 【陈旧 working】——agent.status 是 claude 侧 hook 上报的，hook 一旦挂了，状态就【永远停在 working】。
+    // 现场（《走进修仙》pane 7）：写完 104–106 章后 Stop 钩子报错（屏幕上一串 Hookify error），
+    // agent.status 报 state=working、forSecs=37577（10.4 小时），而 session.idle 明说 idle=true、
+    // 输出字节不涨、屏幕一动不动。忙判据只认 working → autopilot 认定"它还在写"，再也不发续写指令；
+    // 表现就是【写完一批就再也不动了，日志一片空白】，人还以为是写完了。
+    // 交叉验证后不再采信：session.idle 说空闲 + 输出不涨 + 屏幕不变，连续几拍即判陈旧；
+    // 或者 working 已经挂了半小时以上而 session.idle 说空闲——那不可能是真在干活。
+    // ⚠️【最小年龄】必须有：窗口刚起来那几拍，"session.idle=true + 屏幕没动 + 字节没涨"是【天然成立】的
+    //（agent 还在加载、还没吐第一个字）。没有这道限制就会在 t=0 判定"hook 陈旧"、把 agentState 置空，
+    // 于是 confirmOnly 的收窗计数失去保护，claude 还在读 36 章正文、屏幕没动，120 秒就被当成
+    //「✅ 本次任务完成」收掉——换骨那轮就是这么死的，也正是记忆里"长思考被误杀"的老坑。
+    // hook 刚报过 working（forSecs 很小）就不可能是陈旧状态，陈旧的前提是它【卡了很久】。
+    const workedFor = ag?.forSecs || 0;
+    if (agentState === 'working' && workedFor >= (this.opt.staleWorkingMinSecs || 300)
+        && idleInfo?.idle === true && !screenChanged && !bytesGrew) {
+      this._staleWorking = (this._staleWorking || 0) + 1;
+      const longGone = workedFor >= (this.opt.staleWorkingSecs || 1800);
+      if (longGone || this._staleWorking >= (this.opt.staleWorkingPolls || 5)) {
+        if (!this._staleLogged) {
+          this.log(`agent.status 一直报 working（已 ${Math.round((ag?.forSecs || 0) / 60)} 分钟），但 session.idle 说空闲、输出与屏幕都不动`
+            + ` → 判定是 agent 侧 hook 挂了留下的陈旧状态，改用屏幕判据继续`, 'warn');
+          this._staleLogged = true;
+        }
+        agentState = null;
+      }
+    } else { this._staleWorking = 0; this._staleLogged = false; }
+
+    // 【卡住告警】今晚三次事故长得一模一样：窗口在、进程在、autopilot 也挂着，就是【什么都不发生】，
+    // 而日志一片空白——每一次都得作者来问、我去翻现场才发现。这里主动把"多久没动静"报出来。
+    // 判据只用最硬的两条：屏幕没变 + pane 输出字节不涨。真在长思考的窗口 spinner 一直在跳，屏幕必变。
+    const nowMs = Date.now();
+    if (screenChanged || bytesGrew) { this._lastActiveAt = nowMs; this._stallAlarmAt = 0; }
+    if (!this._lastActiveAt) this._lastActiveAt = nowMs;
+    const stallMs = this.opt.stallAlarmMs ?? 20 * 60 * 1000;   // 用 ?? 而不是 ||：0 是"关闭"，不是"没设"
+    // confirmOnly（复检/立项/AI改名）不报：那类任务干完就该静止，静止到阈值会自动收窗，不是故障。
+    if (stallMs > 0 && !this.opt.confirmOnly && nowMs - this._lastActiveAt >= stallMs
+        && (!this._stallAlarmAt || nowMs - this._stallAlarmAt >= stallMs)) {
+      this._stallAlarmAt = nowMs;
+      this.log(`⚠️ 这本书已经 ${Math.round((nowMs - this._lastActiveAt) / 60000)} 分钟没有任何动静`
+        + `（屏幕不变、输出不涨），窗口还在但没在写。去窗口看一眼，或点「停止」后重新开始。`, 'warn');
+    }
     // 用"非空行"的尾部：codex/claude 的 TUI 常把提问渲染在顶部、下面大片空行，
     // 若取最后 N 个原始行会全是空行 → 漏判提问。故过滤空行后再取尾部。
     const tail = screen.split(/\r?\n/).filter(l => l.trim()).slice(-40).join('\n');
@@ -163,7 +227,11 @@ export class Autopilot {
     // bypass 模式下 codex 会 spawn 子 shell 执行命令，前台进程名会变成 pwsh —— 但屏幕仍是 agent 的 TUI。
     // 只有"裸 shell 提示符 + 无 TUI 标记 + 进程级也看不到 agent"才算它退出 → 绝不向裸 shell 注入指令。
     const agentTui = /(esc to interrupt|tokens used|gpt-[0-9]|claude|gemini|❯|›|•\s*(running|working|ran|queued)|▌|\? for shortcuts|to interrupt|to view transcript|press enter)/i.test(tail);
-    const bareShell = !agentTui && agentPresent !== true && /(^|\n)\s*(PS\s+)?[A-Za-z]:[\\/][^\n]*>\s*$/.test(tail.replace(/\s+$/, '') + '\n');
+    // ⚠️ agentTui 会被【滚动历史里的残影】骗到：agent 退出后，它刚才那个弹窗还留在屏幕上（❯、press enter
+    //    全都还在），于是"回到 shell 了"永远判不出来，autopilot 继续对着裸命令行按键。
+    //    所以最后一行是不是 shell 提示符要单独看，且它说了算——这是"现在"，弹窗残影是"刚才"。
+    const atShell = endsAtShellPrompt(tail);
+    const bareShell = atShell && agentPresent !== true && !(agentState === 'working' || agentState === 'waiting');
     // agentPresent（进程级）/ working·waiting（hook 级）都是"它还在"的正面证据，比屏幕正则可靠。
     // ⚠️ 但 idle/done 不算：agent 退出后 hook 状态可能残留成 done，若据此认定"在场"，就会绕过下面
     //    "回到裸 shell 就停手"的保护 → 把续写指令直接打进命令行。
@@ -204,12 +272,34 @@ export class Autopilot {
           // 【作者主导】模式下，"要不要接着写"一律回【不】——否则"只确认不续写"就成了空话（见 classify 里的血泪注释）。
           const denyContinue = this.opt.confirmOnly && pa.continueAsk;
           const denyText = this.opt.declineContinueText || '不用继续。就写到这里停下，等作者给下一段要求；在此之前不要再写任何新章。';
-          if (pa.kind === 'menu') await this.mcp.enter(this.paneId);
+          // pick / move = 高亮项是"No/退出"这类否定项，必须先挪到肯定项，绝不能闭眼回车（那是关 agent）。
+          if (pa.kind === 'menu') {
+            // danger = 高亮的是否定项、又认不出肯定项在哪 → 一个键都不按，交给人（卡住告警会喊）。
+            if (pa.danger) {
+              if (!this._dangerLogged) {
+                this.log('⚠️ 屏幕上是个待选项，但高亮的是「否定/退出」项，又认不出肯定项在哪 —— 不敢闭眼回车'
+                  + '（回车很可能就是 No, exit，等于把 agent 关掉）。请去窗口手动选一下。', 'warn');
+                this._dangerLogged = true;
+              }
+              this.prevScreen = screen;
+              return;
+            }
+            if (pa.pick) await this.mcp.submitText(this.paneId, String(pa.pick));
+            else if (pa.move) {
+              const key = pa.move.dir === 'up' ? '\x1b[A' : '\x1b[B';
+              for (let i = 0; i < pa.move.steps; i++) { await this.mcp.input(this.paneId, key); await sleep(150); }
+              await sleep(250);
+              await this.mcp.enter(this.paneId);
+            }
+            else await this.mcp.enter(this.paneId);
+          }
           else if (pa.kind === 'yn') await this.mcp.submitText(this.paneId, denyContinue ? denyText : (this.opt.affirmativeText || 'y'));
           else await this.mcp.submitText(this.paneId, denyContinue ? denyText : pa.send);
           this._lastPromptSendAt = now; this.stats.approvals++;
           const what = denyContinue ? '它在问"要不要接着写" → 作者主导模式，已回绝并让它停下'
-            : pa.kind === 'menu' ? '选择/信任提示 → 回车采纳推荐项'
+            : pa.kind === 'menu' ? (pa.pick ? `选择/信任提示 → 高亮的是否定项，改按编号选第 ${pa.pick} 项`
+              : pa.move ? `选择/信任提示 → 高亮的是否定项（回车=关掉 agent），先${pa.move.dir === 'up' ? '上' : '下'}移 ${pa.move.steps} 格再回车`
+              : '选择/信任提示 → 回车采纳推荐项')
             : pa.kind === 'yn' ? 'y/n 提问 → 应答 ' + (this.opt.affirmativeText || 'y')
             : '开放式提问 → 自动应答';
           this.log('检测到' + what + ' ｜ ' + pa.reason, 'act');
@@ -458,43 +548,103 @@ export class Autopilot {
       if (p && low.includes(String(p).toLowerCase())) return { kind: 'stop', reason: '命中完成短语：' + p };
     }
 
+    // 【停在 shell 提示符就一个键都不能按】agent 退出后，它刚才那个弹窗仍留在滚动历史里、tail 里照样读得到；
+    // 再当"待选菜单"去按方向键/回车，按的就是【裸 PowerShell 命令行】——现场看到的就是一串空 PS> 提示符。
+    if (endsAtShellPrompt(t)) return { kind: 'none', reason: '窗口停在 shell 提示符（弹窗只是滚动历史里的残影）' };
+
     // y/n 型提问：既认英文 (y/n) 记号，也认中文「是否…/要不要…/需要我…吗/继续吗/写下一批(章)吗…？」，
     // 中文一律【锚定在屏幕末尾】(问句结尾)判定，避免误伤正文里出现的“是否”。
     // 必须以「吗？」或「？」结尾（真提问），避免误伤正文里出现的“是否/继续”等（正文多以。！结尾）。
     const ynTailRe = /(是否|要不要|需不需要|需要我|可否|可以|行不行|好不好|继续|接着写|写下一[批章]|再写|确认|对)[^\n。！!]{0,10}(吗[?？]?|[?？])\s*$/;
     const ynRe = /\((y\/n|yes\/no|y\/N|是\/否)\)|\[y\/n\]|\[y\/N\]|\(y\/N\)|是否继续|是否执行|确认执行[?？]?\s*$/i;
     const isYn = (s) => ynRe.test(s) || ynTailRe.test(String(s).trimEnd());
-    const approveKw = /(approve|allow this|allow command|do you want to proceed|proceed\?|confirm|apply this change|run this command|授权|允许执行|是否允许|要继续吗)/i;
-    // 信任目录类提示（codex/claude 首次进入新目录）
-    const trusty = /(do you trust|trust the contents of this directory|信任(该|这个)?目录)/i.test(t);
+    // 【剥边框】——审批弹窗都画在方框里，每行真正的开头是 │ 而不是 ❯，下面所有菜单正则(^\s*[❯›]…)会全部落空。
+    // 血泪（复检卡死）：弹窗既认不出菜单、也认不出提问 → 只会被当"空闲"；在 confirmOnly（复检/立项/AI改名）下
+    // 更会被 doneIdle 计数当成【任务完成】把窗口收掉，界面显示"✅ 本次任务完成"，实际一个字都没改。
+    const bare = stripBox(t);
+    // Claude Code 的审批问句【不止一句】"Do you want to proceed?"：
+    //   改文件 → "Do you want to make this edit to 第012章.md?"   新建 → "Do you want to create 复检-全书.md?"
+    //   跑命令 → "Do you want to proceed?"                       取网页 → "Do you want to make this request?"
+    // 只认死 proceed 那一句，它换个问法就再也接不上——这正是"claude 的同意变了、复检没法自动执行"的直接原因。
+    // 故改按 "do you want to" 这个稳定前缀认，并把选项文案（Yes, allow all edits / don't ask again /
+    // No, and tell Claude what to do differently）也算作证据：将来问句再改，凭选项也还认得出这是审批弹窗。
+    const approveKw = /(approve|allow this|allow command|allow all edits|do you want to|proceed\?|confirm|apply this change|run this command|don'?t ask again|tell claude what to do differently|授权|允许执行|是否允许|要继续吗)/i;
+    // 信任目录类提示（codex/claude 首次进入新目录）。claude 已经把这个框整个重写了，现在长这样：
+    //   Accessing workspace: …／Quick safety check: Is this a project you created or one you trust?
+    //   ❯ No, exit ／   Yes, I trust this folder ／ Enter to confirm · Esc to cancel
+    // 一句 "do you trust" 都没有了，只认老措辞就永远认不出来。
+    const trusty = /(do you trust|trust the (contents|files) (of|in) this (directory|folder)|quick safety check|a project you created or one you trust|i trust this folder|信任(该|这个)?目录)/i.test(bare);
 
-    // 选择型菜单识别
-    const lines = t.split(/\r?\n/);
+    // 选择型菜单识别（一律在【剥掉边框】的文本上做，否则弹窗里的选项一行都认不出来）
+    const lines = bare.split(/\r?\n/);
     const numbered = lines.filter(l => /^\s*[>❯➤*●○›]?\s*\d+\s*[.)]\s+\S/.test(l));
-    const radio = lines.filter(l => /^\s*[❯➤›]\s+\S/.test(l) || /^\s*[●○]\s+\S/.test(l));
+    // ⚠️ 选项行必须【短】：claude 会把用户发过的指令原样回显成 "❯ 继续下一批。动笔前先重建上下文：…"，
+    //    几百字一行，照样命中 ^\s*❯\s+\S。屏幕上只要有两条这样的历史指令就凑够 hasMenu，
+    //    再撞上任意一个 selectionHint 就被判成「提示型菜单」，于是每 5 秒往输入框里敲一次回车
+    //    （现场日志刷了十几条"回车采纳推荐项 ｜ 提示型菜单"）。真菜单的选项都是一行几个字。
+    // ⚠️ 更坑的一条：`●` 是 claude【每一行输出的项目符号】（"● 三章已写完，自检通过。"），
+    //    而它同时是单选组的"已选中"记号。只要屏幕上有两行 ● 输出就凑够 hasMenu → 判「提示型菜单」去回车。
+    //    判别法：真正的单选组一定【● 和 ○ 同时出现】（选中的和没选中的）；claude 只会吐 ●，从不吐 ○。
+    const OPT_MAX = 80;
+    const short = (l) => l.trim().length <= OPT_MAX;
+    const cursorRadio = lines.filter(l => short(l) && /^\s*[❯➤›]\s+\S/.test(l));
+    const dotRadio = lines.filter(l => short(l) && /^\s*[●○]\s+\S/.test(l));
+    const dotIsMenu = dotRadio.some(l => /^\s*●/.test(l.trim() ? l : '')) && dotRadio.some(l => /^\s*○/.test(l));
+    const radio = dotIsMenu ? [...cursorRadio, ...dotRadio] : cursorRadio;
     const hasMenu = numbered.length >= 2 || radio.length >= 2;
     // 真·选择菜单的关键：高亮光标(›/❯)正停在某个【编号选项】上，如 "› 1. Yes"
     const cursorOnOption = lines.some(l => /^\s*[›❯➤]\s{0,3}\d+\s*[.)]\s+\S/.test(l));
     // agent 空闲态特征：底部有 "gpt-x.x medium · 路径" 模型页脚，或 codex 的输入占位提示。
     // 这类屏幕里的 "1. … 2. …" 是 agent 的【输出总结】，不是待选菜单——绝不能当菜单去回车。
-    const agentIdleFooter = /\b(gpt|claude|gemini|o\d)[-\s][\w.]*\s+(medium|default|high|low|minimal|xhigh|fast)\b[\s\S]{0,40}·/i.test(t)
-      || /(Use \/skills|Implement \{feature\}|Find and fix a bug|Run \/review|\/model to change|to list available skills)/i.test(t);
+    const agentIdleFooter = /\b(gpt|claude|gemini|o\d)[-\s][\w.]*\s+(medium|default|high|low|minimal|xhigh|fast)\b[\s\S]{0,40}·/i.test(bare)
+      || /(Use \/skills|Implement \{feature\}|Find and fix a bug|Run \/review|\/model to change|to list available skills)/i.test(bare)
+      // claude 现在的常驻页脚：⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
+      // 原来那条只认 "claude sonnet-5 default ·" 那种老页脚，认不出这个 → 护栏失效。
+      || /(shift\+tab to cycle|esc to interrupt|⏵⏵|for agents\b)/i.test(bare);
 
-    const endsQuestion = /[?？]\s*$/.test(t.trimEnd()) || /[:：]\s*$/.test(t.trimEnd());
-    const selectionHint = /(press enter|enter to (continue|select|confirm|apply)|use arrows|↑|↓|请选择)/i.test(t);
+    // 【开了 bypass 就没有审批弹窗可认】--dangerously-skip-permissions 之下 claude 压根不会问
+    // "要不要改这个文件/跑这条命令"。此时屏幕上任何像菜单/审批的东西都只可能是【它自己的输出】——
+    // 编号清单被当成菜单、散文里的 confirm / do you want to 被当成审批问句。
+    // 血泪（换骨那轮）：autopilot 往输入框里打了好几个 "y"、狂敲回车，把会话搅乱，最后窗口静止被收掉。
+    // 注意：首次进目录的【信任框】出现时页脚还没渲染出来，所以这道闸不会挡住真正需要应答的那个框。
+    const bypassOn = /bypass permissions on/i.test(bare);
+
+    const endsQuestion = /[?？]\s*$/.test(bare.trimEnd()) || /[:：]\s*$/.test(bare.trimEnd());
+    const selectionHint = /(press enter|enter to (continue|select|confirm|apply)|use arrows|↑|↓|请选择)/i.test(bare);
 
     // 「要不要继续写下去」这一类提问必须和"信任目录/审批/一般确认"区分开：
     // 在【作者主导】模式(confirmOnly)下，它的正确答案永远是【不】——继续与否是作者的事。
     // 血泪：不区分时，共创批次写完 agent 问一句"要我接着写下一段吗？"，autopilot 回 y，
     // 它就接着写、再问、再 y……一夜滚出 44 章(用户："我让他写三五章，直接写了好几十章")。
     const continueAsk = /(继续|接着写|接下来|下一[批章段]|再写|写下去|往下写)[^\n。！!]{0,12}(吗[?？]?|[?？])\s*$/.test(String(t).trimEnd());
+    // 【无编号的确认框】claude 新版信任目录框没有方框、没有编号，只有一个 ❯ 停在选项上：
+    //     ❯ No, exit
+    //       Yes, I trust this folder
+    //     Enter to confirm · Esc to cancel
+    // 未选中那行【一个记号都没有】→ radio 只数到 1 行 → hasMenu 为假 → 以前会掉进下面 approveKw 的 yn 分支
+    //（"Enter to confirm" 里的 confirm 正好命中关键词），打个 y 再回车——而回车采纳的正是高亮的
+    // "No, exit"，等于 autopilot 亲手把 agent 关掉。故凡是"有高亮光标 + 明说按回车确认"就按菜单处理。
+    // 只认【光标记号】(❯ › ➤)：那才代表"高亮停在这一项上"。● 不算——它就是 claude 的输出符号。
+    const cursorMenu = cursorRadio.length >= 1 && !agentIdleFooter
+      && /(enter to confirm|enter to (continue|select|apply)|press enter|请选择|回车确认)/i.test(bare);
+    // 菜单的默认高亮项【不一定是"同意"】：新版信任框默认停在 "No, exit"，bypass 警告框默认停在 "1. No, exit"，
+    // 闭眼回车都是把 agent 关掉。故凡是走菜单，先看清高亮项是不是否定项；是就改选肯定项（有编号按编号、
+    // 没编号用方向键走过去）。
+    const choice = () => optionChoice(lines);
+    // bypass 模式下不存在审批弹窗 → 一律不走应答分支，直接落到"空闲则续写"。
+    // 唯一例外是屏幕上真的停着一个带光标的待选项（信任框那种），那时页脚还没出来，bypassOn 为假。
+    if (bypassOn) {
+      if (this.looksIdleWaiting(t)) return { kind: 'continue', reason: '空闲等待，驱动下一批' };
+      return { kind: 'none', reason: 'bypass 模式下没有审批弹窗，屏幕上的编号/关键词是 agent 自己的输出' };
+    }
     if (isYn(t)) return { kind: 'yn', reason: continueAsk ? '续写征询' : 'y/n 模式', continueAsk };
-    if ((approveKw.test(t) || trusty) && hasMenu) return { kind: 'menu', reason: trusty ? '信任目录提示' : '审批选择菜单' };
-    if (approveKw.test(t) || trusty) return { kind: 'yn', reason: trusty ? '信任目录(y)' : '审批关键词' };
+    if ((approveKw.test(bare) || trusty) && hasMenu) return { kind: 'menu', reason: trusty ? '信任目录提示' : '审批选择菜单', ...choice() };
+    if (cursorMenu) return { kind: 'menu', reason: trusty ? '信任目录确认框(无编号)' : '确认框(无编号，光标停在选项上)', ...choice() };
     // 仅当光标停在编号选项上（真菜单）才按菜单处理
-    if (cursorOnOption) return { kind: 'menu', reason: `选择菜单(${Math.max(numbered.length, radio.length)}项)` };
+    if (cursorOnOption) return { kind: 'menu', reason: `选择菜单(${Math.max(numbered.length, radio.length)}项)`, ...choice() };
+    if (approveKw.test(bare) || trusty) return { kind: 'yn', reason: trusty ? '信任目录(y)' : '审批关键词' };
     // 带明确"请选择/按回车"提示且非 agent 空闲态的菜单
-    if (!agentIdleFooter && hasMenu && (endsQuestion || selectionHint)) return { kind: 'menu', reason: '提示型菜单' };
+    if (!agentIdleFooter && hasMenu && (endsQuestion || selectionHint)) return { kind: 'menu', reason: '提示型菜单', ...choice() };
 
     // 空闲且像在等待（无明确提问）→ 续写
     if (this.looksIdleWaiting(t)) return { kind: 'continue', reason: '空闲等待，驱动下一批' };
@@ -506,11 +656,73 @@ export class Autopilot {
   looksIdleWaiting(t) {
     const trimmed = t.trimEnd();
     if (!trimmed) return false;
+    // 兜底闸：屏幕上摆着 "❯ 1. Yes / 2. No" 这种待选项 = 它在等人点头，绝不是空闲。
+    // 上面的关键词认漏了(CLI 又改文案)时，至少不会把审批弹窗当"写完了"——那会在 confirmOnly 下把窗口收掉。
+    if (/^\s*[›❯➤]?\s*\d+\s*[.)]\s*(yes|no|y|n|是|否|同意|拒绝|允许|取消|退出)\b/im.test(stripBox(t))) return false;
     // 常见 agent 输入提示符尾部特征
     const idleHints = /(›|❯|\$|＞|>|tokens used|esc to interrupt|type a message|输入|input)/i;
     // 没有明显问题、但出现输入态特征
     return idleHints.test(lastNonEmpty(trimmed, 4));
   }
+}
+
+// 屏幕是不是停在【裸 shell 提示符】上（= agent 已经不在了）。
+// 关键细节：80 列窗口里长路径会把提示符折成两行——
+//     PS C:\Users\Alex\AppData\Local\Novel Studio\books\走进修仙：我把金丹练成了核反应
+//     >
+// 单看最后一行只有一个 ">"，单看倒数第二行没有 ">"，两边都匹配不上；把最后两行【拼起来】再判才认得出。
+// 现场就是栽在这上面：claude 早退出了，引擎还以为 agent 在，对着命令行一路回车。
+const SHELL_PROMPT = /^\s*(PS\s+)?([A-Za-z]:[\\/]|~|\/)[^\n]*[>$#]\s*$/;
+export function endsAtShellPrompt(s) {
+  const ls = String(s).split(/\r?\n/).map(l => l.replace(/\s+$/, '')).filter(l => l.trim());
+  if (!ls.length) return false;
+  return SHELL_PROMPT.test(ls[ls.length - 1]) || SHELL_PROMPT.test(ls.slice(-2).join(''));
+}
+
+// 剥掉 TUI 方框边框：claude/gemini 把审批弹窗画成 ╭─╮ │ … │ ╰─╯，每行开头是 │ 而不是选项本身，
+// 不剥就没有一条菜单正则能命中（"│ ❯ 1. Yes" 的 ^ 后面是 │）。逐行去掉首尾的框线字符即可，
+// 嵌套框（diff 预览是框中框）也一并去掉，行内的 ❯ › 光标字符不在框线区段里，不会被误删。
+const BOX_EDGE = /^[\s─-╿|｜]+|[\s─-╿|｜]+$/g;
+export function stripBox(s) {
+  return String(s).split(/\r?\n/).map(l => l.replace(BOX_EDGE, '')).join('\n');
+}
+
+// 看清高亮项是不是【否定项】，是的话给出"怎么改选肯定项"——仅此一件事。
+// 由来（血泪）：claude 新版信任目录框默认高亮就是 "❯ No, exit"，bypass 警告框默认高亮是 "1. No, exit"。
+// 这两个框只要闭眼回车，就是 autopilot 亲手把刚起来的 agent 关掉，而日志还写着"已采纳推荐项"。
+// 返回 {} = 高亮的本来就是肯定项 / 看不明白 → 照旧回车；
+//     {pick:'2'} = 有编号，直接按编号；{move:{dir,steps}} = 没编号，用方向键走过去再回车。
+const NEG_OPT = /^(no\b|n\b|don'?t|cancel|exit|quit|reject|deny|否|不|拒绝|取消|退出)/i;
+const POS_OPT = /^(yes\b|y\b|proceed|accept|allow|approve|continue|ok\b|是|好|同意|允许|确认|接受|继续)/i;
+const CURSOR_RE = /^\s*[›❯➤]\s*(?=\S)/;
+export function optionChoice(lines) {
+  const idx = lines.findIndex(l => CURSOR_RE.test(l));
+  if (idx < 0) return {};                                     // 没有高亮光标 → 看不明白，照旧回车
+  const cur = lines[idx].replace(CURSOR_RE, '').trim();
+  const numbered = /^(\d+)\s*[.)]\s*(.+)$/.exec(cur);
+  if (!NEG_OPT.test(numbered ? numbered[2] : cur)) return {};  // 高亮的就是肯定项 → 照旧回车
+  // ① 有编号：直接按肯定项的编号（最稳，不依赖光标怎么走）
+  if (numbered) {
+    for (const l of lines) {
+      const m = /^\s*[›❯➤]?\s*(\d+)\s*[.)]\s+(.+?)\s*$/.exec(l);
+      if (m && POS_OPT.test(m[2])) return { pick: m[1] };
+    }
+  }
+  // ② 没编号：肯定项就在同一段【连续非空行】里（未选中那行没有任何记号，只能靠位置认），用方向键走过去。
+  let start = idx; while (start > 0 && lines[start - 1].trim()) start--;
+  let end = idx; while (end < lines.length - 1 && lines[end + 1].trim()) end++;
+  for (let i = start; i <= end; i++) {
+    if (i === idx) continue;
+    if (POS_OPT.test(lines[i].replace(CURSOR_RE, '').trim())) {
+      return { move: { dir: i > idx ? 'down' : 'up', steps: Math.abs(i - idx) } };
+    }
+  }
+  // 高亮的是否定项，却找不到肯定项在哪 —— 这时【绝不能闭眼回车】，回车按下去就是 "No, exit"。
+  // 血泪：第一次带 --dangerously-skip-permissions 进书目录时弹的信任框，因为 SessionStart 钩子
+  // 先刷了一大段上下文，把 "Quick safety check" 那几行挤出了 tail，trusty 没命中 → 落到最后那条
+  // 「提示型菜单」规则 → 闭眼回车 → claude 当场退出，日志里只留五条"回车采纳推荐项"。
+  // 宁可不应答（人来处理 / 卡住告警会喊），也不能亲手把 agent 关掉。
+  return { danger: true };
 }
 
 function lastLines(s, n) {
