@@ -48,10 +48,14 @@ const b = await run({ forSecs: 37577, idle: false });
 assert.strictEqual(b.length, 0, 'idle=false 时它可能真在干活，绝不能催');
 console.log('✓ idle=false → 一条都不发（宁可等，也不打断在写的窗口）');
 
-console.log('— 刚开始 working、屏幕静止一小会儿，也不能急着判陈旧 —');
+console.log('— 刚开始 working、屏幕静止一小会儿，绝不能判陈旧 —');
+// 这条一开始写反了：当时断言"静止几拍就该回退屏幕判据去续写"，把 bug 当成了规格。
+// 真实后果（换骨那轮）：窗口刚起来 forSecs=0，"idle=true + 屏幕没动 + 字节没涨"天然成立 →
+// 立刻判陈旧、agentState 置空 → confirmOnly 的收窗保护失效 → claude 还在读 36 章正文，
+// 120 秒就被「✅ 本次任务完成」收掉。刚报过 working 的 hook 不可能是陈旧的。
 const c = await run({ forSecs: 12, idle: true });
-assert.ok(c.length && c[0].startsWith('继续'), '连续几拍静止后仍应回退屏幕判据');
-console.log('✓ 短时 working + 连续静止 → 走去抖计数，最终仍能续写');
+assert.strictEqual(c.length, 0, '刚起来 12 秒就催它/收它都是错的，实际发了 ' + JSON.stringify(c));
+console.log('✓ 短时 working（12s）→ 一条都不发，等它真干活');
 
 console.log('\n全部通过 ✅  hook 挂了不会再把窗口悄悄卡死');
 
@@ -84,3 +88,35 @@ console.log('✓ confirmOnly（复检/立项/改名）静止是正常的，不�
 const w3 = await runStall(0, false);
 assert.ok(!w3.some(m => m.includes('没有任何动静')), 'stallAlarmMs=0 应关闭告警');
 console.log('✓ stallAlarmMs=0 可关掉');
+
+// —— 窗口刚起来那几拍，绝不能判成「hook 陈旧」——
+// 现场（换骨那轮）：pane 刚建好，session.idle=true、屏幕还没动、字节还没涨——这三条【天然成立】。
+// 没有最小年龄限制就会在 forSecs=0 时判定陈旧、把 agentState 置空，于是 confirmOnly 的收窗计数
+// 失去保护，claude 还在读 36 章正文、屏幕没动，120 秒就被当成「✅ 本次任务完成」收掉。
+console.log('— 刚起来的窗口不能判陈旧 —');
+function runFresh(forSecs, confirmOnly) {
+  const events = [];
+  const mcp = {
+    async sessionList() { return [{ id: 7, is_dead: false }]; },
+    async screenText() { return IDLE; },
+    async agentStatus() { return { state: 'working', forSecs, lastSignal: 'hook' }; },
+    async sessionIdle() { return { idle: true, outBytes: 100, detectedAgent: 'claude' }; },
+    async status() { return {}; },
+    async submitText() {}, async enter() {}, async input() {},
+  };
+  const ap = new Autopilot(mcp, 7, {
+    pollMs: 20, assumeStarted: true, idleConfirms: 2, confirmOnly,
+    confirmDoneIdle: 3, confirmDoneIdleSignal: 3, maxAutoContinue: 5,
+    continueText: '继续。', onLog: (e) => events.push(`${e.level || 'info'}|${e.msg}`),
+    onDone: () => events.push('act|收窗了'),
+  });
+  ap.start();
+  return new Promise(r => setTimeout(() => { ap.stop('测完'); r(events); }, 1500));
+}
+const fresh = await runFresh(3, true);           // 刚起来 3 秒
+assert.ok(!fresh.some(e => e.includes('陈旧')), 'forSecs=3 绝不能判陈旧，实际 ' + JSON.stringify(fresh.slice(0, 3)));
+assert.ok(!fresh.some(e => e.includes('收窗了')), '更不能因此把还在启动的窗口收掉');
+console.log('✓ forSecs=3（刚起来）→ 不判陈旧、不收窗');
+const old = await runFresh(3600, true);          // 卡了一小时
+assert.ok(old.some(e => e.includes('陈旧')), 'forSecs=3600 才该判陈旧');
+console.log('✓ forSecs=3600（真卡住）→ 照常识破');

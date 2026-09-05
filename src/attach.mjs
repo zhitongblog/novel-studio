@@ -110,7 +110,7 @@ export async function streamBook(slug, cfg, onFrame, { intervalMs = 1000 } = {})
 
 // 把 autopilot 挂到一个已在运行的会话上（启动它的进程退出后仍可恢复监控）。
 // 返回 { autopilot, mcp, stop() }。
-export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestart = null) {
+export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestart = null, onTerminalStop = null) {
   const sess = getSession(slug);
   if (!sess) throw new Error('没有该书的运行中会话：' + slug);
   const mcp = await connect(sess, cfg);
@@ -126,6 +126,10 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestar
     continueText: continueWithVoice(getBook(slug), cfg.autopilot?.continueText),
     assumeStarted: true,   // 重挂的会话：agent 已在运行，空闲时可直接驱动续写
     onLog: (e) => onLog({ ...e, source: 'autopilot' }),
+    // 终止性停止（撞用量上限 / agent 已退出 / 已完本…）→ 清掉会话记录。
+    // 不清的话：看门狗每 60 秒补挂一个新的 autopilot，它立刻又撞上同样的东西再停，
+    // 停止/补挂来回刷，那本书永远挂在"写作中"（《李清照》实证）。
+    onTerminalStop: (reason) => { try { onTerminalStop && onTerminalStop(reason); } catch {} },
     onTokens: (n) => recordUsage(slug, tokenKey, n),
     onOutlineReady: gates.onOutlineReady,
     onRevisionDone: gates.onRevisionDone,

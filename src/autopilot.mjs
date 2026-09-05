@@ -58,10 +58,22 @@ export class Autopilot {
     }
   }
 
+  // 【终止性停止】——这些原因下再补挂一个 autopilot 也是白搭，它会立刻撞上同样的东西再停。
+  // 血泪（《大宋第一女帝：我成了李清照》）：撞到模型用量上限 → stop("不再重试，等额度恢复后手动继续")
+  // → 60 秒后孤儿看门狗看见"在册会话没有活着的 autopilot" → 补挂 → 新的立刻又撞上限 → 停 → 再补挂…
+  // 日志里 停止/补挂 来回刷，而会话记录一直在，那本书就永远挂在"写作中"，界面上什么都点不动。
+  // 判定为终止性时通知上层把会话记录清掉：记录没了，看门狗自然不会再补挂，书也回到空闲。
+  static TERMINAL = /(用量|速率上限|额度|配额|agent 已退出|agent 未能启动|已完本|窗口\/pane 已关闭|agent 进程已退出)/;
+
   stop(reason) {
     if (!this.running) return;
     this.running = false;
+    const terminal = !!reason && Autopilot.TERMINAL.test(String(reason));
+    this.terminalReason = terminal ? String(reason) : null;
     this.log('autopilot 已停止' + (reason ? '：' + reason : ''), 'info');
+    if (terminal) {
+      try { this.opt.onTerminalStop && this.opt.onTerminalStop(String(reason)); } catch {}
+    }
   }
 
   // 优雅停止：不再驱动新批次/收尾/体检，等当前批次写完(回到待续点)后调 cb(关闭窗口)。
@@ -125,9 +137,16 @@ export class Autopilot {
     // 表现就是【写完一批就再也不动了，日志一片空白】，人还以为是写完了。
     // 交叉验证后不再采信：session.idle 说空闲 + 输出不涨 + 屏幕不变，连续几拍即判陈旧；
     // 或者 working 已经挂了半小时以上而 session.idle 说空闲——那不可能是真在干活。
-    if (agentState === 'working' && idleInfo?.idle === true && !screenChanged && !bytesGrew) {
+    // ⚠️【最小年龄】必须有：窗口刚起来那几拍，"session.idle=true + 屏幕没动 + 字节没涨"是【天然成立】的
+    //（agent 还在加载、还没吐第一个字）。没有这道限制就会在 t=0 判定"hook 陈旧"、把 agentState 置空，
+    // 于是 confirmOnly 的收窗计数失去保护，claude 还在读 36 章正文、屏幕没动，120 秒就被当成
+    //「✅ 本次任务完成」收掉——换骨那轮就是这么死的，也正是记忆里"长思考被误杀"的老坑。
+    // hook 刚报过 working（forSecs 很小）就不可能是陈旧状态，陈旧的前提是它【卡了很久】。
+    const workedFor = ag?.forSecs || 0;
+    if (agentState === 'working' && workedFor >= (this.opt.staleWorkingMinSecs || 300)
+        && idleInfo?.idle === true && !screenChanged && !bytesGrew) {
       this._staleWorking = (this._staleWorking || 0) + 1;
-      const longGone = (ag?.forSecs || 0) >= (this.opt.staleWorkingSecs || 1800);
+      const longGone = workedFor >= (this.opt.staleWorkingSecs || 1800);
       if (longGone || this._staleWorking >= (this.opt.staleWorkingPolls || 5)) {
         if (!this._staleLogged) {
           this.log(`agent.status 一直报 working（已 ${Math.round((ag?.forSecs || 0) / 60)} 分钟），但 session.idle 说空闲、输出与屏幕都不动`
