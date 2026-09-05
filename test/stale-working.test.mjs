@@ -54,3 +54,33 @@ assert.ok(c.length && c[0].startsWith('继续'), '连续几拍静止后仍应回
 console.log('✓ 短时 working + 连续静止 → 走去抖计数，最终仍能续写');
 
 console.log('\n全部通过 ✅  hook 挂了不会再把窗口悄悄卡死');
+
+// —— 卡住告警：窗口在、进程在、autopilot 也在，就是什么都不发生 ——
+console.log('— 卡住告警 —');
+function runStall(stallAlarmMs, confirmOnly) {
+  const warns = [];
+  const mcp = {
+    async sessionList() { return [{ id: 7, is_dead: false }]; },
+    async screenText() { return IDLE; },
+    async agentStatus() { return { state: 'idle', forSecs: 30, lastSignal: 'hook' }; },
+    async sessionIdle() { return { idle: true, outBytes: 100, detectedAgent: 'claude' }; },
+    async status() { return {}; },
+    async submitText() {}, async enter() {}, async input() {},
+  };
+  const ap = new Autopilot(mcp, 7, {
+    pollMs: 20, assumeStarted: true, idleConfirms: 2, maxAutoContinue: 0, confirmOnly,
+    stallAlarmMs, continueText: '继续。', onLog: (e) => { if (e.level === 'warn') warns.push(e.msg); },
+  });
+  ap._lastActiveAt = Date.now() - 60 * 60 * 1000;   // 假装一小时没动静
+  ap.start();
+  return new Promise(r => setTimeout(() => { ap.stop('测完'); r(warns); }, 300));
+}
+const w1 = await runStall(20 * 60 * 1000, false);
+assert.ok(w1.some(m => m.includes('没有任何动静')), '静止一小时应报警，实际 ' + JSON.stringify(w1));
+console.log('✓ 静止超阈值 → 日志里报一次警');
+const w2 = await runStall(20 * 60 * 1000, true);
+assert.ok(!w2.some(m => m.includes('没有任何动静')), 'confirmOnly 干完就该静止，不能报警');
+console.log('✓ confirmOnly（复检/立项/改名）静止是正常的，不报警');
+const w3 = await runStall(0, false);
+assert.ok(!w3.some(m => m.includes('没有任何动静')), 'stallAlarmMs=0 应关闭告警');
+console.log('✓ stallAlarmMs=0 可关掉');

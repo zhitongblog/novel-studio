@@ -137,6 +137,21 @@ export class Autopilot {
         agentState = null;
       }
     } else { this._staleWorking = 0; this._staleLogged = false; }
+
+    // 【卡住告警】今晚三次事故长得一模一样：窗口在、进程在、autopilot 也挂着，就是【什么都不发生】，
+    // 而日志一片空白——每一次都得作者来问、我去翻现场才发现。这里主动把"多久没动静"报出来。
+    // 判据只用最硬的两条：屏幕没变 + pane 输出字节不涨。真在长思考的窗口 spinner 一直在跳，屏幕必变。
+    const nowMs = Date.now();
+    if (screenChanged || bytesGrew) { this._lastActiveAt = nowMs; this._stallAlarmAt = 0; }
+    if (!this._lastActiveAt) this._lastActiveAt = nowMs;
+    const stallMs = this.opt.stallAlarmMs ?? 20 * 60 * 1000;   // 用 ?? 而不是 ||：0 是"关闭"，不是"没设"
+    // confirmOnly（复检/立项/AI改名）不报：那类任务干完就该静止，静止到阈值会自动收窗，不是故障。
+    if (stallMs > 0 && !this.opt.confirmOnly && nowMs - this._lastActiveAt >= stallMs
+        && (!this._stallAlarmAt || nowMs - this._stallAlarmAt >= stallMs)) {
+      this._stallAlarmAt = nowMs;
+      this.log(`⚠️ 这本书已经 ${Math.round((nowMs - this._lastActiveAt) / 60000)} 分钟没有任何动静`
+        + `（屏幕不变、输出不涨），窗口还在但没在写。去窗口看一眼，或点「停止」后重新开始。`, 'warn');
+    }
     // 用"非空行"的尾部：codex/claude 的 TUI 常把提问渲染在顶部、下面大片空行，
     // 若取最后 N 个原始行会全是空行 → 漏判提问。故过滤空行后再取尾部。
     const tail = screen.split(/\r?\n/).filter(l => l.trim()).slice(-40).join('\n');
