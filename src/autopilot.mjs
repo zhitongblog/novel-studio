@@ -597,7 +597,17 @@ export class Autopilot {
     // agent 空闲态特征：底部有 "gpt-x.x medium · 路径" 模型页脚，或 codex 的输入占位提示。
     // 这类屏幕里的 "1. … 2. …" 是 agent 的【输出总结】，不是待选菜单——绝不能当菜单去回车。
     const agentIdleFooter = /\b(gpt|claude|gemini|o\d)[-\s][\w.]*\s+(medium|default|high|low|minimal|xhigh|fast)\b[\s\S]{0,40}·/i.test(bare)
-      || /(Use \/skills|Implement \{feature\}|Find and fix a bug|Run \/review|\/model to change|to list available skills)/i.test(bare);
+      || /(Use \/skills|Implement \{feature\}|Find and fix a bug|Run \/review|\/model to change|to list available skills)/i.test(bare)
+      // claude 现在的常驻页脚：⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
+      // 原来那条只认 "claude sonnet-5 default ·" 那种老页脚，认不出这个 → 护栏失效。
+      || /(shift\+tab to cycle|esc to interrupt|⏵⏵|for agents\b)/i.test(bare);
+
+    // 【开了 bypass 就没有审批弹窗可认】--dangerously-skip-permissions 之下 claude 压根不会问
+    // "要不要改这个文件/跑这条命令"。此时屏幕上任何像菜单/审批的东西都只可能是【它自己的输出】——
+    // 编号清单被当成菜单、散文里的 confirm / do you want to 被当成审批问句。
+    // 血泪（换骨那轮）：autopilot 往输入框里打了好几个 "y"、狂敲回车，把会话搅乱，最后窗口静止被收掉。
+    // 注意：首次进目录的【信任框】出现时页脚还没渲染出来，所以这道闸不会挡住真正需要应答的那个框。
+    const bypassOn = /bypass permissions on/i.test(bare);
 
     const endsQuestion = /[?？]\s*$/.test(bare.trimEnd()) || /[:：]\s*$/.test(bare.trimEnd());
     const selectionHint = /(press enter|enter to (continue|select|confirm|apply)|use arrows|↑|↓|请选择)/i.test(bare);
@@ -621,6 +631,12 @@ export class Autopilot {
     // 闭眼回车都是把 agent 关掉。故凡是走菜单，先看清高亮项是不是否定项；是就改选肯定项（有编号按编号、
     // 没编号用方向键走过去）。
     const choice = () => optionChoice(lines);
+    // bypass 模式下不存在审批弹窗 → 一律不走应答分支，直接落到"空闲则续写"。
+    // 唯一例外是屏幕上真的停着一个带光标的待选项（信任框那种），那时页脚还没出来，bypassOn 为假。
+    if (bypassOn) {
+      if (this.looksIdleWaiting(t)) return { kind: 'continue', reason: '空闲等待，驱动下一批' };
+      return { kind: 'none', reason: 'bypass 模式下没有审批弹窗，屏幕上的编号/关键词是 agent 自己的输出' };
+    }
     if (isYn(t)) return { kind: 'yn', reason: continueAsk ? '续写征询' : 'y/n 模式', continueAsk };
     if ((approveKw.test(bare) || trusty) && hasMenu) return { kind: 'menu', reason: trusty ? '信任目录提示' : '审批选择菜单', ...choice() };
     if (cursorMenu) return { kind: 'menu', reason: trusty ? '信任目录确认框(无编号)' : '确认框(无编号，光标停在选项上)', ...choice() };

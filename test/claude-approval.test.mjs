@@ -203,3 +203,26 @@ console.log('✓ 标成 danger → 不闭眼回车（改由卡住告警提醒人
 // 能认出肯定项时照常处理，别因为这道闸把正常情况也堵了
 assert.deepStrictEqual(kindOf(TRUST_NEW).move, { dir: 'down', steps: 1 }, '认得出肯定项就照常走');
 console.log('✓ 认得出肯定项的照常下移一格再回车');
+
+// —— bypass 模式下不存在审批弹窗，屏幕上的编号/关键词都是 agent 自己的输出 ——
+// 现场（换骨那轮）：开了 --dangerously-skip-permissions 之后 claude 根本不会问"要不要改这个文件"，
+// 可 autopilot 把它输出里的编号清单当菜单、把散文里的 confirm 当审批问句，
+// 往输入框打了好几个 "y"、狂敲回车，把会话搅乱，最后窗口静止 120s 被收掉。
+console.log('— bypass 模式不认审批 —');
+const BYPASS_WORK = [
+  '● 我打算这样合并换骨三阶：',
+  '  1. 硅基（051-055）解决耐辐射',
+  '  2. 碳炔复合（058-060）解决韧性',
+  '  3. 高熵合金（069）解决高温',
+  '  Do you want to see the diff before I proceed? 我先确认一下再改。',
+  '✻ Cogitating…',
+  '❯',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents',
+].join('\n');
+const bw = kindOf(BYPASS_WORK);
+assert.notStrictEqual(bw.kind, 'menu', 'bypass 下不该认成菜单，实际 ' + JSON.stringify(bw));
+assert.notStrictEqual(bw.kind, 'yn', 'bypass 下更不该往输入框打 y，实际 ' + JSON.stringify(bw));
+console.log(`✓ 编号清单 + "Do you want to…" + confirm 全在，仍判 ${bw.kind}（不应答）`);
+// 页脚在 = 它自己的 TUI，不是弹窗；但真弹窗（信任框，此时没有页脚）照样要认
+assert.strictEqual(kindOf(TRUST_NEW).kind, 'menu', '真信任框不能被这道闸挡掉');
+console.log('✓ 真信任框（无页脚）照常识别');
