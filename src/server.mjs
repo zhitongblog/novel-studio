@@ -1830,9 +1830,29 @@ async function doWrite(body, cfg, res) {
     try { setBookWriteMode(book.slug, mode, every || 1); } catch {}
     setReviewEvery(book.slug, every);
   }
+  // 【必须把起点写死在指令里】血泪（《大宋第一女帝：我成了李清照》）：这条指令原来只写
+  // "请阅读 AGENTS.md 与 novel_bible.md，续写下一批 3 章并自检"，【一个字都没说从第几章开始】。
+  // 第一次点没问题（本来就从 001 起）；但会话死掉后再点一次「开始写作」，新窗口的 agent 上下文是空的，
+  // 读完 bible 就"续写下一批"——它眼里的下一批就是 001，于是从头重写了一遍：
+  // 那本书里 001红烛未剪/002火印 与 001新妇不睡/002西壁第三格 是同一场新婚夜的两个版本，
+  // chapter_index.md 里两个 001、两个 002 并排登记成"已写"，谁都没发现撞号。
+  // 导入的书走 buildResumeInstruction 一直是对的（它明写"确认当前最新章号、从最新章节之后接着写、
+  // 不要重写已写章节"）——新书这条落了这一段，补上，并且把【服务端算出来的真实最高章号】直接告诉它。
+  const already = bookStats(book);
+  const nextNum = (already?.maxChapter || 0) + 1;
+  const batchN = book.standards?.batchSize || 3;
   const instruction = body.task || (book.imported
     ? buildResumeInstruction(book)
-    : `请阅读 AGENTS.md 写作规范与 novel_bible.md，续写下一批 ${book.standards?.batchSize || 3} 章并自检。`);
+    : (already?.maxChapter > 0
+      ? `继续写《${book.title}》。本书【已经写到第 ${String(already.maxChapter).padStart(3, '0')} 章】，`
+        + `你要写的是【第 ${String(nextNum).padStart(3, '0')} 章起的下一批 ${batchN} 章】。`
+        + `动笔前先重建上下文：读 chapter_index.md 与 continuity_ledger.md，再读最近 2 章正文与本卷 outlines/ 中对应章号段的分章大纲，`
+        + `确认最新章号、主角处境、未回收伏笔、欠债与伤势。`
+        + `⚠️【严禁重写或改动任何已写章节、严禁重复使用已有章号】——新章一律从第 ${String(nextNum).padStart(3, '0')} 章往后编号；`
+        + `取章名前先在 chapter_index.md 全表检索，确保不与已有章名重复。`
+        + `写完把新章登记进 chapter_index.md、更新 continuity_ledger.md，并做常规批次自检。`
+        + `全程严格遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范。`
+      : `请阅读 AGENTS.md 写作规范与 novel_bible.md，从第 001 章开始写第一批 ${batchN} 章并自检。`));
   const slug = book.slug;
   // 已有活窗口 → 不再开第二个：直接把指令插进去并确保监控（点“写作”=继续处理）
   if (sessionLive(slug)) {
