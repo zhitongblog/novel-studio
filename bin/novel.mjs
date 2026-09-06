@@ -4,6 +4,11 @@ import { runTui } from '../src/tui.mjs';
 import { runCli } from '../src/cli.mjs';
 import { runMcpServer } from '../src/mcpserver.mjs';
 import { runServer } from '../src/server.mjs';
+import { augmentUserPath } from '../src/paths.mjs';
+
+// GUI（Finder 双击）启动时只继承 launchd 的最小 PATH，codex/claude/gemini 一个都探测不到。
+// 开工前先把用户登录 shell 的真实 PATH 并进来——必须在任何 which/spawn 之前。
+augmentUserPath();
 
 const argv = process.argv.slice(2);
 const cmd = argv[0];

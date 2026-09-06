@@ -60,6 +60,45 @@ fn engine_path(resource_dir: Option<PathBuf>) -> String {
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../bin/novel.mjs").to_string()
 }
 
+// 找 node：和「找不到可用模型」同一个根因——GUI 双击启动的 .app 只继承 launchd 的最小 PATH
+// （/usr/bin:/bin:/usr/sbin:/sbin），Homebrew / nvm / npm-global 装的 node 一个都不在里面，
+// Command::new("node") 直接 ENOENT，引擎起不来 → 窗口一片空白。终端里启动却一切正常。
+// 顺序：环境变量覆盖 → 常见安装位置 → 问登录 shell（nvm/fnm 只在 rc 里注入）→ 兜底裸 "node"。
+fn node_bin() -> String {
+    if let Ok(p) = std::env::var("NOVEL_STUDIO_NODE") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let mut cands: Vec<String> = vec![
+            "/opt/homebrew/bin/node".to_string(),
+            "/usr/local/bin/node".to_string(),
+            "/usr/bin/node".to_string(),
+        ];
+        if !home.is_empty() {
+            for rel in [".npm-global/bin/node", ".volta/bin/node", ".bun/bin/node", ".local/bin/node"] {
+                cands.push(format!("{}/{}", home, rel));
+            }
+        }
+        for c in &cands {
+            if std::path::Path::new(c).exists() {
+                return c.clone();
+            }
+        }
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        if let Ok(out) = Command::new(&shell).args(["-ilc", "command -v node"]).output() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() && std::path::Path::new(&p).exists() {
+                return p;
+            }
+        }
+    }
+    "node".to_string()
+}
+
 // 启动引擎前先杀掉占用 8787 的残留旧引擎（杜绝"僵尸引擎占端口→新引擎绑不上→旧代码一直服务"）。
 fn kill_stale_engine() {
     #[cfg(target_os = "windows")]
@@ -87,8 +126,9 @@ fn kill_stale_engine() {
 fn start_engine(resource_dir: Option<PathBuf>) -> Option<Child> {
     kill_stale_engine();   // 先清残留旧引擎，确保新引擎能绑上 8787（加载最新代码）
     let engine = engine_path(resource_dir);
-    eprintln!("[novel-studio] starting engine: node {} serve --port {}", engine, ENGINE_PORT);
-    let mut cmd = Command::new("node");
+    let node = node_bin();
+    eprintln!("[novel-studio] starting engine: {} {} serve --port {}", node, engine, ENGINE_PORT);
+    let mut cmd = Command::new(&node);
     cmd.arg(&engine).arg("serve").arg("--port").arg(ENGINE_PORT);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);   // 引擎在后台跑，不弹黑色终端
