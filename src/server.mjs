@@ -1581,7 +1581,10 @@ async function api(p, req, res, u) {
         const isRe = p === '/api/book/reproject';
         if (!isRe && !String(body.range || '').trim()) return json(res, 400, { error: '请填重写范围（如 001-008 或 卷01）' });
         const hash = gitSnapshot(book.dir, isRe ? '整本重立项前存档' : ('重写' + (body.range || '') + '前存档'));
-        const instruction = isRe ? buildReprojectInstruction(book, body.note) : buildRewriteInstruction(book, body.range, body.note);
+        // useReviews：勾了「按复检报告重写」→ 指令里先让它去 reviews/ 里检索本范围相关的条目当必办清单。
+        // 之前这里断着：复检把问题写进报告，重写却完全不知道报告存在，只能靠作者人肉复制粘贴。
+        const instruction = isRe ? buildReprojectInstruction(book, body.note)
+          : buildRewriteInstruction(book, body.range, body.note, { useReviews: body.useReviews !== false });
         // 只有【窗口在且 AI 真的在跑】才穿插指令；若 AI 已退出到命令行（只剩 shell 提示符），
         // 绝不能把指令打进命令行——改为开新窗口重启 AI（治"没打开 ai 就给命令行发命令"）。
         if (sessionLive(book.slug) && await sessionAgentAlive(book.slug, cfg)) {

@@ -635,7 +635,9 @@ $('#rwGo').addEventListener('click', async () => {
   $('#rwGo').disabled = true; $('#rwErr').textContent = '准备中…';
   try {
     const url = mode === 'reproject' ? '/api/book/reproject' : '/api/book/rewrite';
-    const r = await api(url, 'POST', { book: CUR.slug, range, note });
+    // useReviews：让重写指令自己去 reviews/ 里找本范围相关的条目当必办清单。
+    // 之前这条链是断的——复检把问题写进报告，重写却不知道报告存在，只能靠人复制粘贴。
+    const r = await api(url, 'POST', { book: CUR.slug, range, note, useReviews: $('#rwUseReviews')?.checked !== false });
     $('#rewriteModal').classList.add('hidden');
     if (r.mode === 'started') { setWriting(true); openStream(CUR.slug); }
     toast((r.mode === 'inserted' ? '已穿插重写指令' : '已开窗重写') + (r.snapshot ? '（存档 ' + r.snapshot + '）' : ''));

@@ -491,6 +491,7 @@
       </label>
       <label class="field" id="rwRangeWrap"><span>重写范围</span><input id="rwRange" type="text" placeholder="如 001-008 或 卷01"></label>
       <label class="field"><span>重点要求（怎么改得更好，可空）</span><textarea id="rwNote" rows="3" placeholder="例如：开篇让主角身份+国术+时代尽早上场、压缩探案支线…"></textarea></label>
+      <label class="check"><input type="checkbox" id="rwUseReviews" checked> 按复检报告重写（默认开：先去 <code>reviews/</code> 里检索与这个范围相关的硬伤/隐患/未决项，列成必办清单再动笔；报告与正文冲突时以正文为准）</label>
       <div class="btn-row end"><button class="btn ghost" id="rwCancel">取消</button><button class="btn danger" id="rwGo">♻️ 开始重写 ▶</button></div>
       <div class="modal-err" id="rwErr"></div>
     </div>

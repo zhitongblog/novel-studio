@@ -398,10 +398,32 @@ export function buildReviseSettingInstruction(book, { target, scope, instruction
 }
 
 // 范围重写：把指定范围的章节【推倒重写】（不是润色）。单行。
-export function buildRewriteInstruction(book, range, note) {
+// 列出本书 reviews/ 下的复检报告文件名（只列名，正文让 agent 自己去读——报告动辄上千行，塞进指令里没法要）。
+export function reviewFilesOf(book) {
+  try {
+    return fs.readdirSync(path.join(book.dir, 'reviews'))
+      .filter(f => /\.md$/i.test(f))
+      .sort();
+  } catch { return []; }
+}
+
+// useReviews：把「按复检报告重写」接上。
+// 为什么需要：复检发现问题 → 写进 reviews/*.md → 但重写指令原来【完全不知道报告存在】，
+// 只有一段自由文本「重点要求」，等于要作者把报告里那一条人肉复制粘贴过来。
+// 而报告现在十一轮、一千两百多行，翻起来比重写还累。勾上这个就自动让 agent 先去报告里
+// 检索与本范围相关的条目，把它们当成本次必须解决的清单。
+export function buildRewriteInstruction(book, range, note, { useReviews = false } = {}) {
   const r = (range || '全书').trim();
   const focus = note ? `本次重写的重点要求：${String(note).replace(/[\r\n]+/g, ' ')}。` : '';
-  const s = `对《${book.title}》的【范围 ${r}】做【推倒重写】——不是润色、是从头写出更好的版本（旧版本已 git 存档、可回退）。` +
+  const files = useReviews ? reviewFilesOf(book) : [];
+  const fromReviews = files.length
+    ? `第0步【先读复检报告】：本书 reviews/ 下有这些报告——${files.join('、')}。`
+      + `先在里面检索与【范围 ${r}】相关的条目（硬伤／隐患／未决项／建议／方案），逐条列成本次重写【必须解决的清单】，`
+      + `写在你的第一条回复里；重写完成后逐条核对是否真的解决了，没解决的要说明为什么。`
+      + `⚠️ 报告是历史记录，可能已经过期或记录过宽（此前多轮就纠正过好几处）：`
+      + `报告与正文／novel_bible.md 冲突时【一律以正文与 bible 为准】，并在本次的报告小节里说明哪一条对不上。`
+    : '';
+  const s = `对《${book.title}》的【范围 ${r}】做【推倒重写】——不是润色、是从头写出更好的版本（旧版本已 git 存档、可回退）。` + fromReviews +
     `第一步：通读 novel_bible.md、该范围对应的 outlines 分章大纲，以及范围【之后】已写的章节，确保新版与后文在人物、伏笔、设定、时间线上严丝合缝。` +
     `第二步：把范围内每一章【整章重写】，覆盖原 .txt 文件；章号与卷目录结构保持不变（若大纲要求调整命名则同步改 chapter_index.md）。${focus}` +
     `第三步：逐章自检并更新 chapter_index.md。严禁改动范围之外的章节、不要新增后续章节。` +
