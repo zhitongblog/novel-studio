@@ -2,7 +2,7 @@
 // → 连上该实例 MCP → 启动 autopilot 监控应答。
 import fs from 'node:fs';
 import path from 'node:path';
-import { getModel, detectModel } from './models.mjs';
+import { getModel, detectModel, resolveBin } from './models.mjs';
 import {
   ensureProfile, spawnInstance, instancePids, waitForNewInstance, resolveSpawnedInstance,
   resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow,
@@ -129,10 +129,16 @@ export function writeLaunchScript(book, model, instruction, cfg) {
         `Write-Host "[proxy] 本会话已启用 ${proxy}" -ForegroundColor DarkGray`,
       );
     }
+    // 用 resolveBin 而不是 m.bin：agy 这类"装了但不在 PATH"的 CLI，直接写命令名开出来的窗口
+    // 只会打印 "'agy' 不是内部或外部命令" 然后停在 shell 提示符——窗口是开了，agent 从没起来。
+    // 路径可能带空格，单引号包起来（PowerShell 里 '' 转义单引号）。
+    const exe = resolveBin(model);
+    const isPath = exe.indexOf(' ') >= 0 || exe.indexOf('/') >= 0 || exe.indexOf(String.fromCharCode(92)) >= 0;
+    const exeQ = isPath ? `& '${exe.replace(/'/g, "''")}'` : `& ${exe}`;
     lines.push(
       `Write-Host "[agent] 启动 ${m.bin} ，初始指令已注入…" -ForegroundColor DarkGray`,
       `$seed = ${psArr}`,
-      `& ${m.bin} @seed`,
+      `${exeQ} @seed`,
     );
     const p = path.join(dir, 'launch.ps1');
     fs.writeFileSync(p, '﻿' + lines.join('\r\n') + '\r\n', 'utf8'); // BOM 保证中文
@@ -150,7 +156,7 @@ export function writeLaunchScript(book, model, instruction, cfg) {
     lines.push(`echo "[proxy] 本会话已启用 ${proxy}"`);
   }
   lines.push(`echo "[agent] 启动 ${m.bin} ，初始指令已注入…"`,
-    `${m.bin} ${seed.map(q).join(' ')}`);
+    `${q(resolveBin(model))} ${seed.map(q).join(' ')}`);
   const p = path.join(dir, 'launch.sh');
   fs.writeFileSync(p, lines.join('\n') + '\n', 'utf8');
   try { fs.chmodSync(p, 0o755); } catch {}

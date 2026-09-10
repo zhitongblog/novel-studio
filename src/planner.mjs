@@ -3,12 +3,12 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { getModel, detectAll } from './models.mjs';
+import { getModel, detectAll, resolveBin } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { STYLES, getStyle } from './styles.mjs';
 
 // runModelOnce 能非交互驱动的本地 CLI（一次性喂 prompt 走 stdin 取文本）。trae 用法不同(run 子命令)，不在此列。
-const CLI_GEN_PREF = ['codex', 'gemini', 'qwen', 'claude'];
+const CLI_GEN_PREF = ['codex', 'gemini', 'qwen', 'agy', 'claude'];
 
 // 把「用于文本生成的模型」解析成一个真正能本地 spawn 的 CLI：
 // 网页版模型(kind:'web')/无 bin 的模型不能 spawn（会 "file argument must be string, received undefined"）——
@@ -90,8 +90,10 @@ export function generateSynopsis(book, cfg) {
 const CLI_FAIL_PATTERNS = [
   [/hit your usage limit|usage limit (reached|exceeded)|out of credits|quota exceeded|额度.{0,4}(用尽|不足|耗尽)/i, '额度已用尽'],
   [/rate ?limit|too many requests|\b429\b/i, '被限流'],
-  [/not logged ?in|please log ?in|login required|unauthorized|\b401\b|authentication failed/i, '未登录或鉴权失败'],
+  [/not logged ?in|please log ?in|login required|unauthorized|\b401\b|authentication (failed|required)|accounts[.]google[.]com|visit the URL to log in/i, '未登录或鉴权失败'],
   [/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)/i, '网络/代理不通'],
+  // 命令根本不在 PATH（agy 就是这样：装了但没跑 `agy install`）。这句报错绝不能被当成模型的回答。
+  [/is not recognized as an internal|command not found|不是内部或外部命令|No such file or directory/i, '命令找不到（没装或不在 PATH）'],
 ];
 
 // 判断一次 CLI 输出是不是"跑失败了"。返回 {why, detail} 或 null。
@@ -124,11 +126,17 @@ export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
   // prompt 走 stdin（避免参数里 JSON 双引号/中文在 Windows cmd 下的引号地狱）；
   // shell:true 让 Windows 能解析 npm 的 .cmd shim（codex/claude/gemini/qwen 都是 shim）。
   let args;
+  let viaStdin = true;
   if (useId === 'codex') args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
-  else if (useId === 'claude') args = ['-p'];
-  else args = ['-p']; // gemini / qwen（gemini-cli 分支，同样 -p + stdin）
-  const r = spawnSync(m.bin, args, {
-    encoding: 'utf8', timeout: timeoutMs, input: prompt, cwd: os.tmpdir(),
+  else if (useId === 'agy') {
+    // agy 的 -p/--print 是【带参数】的（不带就报 flag needs an argument: -p），不像 claude/gemini 从 stdin 读。
+    // 照 stdin 那套喂它，只会拿回一屏 usage 帮助——而那玩意会被当成"模型的回答"洗进简介里。
+    args = ['-p', prompt];
+    viaStdin = false;
+  }
+  else args = ['-p']; // claude / gemini / qwen（-p + stdin）
+  const r = spawnSync(resolveBin(useId), args, {
+    encoding: 'utf8', timeout: timeoutMs, ...(viaStdin ? { input: prompt } : {}), cwd: os.tmpdir(),
     env, maxBuffer: 8 * 1024 * 1024, shell: true, windowsHide: true,
   });
   if (r.error) throw new Error(m.name + ' 调用失败：' + r.error.message);
