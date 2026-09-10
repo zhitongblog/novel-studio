@@ -908,7 +908,12 @@ async function api(p, req, res, u) {
           return json(res, 200, { ok: true, mode: 'inserted', ...r });
         }
         // 未在写 → 开一个会话专门做复检
+        // ⚠️ 这行清空日志【在存档之后】，会把上面那句"已 git 存档：xxxxx"一起冲掉——
+        // 存档明明成功了，界面上却一个字都看不到，作者以为没存（实测 cd3054e 那次就是这样）。
+        // 清空是为了让新一轮的日志从头开始，那就清完再把存档那句补回去。
+        const snapMsg = (rtOf(book.slug).logs || []).find(e => String(e.msg || '').startsWith('已 git 存档：'));
         rtOf(book.slug).logs = [];
+        if (snapMsg) pushLog(book.slug, snapMsg);
         const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, pane: session.paneId });
@@ -1579,8 +1584,14 @@ async function api(p, req, res, u) {
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
         const isRe = p === '/api/book/reproject';
-        if (!isRe && !String(body.range || '').trim()) return json(res, 400, { error: '请填重写范围（如 001-008 或 卷01）' });
-        const hash = gitSnapshot(book.dir, isRe ? '整本重立项前存档' : ('重写' + (body.range || '') + '前存档'));
+        // 范围可以留空，但只有在【勾了按复检报告重写】时才行——那种情况下"哪几章有问题"是报告说了算，
+        // 不该反过来要作者先知道。作者要是既不填范围、又不让它读报告，那就真的没有任何依据可循。
+        const autoScope = !isRe && !String(body.range || '').trim();
+        if (autoScope && body.useReviews === false) {
+          return json(res, 400, { error: '要么填重写范围（如 001-008 或 卷01），要么勾上「按复检报告重写」让它自己从报告里找出问题章节。' });
+        }
+        const hash = gitSnapshot(book.dir, isRe ? '整本重立项前存档'
+          : (autoScope ? '按复检报告重写前存档' : '重写' + (body.range || '') + '前存档'));
         // useReviews：勾了「按复检报告重写」→ 指令里先让它去 reviews/ 里检索本范围相关的条目当必办清单。
         // 之前这里断着：复检把问题写进报告，重写却完全不知道报告存在，只能靠作者人肉复制粘贴。
         const instruction = isRe ? buildReprojectInstruction(book, body.note)

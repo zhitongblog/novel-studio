@@ -7,7 +7,20 @@
 import assert from 'node:assert';
 import { spawn } from 'node:child_process';
 
-const PORT = 8791;
+// 端口不能写死：8791 被别的进程占着时，fetch 打到的是那个进程，返回 404 → 这个测试永远红，
+// 而失败原因跟被测的缓存头毫无关系（本机就撞上过一次，查了半天才发现是无关进程占的）。
+// 先向系统要一个空闲端口，用完立刻放掉再把号给服务端。
+const PORT = await (async () => {
+  const net = await import('node:net');
+  return new Promise((resolve, reject) => {
+    const srv0 = net.createServer();
+    srv0.once('error', reject);
+    srv0.listen(0, '127.0.0.1', () => {
+      const port = srv0.address().port;
+      srv0.close(() => resolve(port));
+    });
+  });
+})();
 const srv = spawn(process.execPath, ['bin/novel.mjs', 'serve', '--port', String(PORT)], {
   cwd: process.cwd(), stdio: 'ignore', detached: false,
 });

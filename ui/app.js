@@ -630,14 +630,21 @@ $('#rwGo').addEventListener('click', async () => {
   const mode = $('#rwMode').value;
   const range = $('#rwRange').value.trim();
   const note = $('#rwNote').value.trim();
-  if (mode === 'range' && !range) { $('#rwErr').textContent = '请填重写范围（如 001-008 或 卷01）'; return; }
+  const useReviews = $('#rwUseReviews')?.checked !== false;
+  // 范围可以留空——那表示"让它自己从复检报告里找出该重写哪些章"。
+  // 但前提是勾了「按复检报告重写」：既不填范围、又不让它读报告，就真的没有任何依据可循了。
+  if (mode === 'range' && !range && !useReviews) {
+    $('#rwErr').textContent = '要么填重写范围（如 001-008 或 卷01），要么勾上「按复检报告重写」让它自己找问题章节';
+    return;
+  }
+  if (mode === 'range' && !range && !confirm('范围留空：将由 AI 通读复检报告，自己找出仍未解决的问题章节并整章重写（一次最多 10 章，开始前自动 git 存档）。确定？')) return;
   if (mode === 'reproject' && !confirm('整本重立项会让作者从头重写 bible+大纲+全部正文（旧内容已 git 存档可回退）。确定？')) return;
   $('#rwGo').disabled = true; $('#rwErr').textContent = '准备中…';
   try {
     const url = mode === 'reproject' ? '/api/book/reproject' : '/api/book/rewrite';
     // useReviews：让重写指令自己去 reviews/ 里找本范围相关的条目当必办清单。
     // 之前这条链是断的——复检把问题写进报告，重写却不知道报告存在，只能靠人复制粘贴。
-    const r = await api(url, 'POST', { book: CUR.slug, range, note, useReviews: $('#rwUseReviews')?.checked !== false });
+    const r = await api(url, 'POST', { book: CUR.slug, range, note, useReviews });
     $('#rewriteModal').classList.add('hidden');
     if (r.mode === 'started') { setWriting(true); openStream(CUR.slug); }
     toast((r.mode === 'inserted' ? '已穿插重写指令' : '已开窗重写') + (r.snapshot ? '（存档 ' + r.snapshot + '）' : ''));

@@ -59,3 +59,40 @@ console.log('✓ 单行');
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('\n全部通过 ✅  复检发现 → 报告落盘 → 重写自动读回来，不用人搬');
+
+// —— 范围留空 = 自动定范围 ——
+// 作者原话："必须指定章节，这个逻辑不对，不是自动重写。"
+// 哪几章有问题是报告说了算，不该反过来要作者先知道——那正是报告存在的意义。
+console.log('— 自动定范围 —');
+const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-rw2-'));
+fs.mkdirSync(path.join(dir2, 'reviews'), { recursive: true });
+fs.writeFileSync(path.join(dir2, 'reviews', '复检-全书.md'), '# 复检\n§2.12 018 章整章错位\n', 'utf8');
+const book2 = { title: '走进修仙', dir: dir2 };
+
+const auto = buildRewriteInstruction(book2, '', '', { useReviews: true });
+for (const [what, needle] of [
+  ['明说作者不指定范围', '作者不指定范围'],
+  ['先通读全部报告', '通读 reviews/ 下的全部报告'],
+  ['只挑仍未解决的', '仍未解决'],
+  ['要逐条核对正文确认问题还在', '现在确实还在'],
+  ['先报清单再动手', '写在你的第一条回复里'],
+  ['一次最多 10 章', '一次最多重写 10 章'],
+  ['不需要重写就什么都别改', '什么都不要改'],
+  ['别为了有产出而制造重写', '不要为了有产出而制造重写'],
+]) {
+  assert.ok(auto.includes(needle), `自动模式缺少「${what}」`);
+  console.log(`✓ ${what}`);
+}
+assert.ok(!auto.includes('范围 全书'), '自动模式不该退化成"重写全书"——那是灾难');
+console.log('✓ 不会退化成重写全书');
+
+const cap = buildRewriteInstruction(book2, '', '', { useReviews: true, maxChapters: 3 });
+assert.ok(cap.includes('一次最多重写 3 章'), 'maxChapters 可调');
+console.log('✓ 上限可调');
+
+// 不勾报告 + 不填范围 = 没有任何依据，不该走自动模式
+const noBasis = buildRewriteInstruction(book2, '', '', { useReviews: false });
+assert.ok(!noBasis.includes('作者不指定范围'), '没有报告依据时不能进自动模式');
+console.log('✓ 不读报告时不进自动模式（服务端会直接拒绝这种组合）');
+
+fs.rmSync(dir2, { recursive: true, force: true });

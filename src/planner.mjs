@@ -420,16 +420,46 @@ export function reviewFilesOf(book) {
 // 只有一段自由文本「重点要求」，等于要作者把报告里那一条人肉复制粘贴过来。
 // 而报告现在十一轮、一千两百多行，翻起来比重写还累。勾上这个就自动让 agent 先去报告里
 // 检索与本范围相关的条目，把它们当成本次必须解决的清单。
-export function buildRewriteInstruction(book, range, note, { useReviews = false } = {}) {
-  const r = (range || '全书').trim();
+// range 留空 = 【自动定范围】：哪几章有问题是报告说了算，不该反过来要作者先知道。
+// 作者原话："必须指定章节，这个逻辑不对，不是自动重写。"
+// maxChapters：一次最多重写多少章。整章重写是不可逆的大改，报告里攒了十几轮未决项，
+// 不设上限它可能一口气动几十章——超出就先把清单摆出来让作者分批过目。
+export function buildRewriteInstruction(book, range, note, { useReviews = false, maxChapters = 10 } = {}) {
+  const auto = !String(range || '').trim() && useReviews;
+  const r = auto ? '' : (range || '全书').trim();
   const focus = note ? `本次重写的重点要求：${String(note).replace(/[\r\n]+/g, ' ')}。` : '';
   const files = useReviews ? reviewFilesOf(book) : [];
+  const reportList = files.length ? `本书 reviews/ 下有这些报告——${files.join('、')}。` : '';
+  const caveat = '⚠️ 报告是历史记录，可能已经过期或记录过宽（此前多轮就纠正过好几处）：'
+    + '报告与正文／novel_bible.md 冲突时【一律以正文与 bible 为准】，并在报告小节里说明哪一条对不上。';
+
+  if (auto) {
+    // 【自动定范围】先找出还没解决的问题章节 → 报清单 → 再逐章重写。
+    const a = `对《${book.title}》做【按复检报告重写】——由你自己从报告里找出该重写哪些章，作者不指定范围。${reportList}`
+      + `第一步【定范围】：通读 reviews/ 下的全部报告，把其中【仍未解决】的条目挑出来`
+      + `（报告里已标注"已就地修正／已完成"的跳过；只留"隐患／未决项／需要整章重写／给了方案但没执行"这类），`
+      + `再逐条核对正文确认问题【现在确实还在】——报告可能已经过期。`
+      + `然后列出【真正需要整章重写的章节清单】，每章写明：章号、出自报告哪一条、为什么必须整章重写而不是就地改。`
+      + `把这份清单写在你的第一条回复里。${caveat}`
+      + `⚠️ 一次最多重写 ${maxChapters} 章：清单超过这个数就【只重写其中最该先动的 ${maxChapters} 章】，`
+      + `其余在报告里列成"下一轮待办"，不要一口气全动——整章重写不可逆，作者需要分批过目。`
+      + `若逐条核对下来【一章都不需要整章重写】（问题都能就地改、或早已解决），就【什么都不要改】，`
+      + `直接在报告里写明结论并停下——不要为了有产出而制造重写。`
+      + `第二步【重写】：把清单里每一章整章重写、覆盖原 .txt；动笔前先读 novel_bible.md、对应的 outlines 分章大纲，`
+      + `以及该章【之后】已写的章节，确保新版与后文在人物、伏笔、设定、时间线上严丝合缝。`
+      + `章号与卷目录结构保持不变（章名要调整则同步改 chapter_index.md）。${focus}`
+      + `严禁改动清单之外的章节、不要新增后续章节。`
+      + `第三步【交代】：逐章自检，更新 chapter_index.md 与 continuity_ledger.md，`
+      + `并把"改了哪几章、各解决了报告里的哪一条、还剩哪些没动"追加写进 reviews/复检-全书.md。`
+      + `全程严格遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范，尤其【题材承诺兑现】【节奏与格局】【连续性】；`
+      + `文风一律以 style_refs/ 的范本为准。`;
+    return a.replace(/[\r\n]+/g, ' ');
+  }
+
   const fromReviews = files.length
-    ? `第0步【先读复检报告】：本书 reviews/ 下有这些报告——${files.join('、')}。`
+    ? `第0步【先读复检报告】：${reportList}`
       + `先在里面检索与【范围 ${r}】相关的条目（硬伤／隐患／未决项／建议／方案），逐条列成本次重写【必须解决的清单】，`
-      + `写在你的第一条回复里；重写完成后逐条核对是否真的解决了，没解决的要说明为什么。`
-      + `⚠️ 报告是历史记录，可能已经过期或记录过宽（此前多轮就纠正过好几处）：`
-      + `报告与正文／novel_bible.md 冲突时【一律以正文与 bible 为准】，并在本次的报告小节里说明哪一条对不上。`
+      + `写在你的第一条回复里；重写完成后逐条核对是否真的解决了，没解决的要说明为什么。${caveat}`
     : '';
   const s = `对《${book.title}》的【范围 ${r}】做【推倒重写】——不是润色、是从头写出更好的版本（旧版本已 git 存档、可回退）。` + fromReviews +
     `第一步：通读 novel_bible.md、该范围对应的 outlines 分章大纲，以及范围【之后】已写的章节，确保新版与后文在人物、伏笔、设定、时间线上严丝合缝。` +

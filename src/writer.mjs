@@ -390,6 +390,9 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
         msg: `⏸ 本批已写完（已到第 ${chapters} 章），待你审核：批准继续 / 按要求继续 / 停止` });
       return '本批已写完。请【暂停】：先不要写下一批，也不要改大纲，等用户审核当前内容并下达下一步要求后再继续。';
     };
+    // 上一批结束时的最高章号——用来算"这一批新写了哪几章"，交给排版矫正闸。
+    // 初值取当前值：重挂/刚开窗时先记下水位，第一批写完才有区间可矫正。
+    let batchLowWater = bookStats(getBook(slug) || book)?.maxChapter || 0;
     autopilot = new Autopilot(mcp, paneId, {
       ...cfg.autopilot,
       // 每批的续写指令后面接上本书范本原文（见 continueWithVoice 的说明）
@@ -405,7 +408,21 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       reviewEvery: () => getReviewEvery(slug),   // 0=全自动；N=每 N 批审核（实时热切换）
       onBatchReview,
       // 写完一批后：给"写够章却没卷名"的卷自动起名写回 bible（后台、best-effort，不阻塞）
-      onBatchDone: async () => { try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(getBook(slug) || book, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {} },
+      onBatchDone: async () => {
+        const b = getBook(slug) || book;
+        // ① 排版矫正闸：原来只挂在 cowrite / statelessWriter 上，【长驻窗口这条主路径一次都没跑过】，
+        //    《走进修仙》因此一路攒出 85 章「……」超标，直到发布前才被复检发现、只能事后扫 103 章。
+        //    闸的意义是"写完立刻矫正"，事后补扫是下策。批次范围 = 上次记下的最高章号+1 → 现在的最高章号。
+        // ② 顺带查一遍重复章号（《大宋第一女帝》两个 001 那类）。
+        try {
+          const { afterBatch } = await import('./afterbatch.mjs');
+          const now = bookStats(b)?.maxChapter || 0;
+          const prev = batchLowWater;
+          batchLowWater = now;
+          afterBatch(b, { from: prev > 0 ? prev + 1 : 0, to: now, onLog });
+        } catch {}
+        try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(b, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {}
+      },
       takeReviewResume: () => takeResume(slug),
       // 省 token：上下文快满就重开新会话（靠 continuity_ledger 重建）
       contextSize: () => currentContextSize((getBook(slug) || book).dir, model),
