@@ -2243,11 +2243,12 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
 // 用于去重对齐：读已发布 + 待发布定时章里「第N章」的最大值。
 // 导航到章节管理页，逐页（尽力）遍历读取所有「第N章」，抽最大 N。
 // 读不到返回 {maxChapter:0}。分页拿不准时标 approx:true。
-export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
+export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: injectedClient, volSwitchWaitMs = 12000 } = {}) {
   const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
   if (!bookId) return { maxChapter: 0, error: '缺少 bookId' };
 
-  const client = new UnzooClient(profilePath || null, onLog || null);
+  // client 可注入：只为可测（test/publish-volume-scan.test.mjs），线上仍是真 UnzooClient。
+  const client = injectedClient || new UnzooClient(profilePath || null, onLog || null);
   try {
     // type=1 章节管理页（已发布 + 待发布定时章均在章节表中）
     await client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}?type=1`);
@@ -2392,18 +2393,47 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
       }
       return [];
     };
-    // 选某卷（精确匹配卷名）。返回是否点中。
+    // 下拉当前显示的卷名
+    const curVolName = async () => {
+      const r = await client.evaluate(`(function(){
+        const sel = (function(){ ${VOL_DROPDOWN} })();
+        if (!sel) return null;
+        const vv = sel.querySelector('.byte-select-view-value') || sel;
+        return (vv.textContent || '').trim();
+      })()`);
+      return typeof r === 'string' ? r.trim() : (r == null ? null : String(r).trim());
+    };
+
+    // 选某卷。返回 {ok, already, switched}。
+    // ⚠️【点完不等于切过去了】——原来点完只 sleep(1600) 就读表，番茄换卷的数据要几百毫秒到几秒才回来，
+    // 这段窗口里【上一卷的行还在 DOM】→ 读到的是上一卷的章号，却记在这一卷名下。
+    // 《重生东京》的日志就是这么自相矛盾的：同一本书先后报「第七卷=310」「第六卷=311」「第六卷=280」。
+    // 后果是 maxChapter 时高时低；靠高水位兜底才没重复发布。
+    // 现在要求：下拉显示值换成目标卷，【且】章节行签名真的变了（或明确是空卷），才算 switched。
     const selectVolume = async (name) => {
+      const cur = await curVolName();
+      if (cur === name) return { ok: true, already: true, switched: true };
+      const before = await client.evaluate(readPage);
+      const beforeSig = (before && before.sig) || '';
       await client.clickByLocator(VOL_DROPDOWN);
       await client.sleep(600);
-      const ok = await client.clickByLocator(`
+      const clicked = await client.clickByLocator(`
         const want = ${JSON.stringify(name)};
         const opts = document.querySelectorAll('.byte-select-option, .arco-select-option, [class*="select-option"]');
         for (const o of opts) { if (((o.textContent || '').trim()) === want) return o; }
         return null;
       `);
-      await client.sleep(1600);
-      return ok;
+      if (!clicked) return { ok: false, switched: false };
+      const deadline = Date.now() + volSwitchWaitMs;
+      let shown = false;
+      while (Date.now() < deadline) {
+        await client.sleep(400);
+        if (!shown) shown = (await curVolName()) === name;
+        if (!shown) continue;
+        const r = await client.evaluate(readPage);
+        if (r && (r.emptyState || ((r.sig || '') && (r.sig || '') !== beforeSig))) return { ok: true, switched: true };
+      }
+      return { ok: true, switched: false };
     };
 
     // 番茄章节表【按卷显示、无"全部"选项】，但章号是【全局连续】的。
@@ -2429,10 +2459,13 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
       const scanned = [];
       for (const v of sorted) {
         const sel = await selectVolume(v.name);
-        if (!sel) { approx = true; continue; }
+        if (!sel.ok) { approx = true; scanned.push(`${v.name}=没点中`); continue; }
+        // 切卷没验证成功就【不读】——读到的很可能是上一卷残留的行（见 selectVolume 注释）
+        if (!sel.switched) { approx = true; scanned.push(`${v.name}=未切到(跳过)`); continue; }
         const r = await readCurVolMax();
         scanned.push(`${v.name}=${r.max}`);
-        if (r.max > 0) { maxChapter = r.max; latestDate = r.latestDate; approx = r.approx; break; }
+        // approx 只能往上叠：前面有卷没切过去/没点中，后面这一卷读成功了也不能把近似标记抹掉
+        if (r.max > 0) { maxChapter = r.max; latestDate = r.latestDate; approx = approx || r.approx; break; }
       }
       log(`🔎 多卷扫描（从最新卷起、命中非空即止）：${scanned.join('、') || '(全空)'}`, 'info');
       // 🛡️安全网：多卷却一章都没扫到 → 必是卷切换/读取异常（多卷书不可能全空还在发布）。
