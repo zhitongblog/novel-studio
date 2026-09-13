@@ -279,3 +279,23 @@ export function detectModel(id) {
 export function detectAll() {
   return Object.keys(MODELS).map(detectModel);
 }
+
+// 把一个目录写进 agy 的 trustedWorkspaces，免得窗口起来先弹一个"是否信任此项目"。
+// agy 把这份名单存在 ~/.gemini/antigravity-cli/settings.json（实测 1.2.2），只有这一个键。
+// 认弹窗是这套编排里最脆的一环（claude 那个默认停在 "No, exit" 的信任框害我们关过 agent），
+// 能从源头绕开就绕开。写失败不算错——最多是弹窗照旧，autopilot 那条路也已经能应答了。
+export function trustAgyWorkspace(dir) {
+  if (!dir) return false;
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  if (!home) return false;
+  const f = path.join(home, '.gemini', 'antigravity-cli', 'settings.json');
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(f, 'utf8')) || {}; } catch {}
+  const list = Array.isArray(cfg.trustedWorkspaces) ? cfg.trustedWorkspaces : [];
+  const want = path.resolve(dir);
+  if (list.some(x => path.resolve(String(x)) === want)) return false;
+  cfg.trustedWorkspaces = [...list, want];
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify(cfg, null, 2), 'utf8');
+  return true;
+}

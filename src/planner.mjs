@@ -8,7 +8,16 @@ import { proxyUrl } from './unterm.mjs';
 import { STYLES, getStyle } from './styles.mjs';
 
 // runModelOnce 能非交互驱动的本地 CLI（一次性喂 prompt 走 stdin 取文本）。trae 用法不同(run 子命令)，不在此列。
-const CLI_GEN_PREF = ['codex', 'gemini', 'qwen', 'agy', 'claude'];
+//
+// ⚠️【agy 不在这张表里，是有原因的，别再加回来】2026-09-13 实测：
+// agy 的交互模式(-i)能自动登录（窗口里显示 lixd220@gmail.com / Google AI Pro，直接开跑），
+// 但那份凭据【不落盘】——~/.gemini 下没有任何新文件，只有 trustedWorkspaces 被更新。
+// 于是非交互的 -p 每次都从零要 OAuth：打印一条 accounts.google.com 链接、等人贴授权码（60 秒超时），
+// 而授权码和发起那次登录的进程用 PKCE 绑定，进程一死就作废——在后台任务里根本无解。
+// 结果就是作者点「AI 起书名」看到的那句「AI 返回未能解析为书名候选」。
+// 所以：agy 只做【窗口里的写作模型】（那条路是好的，立项实测通过），
+// 书名/简介/文风这些一次性元任务一律交给 codex/gemini/qwen/claude。
+const CLI_GEN_PREF = ['codex', 'gemini', 'qwen', 'claude'];
 
 // 把「用于文本生成的模型」解析成一个真正能本地 spawn 的 CLI：
 // 网页版模型(kind:'web')/无 bin 的模型不能 spawn（会 "file argument must be string, received undefined"）——

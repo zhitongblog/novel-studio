@@ -2,7 +2,7 @@
 // → 连上该实例 MCP → 启动 autopilot 监控应答。
 import fs from 'node:fs';
 import path from 'node:path';
-import { getModel, detectModel, resolveBin } from './models.mjs';
+import { getModel, detectModel, resolveBin, trustAgyWorkspace } from './models.mjs';
 import {
   ensureProfile, spawnInstance, instancePids, waitForNewInstance, resolveSpawnedInstance,
   resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow,
@@ -111,7 +111,13 @@ export function writeLaunchScript(book, model, instruction, cfg) {
   assertCliModel(m, model);
   // 安全网：把任何换行折叠成空格 —— 多行 prompt 会被 agent 当多行草稿、等人工回车，无法自动开跑。
   const seed = m.seedArgs(instruction, cfg).map(a => String(a).replace(/[\r\n]+/g, ' '));
-  const proxy = cfg.enableProxy ? proxyUrl() : '';
+  // agy 走直连：Google 按出口 IP 判地区，代理节点一旦落在不支持的地区就整段拒绝
+  // （error: FAILED_PRECONDITION (code 400): User location is not supported for the API use.），
+  // 而本机直连是通的。见 planner.mjs runModelOnce 里的同一条说明。
+  const proxy = (cfg.enableProxy && m.id !== 'agy') ? proxyUrl() : '';
+  // 顺手把本书目录写进 agy 的 trustedWorkspaces：这样窗口起来就不会弹"是否信任此项目"，
+  // 少一个要 autopilot 去认的弹窗（认弹窗是这套编排里最脆的一环，能绕开就绕开）。
+  if (m.id === 'agy') { try { trustAgyWorkspace(book.dir); } catch {} }
   const dir = path.join(book.dir, '.studio');
   fs.mkdirSync(dir, { recursive: true });
 

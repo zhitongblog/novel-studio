@@ -11,7 +11,11 @@
 // 两条都只能靠"看懂报错"发现，所以这里既钉参数摆法，也钉失败特征识别。
 import assert from 'node:assert';
 import test from 'node:test';
-import { planCliInvocation, detectCliFailureForTest } from '../src/planner.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { planCliInvocation, detectCliFailureForTest, resolveGenModel } from '../src/planner.mjs';
+import { trustAgyWorkspace } from '../src/models.mjs';
 
 const PROMPT = '你是资深网文主编。请据下面的题材，生成 3 个适合该题材的中文网文书名，各配一句话简介。\n题材：都市';
 
@@ -62,4 +66,27 @@ test('地区被拒 / 参数没传对，都要认成"跑失败"，不许当成模
 test('正常的中文回答不许被误判成失败', () => {
   const ok = '[{"title":"我能看见万物回报率","premise":"绑定回报率视界的失业青年陆凡，从旧货地摊一步步撬动千亿风投，在都市红尘中玩转财富法则。"}]';
   assert.equal(detectCliFailureForTest(ok, PROMPT), null);
+});
+
+test('元任务绝不能落到 agy 头上：它的凭据不落盘，-p 每次都要人贴授权码', () => {
+  const picked = resolveGenModel('agy');
+  assert.notEqual(picked, 'agy', '选了 agy 也要换成别的 CLI 去跑书名/简介');
+  if (picked) assert.ok(['codex', 'gemini', 'qwen', 'claude'].includes(picked), `换成了意外的模型：${picked}`);
+});
+
+test('trustAgyWorkspace：写进去、且不重复写', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agyhome_'));
+  const old = process.env.USERPROFILE;
+  process.env.USERPROFILE = home;
+  try {
+    const dir = path.join(home, 'books', '某本书');
+    assert.equal(trustAgyWorkspace(dir), true, '第一次应写入');
+    assert.equal(trustAgyWorkspace(dir), false, '第二次应认出已存在、不重复写');
+    const f = path.join(home, '.gemini', 'antigravity-cli', 'settings.json');
+    const cfg = JSON.parse(fs.readFileSync(f, 'utf8'));
+    assert.deepEqual(cfg.trustedWorkspaces, [path.resolve(dir)]);
+  } finally {
+    if (old === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = old;
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
+  }
 });
