@@ -1172,6 +1172,10 @@ class FanqiePublisher {
     if (this.config?.matchVolumes && chapter.volumeText) {
       const sw = await this.switchToVolume(chapter.volumeText);
       if (!sw.ok) {
+        // notReady = 页面/模态没渲染出来，不是真缺卷 → 软失败，让上层刷新重试（3 次才暂停）
+        if (sw.notReady) {
+          return { success: false, message: `发布页还没就绪，读不到分卷（目标卷「${chapter.volumeText}」），刷新重试` };
+        }
         return {
           success: false, needsIntervention: true, reason: 'volume_missing',
           message: sw.found === false
@@ -1949,23 +1953,60 @@ class FanqiePublisher {
     return true;
   }
 
-  // 读当前发布页头部的卷名
+  // 读当前发布页头部的卷名。元素还没挂载 → 返回 null（"页面没好"和"卷名是空字符串"必须分开）。
   async readCurrentVolume() {
-    const r = await this.client.evaluate(`(function(){return {t:(document.querySelector('.publish-header-volume-name')||{}).textContent||''};})()`);
-    return (r?.t || '').trim();
+    const r = await this.client.evaluate(`(function(){var e=document.querySelector('.publish-header-volume-name');return {has:!!e,t:e?(e.textContent||''):''};})()`);
+    if (!r || !r.has) return null;
+    return (r.t || '').trim();
   }
 
-  // 切换到指定卷（仅在发布页）。返回 {ok, current, found}。
+  // 等卷名元素挂载出来。clickNewChapter 里只 sleep(3000)，慢的时候根本不够。
+  async waitVolumeHeader(maxMs = this.config?.volumeWaitMs ?? 15000) {
+    const deadline = Date.now() + maxMs;
+    for (;;) {
+      const v = await this.readCurrentVolume();
+      if (v !== null) return v;
+      if (Date.now() >= deadline) return null;
+      await this.client.sleep(400);
+    }
+  }
+
+  // 切换到指定卷（仅在发布页）。返回 {ok, current, found, notReady}。
   // 找不到目标卷 → ok:false（番茄建卷不可逆，绝不乱建，交由上层暂停并提示人工建卷）。
+  // ⚠️【"番茄没有这个卷"必须拿得出证据】——《重生东京》2026-09-13 栽过：
+  // 发完第311章后重新导航到发布页，卷名元素还没挂载 → 点它等于没点 → 模态没开 →
+  // 分卷列表读到 0 项 → 判成"番茄该书没有卷第七卷"当场暂停；
+  // 而同一分钟接口明明列着「第七卷：王座无冕」31 章。和"章节表没渲染完就判没这一章"是同一个病。
+  // 现在的判据：列表没渲染出来 = 页面没好(notReady，交给上层软重试)；
+  // 只有列表真渲染了、里面确实没有目标卷，才算 volume_missing。
   async switchToVolume(targetVolumeText) {
     if (!targetVolumeText) return { ok: true, skipped: true };
-    const current = await this.readCurrentVolume();
+    const current = await this.waitVolumeHeader();
+    if (current === null) {
+      this.log('⚠️ 发布页的卷名元素一直没出来（页面没加载好）——不当成"番茄没有这个卷"', 'warn');
+      return { ok: false, notReady: true, current: null, found: null };
+    }
     if (current === targetVolumeText) { this.log(`卷已正确：${current}`); return { ok: true, current, alreadyThere: true }; }
     this.log(`切换卷：${current || '(未知)'} → ${targetVolumeText}`);
-    // 打开分卷模态
-    await this.client.clickByLocator(`return document.querySelector('.publish-header-volume-name');`);
-    await this.client.sleep(500);
-    // 选目标卷（精确匹配卷名 span）
+
+    // 打开分卷模态，并等列表真的渲染出来（byte/Arco 模态异步挂载）。最多开 3 次。
+    const readNames = `(function(){var xs=document.querySelectorAll('.editor-volume-list-item-normal');var o=[];for(var i=0;i<xs.length;i++){var sp=xs[i].querySelector('span');o.push((((sp&&sp.textContent)||xs[i].textContent||'')+'').trim());}return JSON.stringify(o);})()`;
+    let names = [];
+    for (let attempt = 0; attempt < 3 && !names.length; attempt++) {
+      await this.client.clickByLocator(`return document.querySelector('.publish-header-volume-name');`);
+      const deadline = Date.now() + (this.config?.volumeListWaitMs ?? 8000);
+      for (;;) {
+        const r = await this.client.evaluate(readNames);
+        try { names = JSON.parse(typeof r === 'string' ? r : '[]'); } catch { names = []; }
+        if (names.length || Date.now() >= deadline) break;
+        await this.client.sleep(400);
+      }
+    }
+    if (!names.length) {
+      this.log('⚠️ 分卷列表一直没渲染出来（模态没打开）——不当成"番茄没有这个卷"', 'warn');
+      return { ok: false, notReady: true, current, found: null };
+    }
+
     const found = await this.client.clickByLocator(`
       const targetText = ${JSON.stringify(targetVolumeText)};
       const items = document.querySelectorAll('.editor-volume-list-item-normal');
@@ -1976,9 +2017,14 @@ class FanqiePublisher {
       return null;
     `);
     if (!found) {
-      // 关掉模态，报"未找到该卷"
+      // 关掉模态再报。另外拿接口卷列表交叉验证：接口有、界面没有 → 是界面的问题，不是真缺卷。
       try { await this.client.clickByLocator(`const b=document.querySelectorAll('.byte-modal-footer button');for(const x of b){if((x.textContent||'').includes('取消'))return x;}return null;`); } catch {}
-      this.log(`⚠️ 番茄该书没有卷「${targetVolumeText}」`, 'error');
+      const apiVols = Array.isArray(this.config?.fanqieVolumes) ? this.config.fanqieVolumes : [];
+      if (apiVols.includes(targetVolumeText)) {
+        this.log(`⚠️ 分卷列表里没有「${targetVolumeText}」，但接口卷列表里有它 → 按界面没刷新处理，重试（界面读到：${names.join(' / ')}）`, 'warn');
+        return { ok: false, notReady: true, current, found: null };
+      }
+      this.log(`⚠️ 番茄该书没有卷「${targetVolumeText}」——后台实际只有：${names.join(' / ')}`, 'error');
       return { ok: false, current, found: false };
     }
     await this.client.sleep(400);
