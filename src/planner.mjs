@@ -94,6 +94,10 @@ const CLI_FAIL_PATTERNS = [
   [/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)/i, '网络/代理不通'],
   // 命令根本不在 PATH（agy 就是这样：装了但没跑 `agy install`）。这句报错绝不能被当成模型的回答。
   [/is not recognized as an internal|command not found|不是内部或外部命令|No such file or directory/i, '命令找不到（没装或不在 PATH）'],
+  // Google 按出口 IP 的地区拒绝（agy/gemini 常见）。挂着代理反而会踩到这条——见 runModelOnce 里的 noProxy 说明。
+  [/User location is not supported|FAILED_PRECONDITION.*location/i, '该地区不支持（多半是代理出口地区被 Google 拒绝，试试关代理）'],
+  // 参数被 shell 拼碎时 agy 的原话，绝不能当成模型的回答洗进书名/简介里
+  [/unexpected argument|flag needs an argument|Prompts are read only from/i, '命令行参数没传对'],
 ];
 
 // 判断一次 CLI 输出是不是"跑失败了"。返回 {why, detail} 或 null。
@@ -109,6 +113,30 @@ function detectCliFailure(raw, prompt) {
   return { why: hit[1], detail: line.slice(0, 160) };
 }
 
+// 一次性调用某个 CLI 时，参数怎么摆、prompt 从哪进、要不要过 shell。抽成纯函数只为可测——
+// 这三件事各踩过一次坑，全都表现为"AI 返回解析不了"，从报错完全看不出真因。
+//
+// 铁律：【prompt 进了 argv 就绝不能开 shell】。shell:true 下 Node 只是把 argv 拼成一条命令行、
+// 不做任何转义，整段中文提示词会被空格切碎——agy 于是回一句 `unexpected argument "3".` 就退出。
+// shell 的唯一用途是让 Windows 解析 npm 的 .cmd shim（codex/gemini/qwen 那种没扩展名的壳），
+// 所以只有【prompt 走 stdin】且【bin 不是真 .exe】时才需要它。
+export function planCliInvocation(useId, prompt, bin) {
+  let args;
+  let viaStdin = true;
+  if (useId === 'codex') args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
+  else if (useId === 'agy') {
+    // agy 的 -p/--print 是【带参数】的（不带就报 flag needs an argument: -p），不像 claude/gemini 从 stdin 读。
+    // 照 stdin 那套喂它，只会拿回一屏 usage 帮助——而那玩意会被当成"模型的回答"洗进简介里。
+    args = ['-p', prompt];
+    viaStdin = false;
+  } else args = ['-p']; // claude / gemini / qwen（-p + stdin）
+  const useShell = viaStdin && !/\.exe$/i.test(String(bin || ''));
+  return { args, viaStdin, useShell };
+}
+
+// 只为测试导出：判定一次 CLI 输出是不是"跑失败了"（见 test/cli-invocation.test.mjs）。
+export const detectCliFailureForTest = detectCliFailure;
+
 // 非交互跑一次模型，拿文本输出
 export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
   // 网页版/无 bin 模型不能本地 spawn → 解析到一个可用的本地生成 CLI（立项/书名/简介等元任务）
@@ -119,25 +147,25 @@ export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
   }
   const m = getModel(useId);
   const env = { ...process.env };
-  if (cfg?.enableProxy) {
+  // 【agy 要走直连，不能挂代理】实测（2026-09-13）同一台机器上：
+  //   直连          → 正常回答
+  //   挂 127.0.0.1:7897 → error: FAILED_PRECONDITION (code 400): User location is not supported for the API use.
+  // Google 按出口 IP 判地区，代理节点落在不支持的地区就整段拒绝；而本机直连是通的。
+  // 这条报错再被上层当成"模型的回答"去解析，作者看到的就是那句莫名其妙的
+  //「AI 返回未能解析为书名候选，请重试或换模型」。
+  // 所以对 agy 主动【清掉】继承来的代理变量（引擎进程自己是带着代理跑的），不只是不设。
+  const noProxy = useId === 'agy';
+  if (noProxy) {
+    for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) delete env[k];
+  } else if (cfg?.enableProxy) {
     const px = proxyUrl();
     if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; }
   }
-  // prompt 走 stdin（避免参数里 JSON 双引号/中文在 Windows cmd 下的引号地狱）；
-  // shell:true 让 Windows 能解析 npm 的 .cmd shim（codex/claude/gemini/qwen 都是 shim）。
-  let args;
-  let viaStdin = true;
-  if (useId === 'codex') args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
-  else if (useId === 'agy') {
-    // agy 的 -p/--print 是【带参数】的（不带就报 flag needs an argument: -p），不像 claude/gemini 从 stdin 读。
-    // 照 stdin 那套喂它，只会拿回一屏 usage 帮助——而那玩意会被当成"模型的回答"洗进简介里。
-    args = ['-p', prompt];
-    viaStdin = false;
-  }
-  else args = ['-p']; // claude / gemini / qwen（-p + stdin）
-  const r = spawnSync(resolveBin(useId), args, {
+  const bin = resolveBin(useId);
+  const { args, viaStdin, useShell } = planCliInvocation(useId, prompt, bin);
+  const r = spawnSync(bin, args, {
     encoding: 'utf8', timeout: timeoutMs, ...(viaStdin ? { input: prompt } : {}), cwd: os.tmpdir(),
-    env, maxBuffer: 8 * 1024 * 1024, shell: true, windowsHide: true,
+    env, maxBuffer: 8 * 1024 * 1024, shell: useShell, windowsHide: true,
   });
   if (r.error) throw new Error(m.name + ' 调用失败：' + r.error.message);
   const out = (r.stdout || '') + '\n' + (r.stderr || '');
