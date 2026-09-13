@@ -602,7 +602,14 @@ export class Autopilot {
       || /(Use \/skills|Implement \{feature\}|Find and fix a bug|Run \/review|\/model to change|to list available skills)/i.test(bare)
       // claude 现在的常驻页脚：⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
       // 原来那条只认 "claude sonnet-5 default ·" 那种老页脚，认不出这个 → 护栏失效。
-      || /(shift\+tab to cycle|esc to interrupt|⏵⏵|for agents\b)/i.test(bare);
+      || /(shift\+tab to cycle|esc to interrupt|⏵⏵|for agents\b)/i.test(bare)
+      // agy(Antigravity) 的两个常驻页脚（2026-09-13 实测 1.2.2）：
+      //   干活时 → "esc to cancel"，上面一行是盲文转轮 + "Reading file…/Running command…"
+      //   空闲时 → "? for shortcuts"，上面是 "> " 输入框
+      //   两态右下角都挂着 "Gemini 3.8 Flash · high"（effort 词表里没有 flash，老正则认不出）
+      // 不认这些词的后果：护栏失效，agy 自己输出的编号清单会被当成审批菜单去回车/打 y。
+      || /(\? for shortcuts|esc to cancel)/i.test(bare)
+      || /\bgemini\s[\d.]+\s(flash|pro)\b/i.test(bare);
 
     // 【开了 bypass 就没有审批弹窗可认】--dangerously-skip-permissions 之下 claude 压根不会问
     // "要不要改这个文件/跑这条命令"。此时屏幕上任何像菜单/审批的东西都只可能是【它自己的输出】——
@@ -629,9 +636,12 @@ export class Autopilot {
     // 只认【光标记号】(❯ › ➤)：那才代表"高亮停在这一项上"。● 不算——它就是 claude 的输出符号。
     // agy 的提示文案是「↑/↓ Navigate · enter Confirm」——没有 "to"，原来那条只认 "enter to confirm"
     // 就会漏掉它 → 信任框落到 yn 分支往 TUI 里打 y。故把 NAV_HINT 那套说法一并认上。
-    const cursorMenu = cursorRadio.length >= 1 && !agentIdleFooter
-      && (/(enter to confirm|enter to (continue|select|apply)|press enter|请选择|回车确认)/i.test(bare)
-        || NAV_HINT.test(bare));
+    // ⚠️ NAV_HINT 那一路【不受 agentIdleFooter 约束】：agy 的信任框出现时右下角已经挂着
+    // "Gemini 3.8 Flash · high" 页脚，若照旧要求 !agentIdleFooter，这个框就又掉回 yn 分支去打 y。
+    // 「光标停在某个短选项上」+「同屏明说方向键/回车确认」已经是菜单的确证，和页脚无关。
+    const cursorMenu = cursorRadio.length >= 1
+      && (NAV_HINT.test(bare)
+        || (!agentIdleFooter && /(enter to confirm|enter to (continue|select|apply)|press enter|请选择|回车确认)/i.test(bare)));
     // 菜单的默认高亮项【不一定是"同意"】：新版信任框默认停在 "No, exit"，bypass 警告框默认停在 "1. No, exit"，
     // 闭眼回车都是把 agent 关掉。故凡是走菜单，先看清高亮项是不是否定项；是就改选肯定项（有编号按编号、
     // 没编号用方向键走过去）。

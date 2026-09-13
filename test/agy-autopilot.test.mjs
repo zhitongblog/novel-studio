@@ -83,3 +83,40 @@ test('❯ 那套老光标照旧有效（别为了 agy 把 claude 搞坏）', () 
   const c = optionChoice(linesOf(claudeTrust));
   assert.ok(c.move && c.move.dir === 'down' && c.move.steps === 1, `claude 信任框回归：${JSON.stringify(c)}`);
 });
+
+// 实测 agy 的两个常驻页脚（1.2.2）：干活 "esc to cancel"；空闲 "? for shortcuts"；
+// 两态右下角都有 "Gemini 3.8 Flash · high"。这些是 agentIdleFooter 护栏的依据——
+// 认不出就会把 agy 自己输出的编号清单当成审批菜单去回车/打 y。
+const AGY_IDLE = [
+  '● Edit(~/books/agy联调测试书/novel_bible.md)',
+  '● Bash([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; git status) (ctrl+o to expand)',
+  '【手法就绪：等作者给情节】',
+  '1. 先定主角的处境',
+  '2. 再定第一章的钩子',
+  '>',
+  '? for shortcuts                                            Gemini 3.8 Flash · high',
+].join(String.fromCharCode(10));
+
+const AGY_BUSY = [
+  '▸ Thought for 1s, 922 tokens',
+  '● Bash(pwd',
+  '⣽  Reading file...',
+  'esc to cancel                                              Gemini 3.8 Flash · high',
+].join(String.fromCharCode(10));
+
+test('agy 空闲屏里的编号清单是它的输出，不得当成菜单', () => {
+  const r = kindOf(AGY_IDLE);
+  assert.notEqual(r.kind, 'menu', `不该是 menu，实际 ${r.kind}（${r.reason}）`);
+  assert.notEqual(r.kind, 'yn', `不该往输入框打 y，实际 ${r.kind}（${r.reason}）`);
+});
+
+test('agy 干活中的屏幕不得被判成"写完了"', () => {
+  const ap2 = new Autopilot({}, 1, { confirmOnly: true });
+  assert.equal(ap2.looksIdleWaiting(AGY_BUSY), false, '"esc to cancel" 还挂着就是在干活');
+});
+
+test('信任框的页脚里已经有 Gemini 模型行，照样要认成 menu', () => {
+  const withFooter = TRUST_AGY + String.fromCharCode(10) + '? for shortcuts                     Gemini 3.8 Flash · high';
+  const r = kindOf(withFooter);
+  assert.equal(r.kind, 'menu', `页脚不该把信任框挡掉，实际 ${r.kind}（${r.reason}）`);
+});
