@@ -587,7 +587,9 @@ export class Autopilot {
     //    判别法：真正的单选组一定【● 和 ○ 同时出现】（选中的和没选中的）；claude 只会吐 ●，从不吐 ○。
     const OPT_MAX = 80;
     const short = (l) => l.trim().length <= OPT_MAX;
-    const cursorRadio = lines.filter(l => short(l) && /^\s*[❯➤›]\s+\S/.test(l));
+    // agy 的光标是半角 >（见 cursorRe 注释）：只在同屏有方向键/回车确认提示时才把它算光标。
+    const CUR_RE = cursorRe(lines);
+    const cursorRadio = lines.filter(l => short(l) && CUR_RE.test(l) && /\S/.test(l.replace(CUR_RE, '')));
     const dotRadio = lines.filter(l => short(l) && /^\s*[●○]\s+\S/.test(l));
     const dotIsMenu = dotRadio.some(l => /^\s*●/.test(l.trim() ? l : '')) && dotRadio.some(l => /^\s*○/.test(l));
     const radio = dotIsMenu ? [...cursorRadio, ...dotRadio] : cursorRadio;
@@ -625,8 +627,11 @@ export class Autopilot {
     //（"Enter to confirm" 里的 confirm 正好命中关键词），打个 y 再回车——而回车采纳的正是高亮的
     // "No, exit"，等于 autopilot 亲手把 agent 关掉。故凡是"有高亮光标 + 明说按回车确认"就按菜单处理。
     // 只认【光标记号】(❯ › ➤)：那才代表"高亮停在这一项上"。● 不算——它就是 claude 的输出符号。
+    // agy 的提示文案是「↑/↓ Navigate · enter Confirm」——没有 "to"，原来那条只认 "enter to confirm"
+    // 就会漏掉它 → 信任框落到 yn 分支往 TUI 里打 y。故把 NAV_HINT 那套说法一并认上。
     const cursorMenu = cursorRadio.length >= 1 && !agentIdleFooter
-      && /(enter to confirm|enter to (continue|select|apply)|press enter|请选择|回车确认)/i.test(bare);
+      && (/(enter to confirm|enter to (continue|select|apply)|press enter|请选择|回车确认)/i.test(bare)
+        || NAV_HINT.test(bare));
     // 菜单的默认高亮项【不一定是"同意"】：新版信任框默认停在 "No, exit"，bypass 警告框默认停在 "1. No, exit"，
     // 闭眼回车都是把 agent 关掉。故凡是走菜单，先看清高亮项是不是否定项；是就改选肯定项（有编号按编号、
     // 没编号用方向键走过去）。
@@ -695,16 +700,28 @@ export function stripBox(s) {
 const NEG_OPT = /^(no\b|n\b|don'?t|cancel|exit|quit|reject|deny|否|不|拒绝|取消|退出)/i;
 const POS_OPT = /^(yes\b|y\b|proceed|accept|allow|approve|continue|ok\b|是|好|同意|允许|确认|接受|继续)/i;
 const CURSOR_RE = /^\s*[›❯➤]\s*(?=\S)/;
+// agy(Antigravity) 的菜单光标是【半角 >】，不是 ❯/›：
+//     > Yes, I trust this folder
+//       No, exit
+//       ↑/↓ Navigate · enter Confirm
+// 半角 > 太常见（markdown 引用、shell 提示符、agent 正文里的引文），不能无条件当光标，
+// 否则正文里一行 "> 他说…" 就会被当成待选项。所以只在【同屏出现方向键/回车确认提示】时才认它。
+const NAV_HINT = /(↑\s*\/\s*↓|↑|↓).{0,24}(navigate|选择)|enter\s+confirm|enter to confirm|press enter|回车确认|请选择/i;
+export function cursorRe(lines) {
+  const navHint = (lines || []).some(l => NAV_HINT.test(l));
+  return navHint ? /^\s*[›❯➤>]\s*(?=\S)/ : CURSOR_RE;
+}
 export function optionChoice(lines) {
-  const idx = lines.findIndex(l => CURSOR_RE.test(l));
+  const CUR = cursorRe(lines);
+  const idx = lines.findIndex(l => CUR.test(l));
   if (idx < 0) return {};                                     // 没有高亮光标 → 看不明白，照旧回车
-  const cur = lines[idx].replace(CURSOR_RE, '').trim();
+  const cur = lines[idx].replace(CUR, '').trim();
   const numbered = /^(\d+)\s*[.)]\s*(.+)$/.exec(cur);
   if (!NEG_OPT.test(numbered ? numbered[2] : cur)) return {};  // 高亮的就是肯定项 → 照旧回车
   // ① 有编号：直接按肯定项的编号（最稳，不依赖光标怎么走）
   if (numbered) {
     for (const l of lines) {
-      const m = /^\s*[›❯➤]?\s*(\d+)\s*[.)]\s+(.+?)\s*$/.exec(l);
+      const m = /^\s*[›❯➤>]?\s*(\d+)\s*[.)]\s+(.+?)\s*$/.exec(l);
       if (m && POS_OPT.test(m[2])) return { pick: m[1] };
     }
   }
@@ -713,7 +730,7 @@ export function optionChoice(lines) {
   let end = idx; while (end < lines.length - 1 && lines[end + 1].trim()) end++;
   for (let i = start; i <= end; i++) {
     if (i === idx) continue;
-    if (POS_OPT.test(lines[i].replace(CURSOR_RE, '').trim())) {
+    if (POS_OPT.test(lines[i].replace(CUR, '').trim())) {
       return { move: { dir: i > idx ? 'down' : 'up', steps: Math.abs(i - idx) } };
     }
   }

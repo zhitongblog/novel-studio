@@ -128,9 +128,53 @@ export async function evaluate(tabId, expression, timeoutMs = UNZOO_TIMEOUT_MS) 
 }
 
 // 坐标真实点击（isTrusted=true）。替代已弃用的 POST /api/v1/click。
-// page_click 的 tab_id 声明为 string，loc 为 [x,y]。
+// page_click 的 tab_id 声明为 string，loc 为 [x,y]（视口坐标，与 page_analyze 给的 rect 同一坐标系）。
+//
+// ⚠️【坐标点击打的是"屏幕最前面那个窗口"，不是 tab_id 指定的那个】——2026-09-13 实测：
+// 同一句 page_click {loc:[200,230]}，目标 tab 明明 active=true、profile 也对得上，
+// 但当时前台窗口是另一个 profile 的 Unzoo 窗口，于是探针页一个事件都没收到，
+// 而 page_click 【返回 null、不报错】——静默落空。把目标窗口切到前台后同一句立刻命中、isTrusted=true。
+// 后果不只是"点不中"：这一下会落在【别人的页面】上，最坏情况点到另一个站点的按钮。
+// 所以：① 先 tab_activate，尽力把目标 tab 提到前台；
+//       ② 真正要求可信且不能依赖窗口前后顺序的地方，用 cdpClick（CDP Input.dispatchMouseEvent，
+//          按 page-id 直投，不看 OS 焦点）——番茄换封面那套流程就是这么做的。
 export async function clickAt(tabId, x, y) {
+  try { await mcpCall('tab_activate', { tab_id: String(tabId) }); } catch {}
   return mcpCall('page_click', { tab_id: String(tabId), loc: [Math.round(x), Math.round(y)] });
+}
+
+// 坐标可信点击·CDP 直投版（Input.dispatchMouseEvent）。按 page-id 投到指定页，
+// 【不看 OS 窗口前后顺序】——这正是 clickAt 的短板。番茄换封面那套流程用的是同一套做法
+// （UnzooClient.cdpClick，见 src/fanqie.mjs；那边多一步 ensureTabId 和拟人延时，此处是无状态版）。
+export async function cdpClickAt(tabId, x, y, { port = process.env.UNZOO_CDP_PORT || '9222' } = {}) {
+  if (typeof WebSocket === 'undefined') throw new Error('运行时无 WebSocket，无法用 CDP 可信点击（需 Node 22+）');
+  let wsUrl = null;
+  try {
+    const list = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(8000) })).json();
+    const pages = Array.isArray(list) ? list : [];
+    const pg = pages.find(p => String(p.id) === String(tabId));
+    wsUrl = pg && pg.webSocketDebuggerUrl;
+  } catch (e) { throw new Error(`CDP shim 不可用(${e.message})，请在 Unzoo 设置里开启 CDP(ws://127.0.0.1:${port})`); }
+  if (!wsUrl) throw new Error(`CDP 未找到目标页(tabId=${tabId})`);
+  const ws = new WebSocket(wsUrl);
+  let mid = 0;
+  const send = (method, params) => new Promise((resolve) => {
+    const i = ++mid;
+    const h = (e) => { try { const j = JSON.parse(e.data); if (j.id === i) { ws.removeEventListener('message', h); resolve(j); } } catch {} };
+    ws.addEventListener('message', h);
+    ws.send(JSON.stringify({ id: i, method, params: params || {} }));
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      ws.onopen = resolve;
+      ws.onerror = () => reject(new Error('CDP ws 连接失败'));
+      setTimeout(() => reject(new Error('CDP ws 连接超时')), 8000);
+    });
+    const cx = Math.round(x), cy = Math.round(y);
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: cx, y: cy });
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: cx, y: cy, button: 'left', buttons: 1, clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cx, y: cy, button: 'left', buttons: 0, clickCount: 1 });
+  } finally { try { ws.close(); } catch {} }
 }
 
 // 往【当前焦点元素】灌文本（isTrusted=true，走 Chromium IME 管线，ProseMirror/Lexical 认）。
