@@ -186,11 +186,57 @@ class UnzooClient {
       if (/超时/.test(e.message || '')) {
         const dismissed = await dismissDialog(this.tabId);
         if (dismissed) this.addLog('检测到阻塞弹窗并已关闭，重试…', 'warn');
-        const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
-        return result?.result;
+        try {
+          const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
+          return result?.result;
+        } catch (e2) {
+          if (!/超时/.test(e2.message || '')) throw e2;
+          // 弹窗不是原因——是【整个标签页卡死了】。实测（2026-09-14）：277 章那批重发在第54章把 tab 卡住，
+          // 之后连只读的 location.href 都 45s 超时；批次当场暂停，干等了 14 小时才被发现，
+          // 第二天原样续发 4 分钟内又栽在同一个卡死的 tab 上（0/225）。
+          // 一个标签页卡死不该报废整批 → 关掉重建、回到原页面、再试一次。
+          this.addLog('标签页整个卡死（连只读 evaluate 都超时）→ 关掉重建后重试…', 'warn');
+          await this.recoverTab(this.lastUrl);
+          const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
+          return result?.result;
+        }
       }
       throw e;
     }
+  }
+
+  // 标签页卡死后的恢复：关掉 → 优先复用本账号其它标签页 → 都没有才新建 → 回到原页面。
+  // ⚠️【新建必须验证归属】选中账号时绝不能把稿子发到别的 profile 去（navigate 里那条安全规则同理）：
+  // 万一新标签页落在别的账号下，立刻关掉并中止，宁可这批停下，也不能发错号。
+  // _call 默认就是 unzooCallTool；留这个口子只为可测——测试注入它就能测到【真方法】，
+  // 而不是在测试里抄一份逻辑（抄一份只会测出"我抄得对不对"）。
+  get _call() { return this.__call || unzooCallTool; }
+  set _call(fn) { this.__call = fn; }
+  async recoverTab(url) {
+    const old = this.tabId;
+    try { await this._call('tab_close', { tab_id: old }); } catch {}
+    await this.sleep(1200);
+    this.tabId = null;
+    try { await this.getActiveTab(); } catch {}
+    if (!this.tabId) {
+      const created = await this._call('tab_create', { url: url || 'https://fanqienovel.com/main/writer/book-manage' });
+      const id = created?.tab_id ? String(created.tab_id) : null;
+      if (!id) throw new Error('标签页卡死后重建失败（tab_create 没返回 tab_id）');
+      if (this.selectedProfilePath) {
+        const norm = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase();
+        const list = await this._call('tab_list', { scope: 'all' }).catch(() => null);
+        const row = (list?.tabs || []).find(t => String(t.tab_id) === id);
+        if (!row || norm(row.profile_path) !== norm(this.selectedProfilePath)) {
+          try { await this._call('tab_close', { tab_id: id }); } catch {}
+          throw new Error('标签页卡死后重建到了别的账号下，已关掉并中止（绝不发错号）');
+        }
+      }
+      this.tabId = id;
+    }
+    if (url) { try { await this._call('browser_navigate', { tab_id: this.tabId, url }); } catch {} }
+    await this.sleep(2500);
+    this.addLog(`标签页已重建（${old} → ${this.tabId}）`, 'warn');
+    return this.tabId;
   }
 
   // 真实鼠标点击（CDP，isTrusted=true）—— 选择器版
@@ -502,6 +548,7 @@ class UnzooClient {
         if (href && sameFanqiePage(href, url)) return;   // 已在同一目标页 → 跳过
       } catch {}
       await unzooCallTool('browser_navigate', { tab_id: this.tabId, url });
+      this.lastUrl = url;   // 记住落脚页：标签页卡死重建后要回到这里（见 recoverTab）
     } else {
       // 安全第一：选中了账号却没找到其标签页 → 绝不在"当前/其他 profile"乱建标签页(可能发错号)，直接报错。
       if (this.selectedProfilePath) {
@@ -511,7 +558,7 @@ class UnzooClient {
       const profileData = await unzooCallTool('profile_get_current', {});
       const profileId = profileData?.profile_id || 'default';
       const newTab = await unzooCallTool('tab_create', { profile_id: profileId, url: url });
-      if (newTab?.tab_id) this.tabId = String(newTab.tab_id);
+      if (newTab?.tab_id) { this.tabId = String(newTab.tab_id); this.lastUrl = url; }
     }
     // 导航后等待页面加载（不再事后重选标签页——保持锁定，避免来回切）
     await this.sleep(1500);
