@@ -869,6 +869,8 @@ class FanqiePublisher {
         if (result.success) {
           this.currentIndex++;
           consecutiveFailures = 0;
+          this._consecutiveSkips = 0;   // 成功一章就清零：零散缺号不该攒够 5 次误停
+          this._chapterTries = 0;
           this.log(`✅ 第 ${websiteChapterNum} 章编辑成功`);
 
           // 间隔等待
@@ -881,16 +883,30 @@ class FanqiePublisher {
           this.pause(result.reason, result.message);
           return;
         } else if (result.notFound) {
-          consecutiveFailures++;
-          if (consecutiveFailures >= maxConsecutiveFailures) {
-            this.log(`⚠️ 连续 ${maxConsecutiveFailures} 次找不到章节，停止编辑`);
-            this.pause('unknown_error', `网站第 ${websiteChapterNum} 章不存在`);
-            return;
+          // 【一个章号缺失不该毁掉整批】本地有、番茄没有的章号是常态：
+          // 《天皇》本地把 129《金流暗涌》改号成 089，而番茄上那一章还挂在第129章 → 番茄根本没有"第89章"。
+          // 原来这里同一章刷新重试 3 次就 pause 整批，230 章的活在第 36 章上停住（2026-09-14 实录）。
+          // 改成：同一章重试 2 次仍找不到 → 记下来、跳过、继续下一章。
+          // 但"系统性找不到"必须照旧拦住——连着 5 个【不同的】章都找不到，多半是卷选错/页面不对，
+          // 那时继续跑只会一路空转，直接停下让人来看。
+          this._chapterTries = (this._chapterTries || 0) + 1;
+          if (this._chapterTries < 2) {
+            this.log(`⚠️ 未找到第 ${websiteChapterNum} 章，刷新页面重试…`);
+            await this.client.evaluate(`location.reload()`);
+            await this.client.sleep(3000);
+          } else {
+            this._chapterTries = 0;
+            this.skipped = this.skipped || [];
+            this.skipped.push(websiteChapterNum);
+            this._consecutiveSkips = (this._consecutiveSkips || 0) + 1;
+            this.log(`⏭ 番茄上没有第 ${websiteChapterNum} 章（本地有、线上无）→ 跳过，继续下一章`);
+            if (this._consecutiveSkips >= 5) {
+              this.log(`⚠️ 连着 5 个章都找不到，多半是卷选错或页面不对，停下来等人看`);
+              this.pause('unknown_error', `连续 5 章在番茄上都找不到（最后一个是第 ${websiteChapterNum} 章），疑似卷/页面不对`);
+              return;
+            }
+            this.currentIndex++;
           }
-          this.log(`⚠️ 未找到第 ${websiteChapterNum} 章，尝试刷新页面重试...`);
-          // 刷新页面重试
-          await this.client.evaluate(`location.reload()`);
-          await this.client.sleep(3000);
         } else {
           consecutiveFailures++;
           this.log(`编辑失败: ${result.message}，重试中...`);
@@ -909,7 +925,9 @@ class FanqiePublisher {
 
     if (this.currentIndex >= this.chapters.length) {
       this.status = 'completed';
-      this.log(`🎉 编辑完成！共编辑 ${this.chapters.length} 章`);
+      const sk = (this.skipped || []);
+      this.log(`🎉 编辑完成！共编辑 ${this.chapters.length - sk.length}/${this.chapters.length} 章`
+        + (sk.length ? `；${sk.length} 章番茄上没有、已跳过：${sk.join('、')}` : ''));
     }
 
     this.emitProgress();
