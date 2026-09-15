@@ -32,8 +32,8 @@ import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './u
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
-import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction } from './editor.mjs';
-import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
+import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction, parseReviewItems } from './editor.mjs';
+import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
@@ -1119,6 +1119,50 @@ async function api(p, req, res, u) {
         const b = setBookStatus(book.slug, body.status);
         return json(res, 200, { ok: true, status: b.status });
       } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/outline-reviews') {
+      // 列出这本书 reviews/ 下【已有的大纲审稿报告】，好让作者随时拿来改大纲。
+      // 为什么需要：审稿门的"逐条挑"只在【卷边界那一刻】存在，而那个待挑状态在内存里——
+      // 引擎一重启就没了（2026-09-15 实证：王莽卷02 的报告好好躺在硬盘上，30KB，却没有入口能用它）。
+      // 报告是文件，早就落盘了，没道理只有一次机会。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const dir = path.join(book.dir, 'reviews');
+        let files = [];
+        try { files = fs.readdirSync(dir).filter(f => /^大纲审稿-.*\.md$/.test(f)); } catch {}
+        const out = files.map(f => {
+          const full = path.join(dir, f);
+          let items = 0, verdict = '';
+          try {
+            const txt = fs.readFileSync(full, 'utf8');
+            items = parseReviewItems(txt).length;
+            const vm = txt.match(/【总评】\s*(.+)/);
+            verdict = vm ? vm[1].trim().slice(0, 120) : '';
+          } catch {}
+          let mtime = 0; try { mtime = fs.statSync(full).mtimeMs; } catch {}
+          return { file: f, scope: (f.match(/^大纲审稿-(.+)\.md$/) || [])[1] || '', items, verdict, mtime };
+        }).sort((a, b) => b.mtime - a.mtime);
+        return json(res, 200, { ok: true, reviews: out });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/outline-review-load') {
+      // 把一份【已有的】审稿报告重新摆回"待逐条挑"的状态：拆条 → setPending。
+      // 之后就完全复用原来那套 UI 与 /api/book/review-decision，不另造一条流程。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const name = path.basename(String(body.file || ''));
+        if (!/^大纲审稿-.*\.md$/.test(name)) return json(res, 400, { error: '只能加载 reviews/ 下的大纲审稿报告' });
+        const full = path.join(book.dir, 'reviews', name);
+        let txt = '';
+        try { txt = fs.readFileSync(full, 'utf8'); } catch { return json(res, 400, { error: '读不到这份报告：' + name }); }
+        const items = parseReviewItems(txt);
+        if (!items.length) return json(res, 400, { error: '这份报告里没解析出可挑的条目（格式可能不是【硬伤】/【隐患】/【建议】那种）' });
+        const scope = (name.match(/^大纲审稿-(.+)\.md$/) || [])[1] || '全书';
+        setPending(book.slug, { kind: 'outline', scope, file: full, critique: txt.slice(0, 6000), items });
+        pushLog(book.slug, { level: 'act', source: 'editor', kind: 'pending-review', scope, file: name,
+          msg: `⏸ 已载入《${name}》：${items.length} 条意见待你逐条挑（挑完自动改大纲）` });
+        return json(res, 200, { ok: true, scope, file: name, items });
+      } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/review-decision') {
       // 全局确认门的裁决：apply=true 应用审稿(作者据意见修订大纲)；否则跳过(不改，继续)。清除待确认 → autopilot 恢复。

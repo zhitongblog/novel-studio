@@ -1451,7 +1451,40 @@ function openOutline() {
     .concat(vols.map(v => `<option value="${esc(v)}">${esc(v)} 大纲</option>`)).join('');
   $('#olStart').disabled = false; $('#olStart').textContent = '开始审稿 ▶';
   $('#outlineModal').classList.remove('hidden');
+  olLoadExistingList();
 }
+
+// 列出 reviews/ 下已有的大纲审稿报告。
+// 为什么要有这一栏：审稿门的"逐条挑"只在卷边界那一刻存在，状态在内存里，引擎一重启就没了；
+// 而报告是文件，一直躺在硬盘上。没有这个入口的话，那份 30KB 的报告就只能靠人肉搬运。
+async function olLoadExistingList() {
+  const sel = $('#olExisting'); if (!sel || !CUR) return;
+  sel.innerHTML = '<option value="">（读取中…）</option>';
+  try {
+    const r = await api('/api/book/outline-reviews', 'POST', { book: CUR.slug });
+    const list = r.reviews || [];
+    if (!list.length) { sel.innerHTML = '<option value="">（还没有审稿报告，先点上面「开始审稿」）</option>'; return; }
+    sel.innerHTML = list.map(x => {
+      const when = x.mtime ? new Date(x.mtime).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+      return `<option value="${esc(x.file)}">${esc(x.scope || x.file)}｜${x.items} 条意见｜${esc(when)}</option>`;
+    }).join('');
+  } catch (e) { sel.innerHTML = '<option value="">（读取失败：' + esc(e.message) + '）</option>'; }
+}
+
+$('#olLoadExisting')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const file = $('#olExisting').value;
+  if (!file) { $('#olErr').textContent = '先选一份报告'; return; }
+  const btn = $('#olLoadExisting'); btn.disabled = true; const old = btn.textContent; btn.textContent = '载入中…';
+  $('#olErr').textContent = '';
+  try {
+    const r = await api('/api/book/outline-review-load', 'POST', { book: CUR.slug, file });
+    $('#outlineModal').classList.add('hidden');
+    await showReviewBar();          // 复用原来那条"逐条挑"的动作条，不另造流程
+    toast(`已载入 ${r.items.length} 条意见（${r.scope}），勾完点「让作者按此修订」`);
+  } catch (e) { $('#olErr').textContent = '载入失败：' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
 $('#btnOutline').addEventListener('click', openOutline);
 $('#btnRebuildOutline').addEventListener('click', async () => {
   if (!CUR) return;

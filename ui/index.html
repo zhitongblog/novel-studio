@@ -662,6 +662,12 @@
         <button class="btn ghost" id="olCancel">取消</button>
         <button class="btn primary" id="olStart">开始审稿 ▶</button>
       </div>
+      <div class="ai-cover-box" style="margin-top:10px">
+        <div class="dim-note" style="margin-bottom:6px">已有的审稿报告（reviews/ 下）——不用重新审，直接拿来逐条挑、自动改大纲：</div>
+        <select id="olExisting"><option value="">（加载中…）</option></select>
+        <button class="btn" id="olLoadExisting" style="width:100%;margin-top:6px">📂 载入这份报告，逐条挑 ▶</button>
+        <div class="modal-hint">审稿门的"逐条挑"本来只在卷边界那一刻出现，引擎一重启就没了；而报告是文件、一直在。这里把它重新摆回待挑状态，挑完照样自动改大纲。</div>
+      </div>
       <div class="modal-err" id="olErr"></div>
       <div class="ol-result hidden" id="olResult">
         <div class="dim-note" id="olMeta"></div>
