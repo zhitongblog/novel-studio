@@ -136,9 +136,15 @@ export function planCliInvocation(useId, prompt, bin) {
   else if (useId === 'agy') {
     // agy 的 -p/--print 是【带参数】的（不带就报 flag needs an argument: -p），不像 claude/gemini 从 stdin 读。
     // 照 stdin 那套喂它，只会拿回一屏 usage 帮助——而那玩意会被当成"模型的回答"洗进简介里。
-    args = ['-p', prompt];
+    args = ['--dangerously-skip-permissions', '-p', prompt];
     viaStdin = false;
-  } else args = ['-p']; // claude / gemini / qwen（-p + stdin）
+  } else if (useId === 'claude') {
+    // ⚠️【无头模式必须自带免审批】claude -p 在无头下【没法弹审批框】，一旦模型要用工具就被自动拒绝，
+    // 然后一个字都不产出，报错原文：「a tool required the "command" permission that headless mode
+    // cannot prompt for, so it was auto-denied」。作者那边看到的就是"本批无产出，停止"。
+    // 元任务（起书名/简介）本来也不用工具，带上这个开关无害；而写正文那条必须要有。
+    args = ['-p', '--dangerously-skip-permissions'];
+  } else args = ['-p', '--yolo']; // gemini / qwen：-y/--yolo 自动批准工具调用，同理
   const useShell = viaStdin && !/\.exe$/i.test(String(bin || ''));
   return { args, viaStdin, useShell };
 }

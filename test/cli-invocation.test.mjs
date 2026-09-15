@@ -21,7 +21,7 @@ const PROMPT = '你是资深网文主编。请据下面的题材，生成 3 个�
 
 test('agy：prompt 进 argv，且绝不能过 shell', () => {
   const r = planCliInvocation('agy', PROMPT, 'C:\\Users\\Alex\\AppData\\Local\\agy\\bin\\agy.exe');
-  assert.deepEqual(r.args, ['-p', PROMPT]);
+  assert.deepEqual(r.args, ['--dangerously-skip-permissions', '-p', PROMPT]);
   assert.equal(r.viaStdin, false, 'agy 的 -p 是带参数的，不从 stdin 读');
   assert.equal(r.useShell, false, 'prompt 在 argv 里，开 shell 就会被空格切碎');
 });
@@ -35,14 +35,14 @@ test('铁律：只要 prompt 在 argv 里，任何 bin 形态都不许开 shell'
 
 test('claude：prompt 走 stdin；bin 是真 .exe 就不必过 shell', () => {
   const r = planCliInvocation('claude', PROMPT, 'C:\\Users\\Alex\\.local\\bin\\claude.exe');
-  assert.deepEqual(r.args, ['-p']);
+  assert.deepEqual(r.args, ['-p', '--dangerously-skip-permissions']);
   assert.equal(r.viaStdin, true);
   assert.equal(r.useShell, false);
 });
 
 test('gemini/qwen：npm 壳没有扩展名，必须过 shell 才跑得起来', () => {
   const r = planCliInvocation('gemini', PROMPT, 'C:\\Users\\Alex\\AppData\\Roaming\\npm\\gemini');
-  assert.deepEqual(r.args, ['-p']);
+  assert.deepEqual(r.args, ['-p', '--yolo']);
   assert.equal(r.useShell, true, 'npm shim 不过 shell 在 Windows 上起不来');
 });
 
@@ -88,5 +88,21 @@ test('trustAgyWorkspace：写进去、且不重复写', () => {
   } finally {
     if (old === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = old;
     try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test('每个模型都必须自带免审批开关——无头模式弹不出审批框，弹了就是零产出', () => {
+  // 作者现场：「a tool required the "command" permission that headless mode cannot prompt for,
+  // so it was auto-denied」→「本批无产出，停止」→「无状态写作结束：共 1 批、新增 0 章」。
+  const FLAGS = {
+    claude: '--dangerously-skip-permissions',
+    agy: '--dangerously-skip-permissions',
+    gemini: '--yolo',
+    qwen: '--yolo',
+    codex: '--dangerously-bypass-approvals-and-sandbox',
+  };
+  for (const [id, flag] of Object.entries(FLAGS)) {
+    const r = planCliInvocation(id, PROMPT, id === 'claude' ? 'x/claude.exe' : 'x/' + id);
+    assert.ok(r.args.includes(flag), `${id} 少了免审批开关 ${flag}：实际 ${JSON.stringify(r.args)}`);
   }
 });

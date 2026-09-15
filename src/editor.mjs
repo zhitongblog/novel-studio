@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { getModel, detectAll } from './models.mjs';
+import { getModel, detectAll , resolveBin } from './models.mjs';
+import { planCliInvocation } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 
 function readSafe(p) { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } }
@@ -42,17 +43,20 @@ function runModelOnceAsync(model, prompt, cfg, timeoutMs = 180000) {
       const px = proxyUrl();
       if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; }
     }
-    const args = model === 'codex'
-      ? ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox']
-      : ['-p'];
-    const cp = spawn(m.bin, args, { env, cwd: os.tmpdir(), shell: true, windowsHide: true });
+    // 参数怎么摆、prompt 从哪进、要不要过 shell —— 统一走 planner 里那个纯函数，
+    // 别在这儿再抄一份。抄一份的代价已经付过了：这里原来是裸 ['-p']，claude 无头跑起来
+    // 一遇到要用工具就被自动拒绝（「headless mode cannot prompt」），一个字都不产出。
+    const bin = resolveBin(model) || m.bin;
+    const { args, viaStdin, useShell } = planCliInvocation(model, prompt, bin);
+    const cp = spawn(bin, args, { env, cwd: os.tmpdir(), shell: useShell, windowsHide: true });
     let out = '', err = '';
     const to = setTimeout(() => { try { cp.kill(); } catch {} reject(new Error(m.name + ' 审稿超时')); }, timeoutMs);
     cp.stdout.on('data', d => (out += d));
     cp.stderr.on('data', d => (err += d));
     cp.on('error', e => { clearTimeout(to); reject(e); });
     cp.on('close', () => { clearTimeout(to); resolve(out + (err ? '\n' + err : '')); });
-    try { cp.stdin.write(prompt); cp.stdin.end(); } catch (e) { clearTimeout(to); reject(e); }
+    if (viaStdin) { try { cp.stdin.write(prompt); cp.stdin.end(); } catch (e) { clearTimeout(to); reject(e); } }
+    else { try { cp.stdin.end(); } catch {} }
   });
 }
 
