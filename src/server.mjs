@@ -16,7 +16,7 @@ import { CONFIG_DIR } from './paths.mjs';
 import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance} from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
-import { detectAll, getModel } from './models.mjs';
+import { detectAll, getModel, canRunHeadless } from './models.mjs';
 import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
 import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
 import { startWriting, snapshotPaneIds } from './writer.mjs';
@@ -1693,6 +1693,17 @@ async function api(p, req, res, u) {
         if (busyNow) return json(res, 409, { error: busyNow + '，不能同时开始写作' });
         const model = body.model || book.model || cfg.defaultModel;
         if (body.model) { try { setBookModel(slug, body.model); } catch {} }
+        // 【跑不了无头的模型，就别在这儿白跑一批】agy 的凭据不落盘，-p 每次都要人贴授权码（见 canRunHeadless）。
+        // 作者点的是"放手让他写"，要的是【把书写出来】，不是"用无状态这条路写"——
+        // 所以这里不报错、不空转，直接改用【有窗口】那条路（agy 在窗口里是通的，立项实测跑通过）。
+        if (!canRunHeadless(model)) {
+          const mm = getModel(model);
+          if (mm && mm.kind !== 'web' && mm.kind !== 'api') {
+            pushLog(slug, { level: 'act', msg: `「${mm.name}」没法无头跑（凭据不落盘，每次都要人贴授权码）→ 自动改用【窗口模式】开写` });
+            return await doWrite({ ...body, model }, cfg, res);
+          }
+          return json(res, 400, { error: `「${mm ? mm.name : model}」不是本地 CLI，用不了无状态模式。网页版请点写作台的 ▶（走网页版引擎），API 模型请用 API 写作。` });
+        }
         if (body.participation != null) { try { setParticipation(slug, body.participation); } catch {} }
         const untilTarget = body.untilTarget === true || (book.targetChapters > 0 && body.batches == null);
         const batches = Math.max(1, parseInt(body.batches, 10) || 1);

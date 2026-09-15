@@ -299,3 +299,16 @@ export function trustAgyWorkspace(dir) {
   fs.writeFileSync(f, JSON.stringify(cfg, null, 2), 'utf8');
   return true;
 }
+
+// 这个模型能不能【无头跑】（一次性 spawn、没有窗口、没人能点同意）。
+// agy 不行：它的交互模式(-i)能自动登录，但那份凭据【不落盘】——~/.gemini 下不生成任何 token 文件，
+// 于是非交互的 -p 每次都从零发起 OAuth：打印一条 accounts.google.com 链接、等人贴授权码（60 秒超时），
+// 而授权码与发起登录的进程用 PKCE 绑定，进程一死即作废。后台任务里无解（2026-09-13 实测）。
+// 用处：作者选了「无状态省钱模式」而书绑的是 agy 时，不该白跑一批再报错，
+// 而应该【自动改用有窗口的模式】去写——那条路 agy 是通的（立项实测跑通过）。
+export function canRunHeadless(modelId) {
+  const m = getModel(modelId);
+  if (!m) return false;
+  if (m.kind === 'web' || m.kind === 'api') return false;   // 这两类本来就不走 spawn
+  return m.id !== 'agy';
+}
