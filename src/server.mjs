@@ -32,7 +32,7 @@ import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './u
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
-import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction, parseReviewItems } from './editor.mjs';
+import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction, parseReviewItems, critiqueOf } from './editor.mjs';
 import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
@@ -1135,7 +1135,7 @@ async function api(p, req, res, u) {
           let items = 0, verdict = '';
           try {
             const txt = fs.readFileSync(full, 'utf8');
-            items = parseReviewItems(txt).length;
+            items = parseReviewItems(critiqueOf(txt)).length;
             const vm = txt.match(/【总评】\s*(.+)/);
             verdict = vm ? vm[1].trim().slice(0, 120) : '';
           } catch {}
@@ -1155,7 +1155,10 @@ async function api(p, req, res, u) {
         const full = path.join(book.dir, 'reviews', name);
         let txt = '';
         try { txt = fs.readFileSync(full, 'utf8'); } catch { return json(res, 400, { error: '读不到这份报告：' + name }); }
-        const items = parseReviewItems(txt);
+        const seenTxt = new Set();
+        const items = parseReviewItems(critiqueOf(txt))
+          .filter(x => { const k = x.text.trim(); if (seenTxt.has(k)) return false; seenTxt.add(k); return true; })
+          .map((x, i) => ({ ...x, id: 'r' + i }));
         if (!items.length) return json(res, 400, { error: '这份报告里没解析出可挑的条目（格式可能不是【硬伤】/【隐患】/【建议】那种）' });
         const scope = (name.match(/^大纲审稿-(.+)\.md$/) || [])[1] || '全书';
         setPending(book.slug, { kind: 'outline', scope, file: full, critique: txt.slice(0, 6000), items });
@@ -2095,3 +2098,5 @@ function readJson(req) {
     let d = ''; req.on('data', c => d += c); req.on('end', () => { try { resolve(d ? JSON.parse(d) : {}); } catch { resolve({}); } });
   });
 }
+
+

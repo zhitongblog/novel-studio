@@ -8,7 +8,7 @@
 // 报告是文件、早就落盘了，没道理只有卷边界那一次机会。
 import assert from 'node:assert';
 import test from 'node:test';
-import { parseReviewItems } from '../src/editor.mjs';
+import { parseReviewItems, critiqueOf } from '../src/editor.mjs';
 
 // 真报告的形状（取自王莽卷02 那份的开头几行）
 const REPORT = [
@@ -46,4 +46,35 @@ test('不是大纲审稿报告的文件名一律不收（别让路径乱穿）',
     assert.ok(!/^大纲审稿-.*\.md$/.test(bad.split(/[\\/]/).pop() || ''), `${bad} 不该通过校验`);
   }
   assert.ok(/^大纲审稿-.*\.md$/.test('大纲审稿-卷02.md'));
+});
+
+// 报告文件里【不止有审稿意见】：CLI 会把收到的 prompt 原样回显在后面，
+// 那段 prompt 里既有"输出格式模板"，也带着整段意见本身。
+// 2026-09-15 实测：王莽卷02 那份 11 条真意见，直接拆整个文件会拆成 25 条（11×2 + 3 条模板）。
+// 把模板行当成"作者挑定的意见"喂回去改大纲，等于让它照着
+//「一句话写清：问题是什么 → 具体怎么改」去改书——纯噪音。
+const REPORT_WITH_ECHO = [
+  REPORT,
+  '',
+  'Reading prompt from stdin...',
+  'OpenAI Codex v0.149.1',
+  '你是一名极挑剔的资深网文主编，正在【开写前】审核一本长篇网文的大纲。',
+  '输出格式：',
+  '- [硬伤] 一句话写清：问题是什么 → 具体怎么改（给到卷/章号或具体手法）',
+  '- [隐患] …（同上，一行写完）',
+  '- [建议] …（同上，一行写完）',
+  '',
+  REPORT,          // CLI 回显里常把上一次的意见整段带出来
+].join(String.fromCharCode(10));
+
+test('回显的 prompt 要截掉：模板行与重复条都不能当成意见', () => {
+  const all = parseReviewItems(REPORT_WITH_ECHO);
+  const clean = parseReviewItems(critiqueOf(REPORT_WITH_ECHO));
+  assert.ok(all.length > clean.length, `截断应当减少条目：整份 ${all.length}、截断后 ${clean.length}`);
+  assert.equal(clean.length, 4, `截断后应只剩正文那 4 条，实际 ${clean.length}`);
+  assert.ok(!clean.some(i => /一句话写清|同上，一行写完/.test(i.text)), '模板行绝不能混进待挑列表');
+});
+
+test('没有回显的干净报告，截断不该误伤', () => {
+  assert.equal(parseReviewItems(critiqueOf(REPORT)).length, 4);
 });

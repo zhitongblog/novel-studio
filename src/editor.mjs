@@ -330,3 +330,19 @@ export function verifyRevision(book, scope) {
   for (const f of relevantFiles(dir, scope)) { const name = path.basename(f); if (prev[name] !== hashFile(f)) changedFiles.push(name); }
   return { hadSnapshot: true, changed: changedFiles.length > 0, changedFiles };
 }
+
+// 报告文件里【不止有审稿意见】：CLI 会把收到的 prompt 原样回显在后面，
+// 而那段 prompt 里既有"输出格式模板"（[硬伤] 一句话写清：问题是什么 → 具体怎么改），
+// 也可能整段带着上一次的意见。直接对整个文件拆条会拆出【模板行 + 重复条】——
+// 2026-09-15 实测：王莽卷02 那份 11 条真意见被拆成 25 条（11×2 + 3 条模板）。
+// 所以只取【正文那一段】：遇到 CLI 回显的标志就截断，再按文本去重。
+export function critiqueOf(txt) {
+  let t = String(txt || '');
+  const marks = ['Reading prompt from stdin', 'OpenAI Codex v', '你是一名极挑剔的资深网文主编', '# 设定圣经', '# 待审大纲'];
+  let cut = t.length;
+  for (const m of marks) {
+    const i = t.indexOf(m);
+    if (i > 200 && i < cut) cut = i;   // >200 是为了别误伤标题区
+  }
+  return t.slice(0, cut);
+}
