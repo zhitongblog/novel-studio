@@ -63,12 +63,19 @@ export class Autopilot {
   // → 60 秒后孤儿看门狗看见"在册会话没有活着的 autopilot" → 补挂 → 新的立刻又撞上限 → 停 → 再补挂…
   // 日志里 停止/补挂 来回刷，而会话记录一直在，那本书就永远挂在"写作中"，界面上什么都点不动。
   // 判定为终止性时通知上层把会话记录清掉：记录没了，看门狗自然不会再补挂，书也回到空闲。
+  // 终止类：再怎么敲"继续"也没用，必须停下告诉作者。
+  // ⚠️【Eligibility check failed / EOF 这类"每轮都失败"也要算】2026-09-15 实证：
+  // agy 窗口连不上 googleapis（直连被掐），每一轮都回同一句 Eligibility check failed…EOF，
+  // 而屏幕看着是"空闲"，autopilot 就一遍遍发"继续"——发了八次，几个小时一个字没写。
+  // 这和额度用尽是同一类：环境坏了，催它没有任何意义。
   static TERMINAL = /(用量|速率上限|额度|配额|agent 已退出|agent 未能启动|已完本|窗口\/pane 已关闭|agent 进程已退出)/;
+  // 屏幕上出现这些=agent 自己报的环境级失败（连不上/没资格/要登录）。连着出现两次就判终止。
+  static ENV_FAIL = /(eligibility check failed|userinfo": EOF|failed to authenticate|401 unauthorized|could not reach|network is unreachable|连接失败|无法连接到)/i;
 
   stop(reason) {
     if (!this.running) return;
     this.running = false;
-    const terminal = !!reason && Autopilot.TERMINAL.test(String(reason));
+    const terminal = !!reason && (Autopilot.TERMINAL.test(String(reason)) || Autopilot.ENV_FAIL.test(String(reason)));
     this.terminalReason = terminal ? String(reason) : null;
     this.log('autopilot 已停止' + (reason ? '：' + reason : ''), 'info');
     if (terminal) {
@@ -129,6 +136,19 @@ export class Autopilot {
       try { await this.mcp.input(this.paneId, '\x1b[1;5F'); await sleep(300); screen = (await this.mcp.screenText(this.paneId).catch(() => '')) || screen; } catch {}
     }
     const screenChanged = this.prevScreen !== null && screen !== this.prevScreen;
+
+    // 【环境坏了就别催了】屏幕上 agent 自己在报"连不上/没资格/要登录"，这种状态下发多少次"继续"
+    // 都是同一句错误。2026-09-15 现场：agy 窗口每轮都回 Eligibility check failed…userinfo: EOF，
+    // 屏幕看着像空闲，autopilot 连发八次"继续"，几个小时一个字没写，日志里全是"检测到空闲 → 自动发送继续"。
+    // 连着两拍都命中才停——一次可能是上一轮的残影。
+    if (Autopilot.ENV_FAIL.test(screen)) {
+      this._envFail = (this._envFail || 0) + 1;
+      if (this._envFail >= 2) {
+        const line = (lastNonEmpty(screen, 40).split(String.fromCharCode(10)).find(l => Autopilot.ENV_FAIL.test(l)) || '').trim().slice(0, 120);
+        this.stop(`agent 报环境级失败、催也没用：${line}`);
+        return;
+      }
+    } else if (this._envFail) { this._envFail = 0; }
 
     // 【陈旧 working】——agent.status 是 claude 侧 hook 上报的，hook 一旦挂了，状态就【永远停在 working】。
     // 现场（《走进修仙》pane 7）：写完 104–106 章后 Stop 钩子报错（屏幕上一串 Hookify error），

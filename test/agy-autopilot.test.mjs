@@ -120,3 +120,44 @@ test('信任框的页脚里已经有 Gemini 模型行，照样要认成 menu', (
   const r = kindOf(withFooter);
   assert.equal(r.kind, 'menu', `页脚不该把信任框挡掉，实际 ${r.kind}（${r.reason}）`);
 });
+
+// —— 环境坏了就别催了（2026-09-15 现场）——
+// agy 窗口连不上 googleapis：每一轮都回同一句 Eligibility check failed…userinfo: EOF。
+// 屏幕看着像"空闲"，autopilot 于是一遍遍发"继续"——发了八次，几个小时一个字没写，
+// 日志里全是「检测到空闲 → 自动发送继续（第 N 次）」。这和额度用尽是同一类：催它没有任何意义。
+const ENV_FAIL_SCREEN = [
+  '> 继续下一批。动笔前先重建上下文：读 continuity_ledger.md…',
+  '',
+  '⚠ Eligibility Check',
+  '  ⎿  Eligibility check failed: Get "https://www.googleapis.com/oauth2/v2/userinfo": EOF',
+  '',
+  '>',
+  '? for shortcuts                                            Gemini 3.8 Flash · high',
+].join(String.fromCharCode(10));
+
+test('连着两拍报环境级失败 → 停下，而不是继续催', async () => {
+  const ap2 = new Autopilot({}, 1, { confirmOnly: true });
+  assert.ok(Autopilot.ENV_FAIL.test(ENV_FAIL_SCREEN), '这块屏幕必须能被认出是环境级失败');
+  let stopped = null;
+  ap2.stop = (r) => { stopped = r; };
+  // 第一拍不停（可能是上一轮的残影），第二拍才停
+  ap2._envFail = 1;
+  const screen = ENV_FAIL_SCREEN;
+  if (Autopilot.ENV_FAIL.test(screen)) {
+    ap2._envFail++;
+    if (ap2._envFail >= 2) ap2.stop('agent 报环境级失败、催也没用：Eligibility check failed');
+  }
+  assert.ok(stopped, '第二拍就该停');
+  assert.match(String(stopped), /环境级失败/);
+});
+
+test('环境级失败要算【终止性】停止——补挂一个新的 autopilot 也是白搭', () => {
+  const reason = 'agent 报环境级失败、催也没用：Eligibility check failed: Get "…/userinfo": EOF';
+  assert.ok(Autopilot.TERMINAL.test(reason) || Autopilot.ENV_FAIL.test(reason),
+    '不算终止性的话，孤儿看门狗会 60 秒补挂一个，然后立刻撞上同样的错，来回刷');
+});
+
+test('正常写作的屏幕不会被误判成环境失败', () => {
+  const ok = ['● Edit(chapters/卷02/031_承明请缨.txt)', '写完 3 章，已更新索引与台账。', '>', '? for shortcuts'].join(String.fromCharCode(10));
+  assert.ok(!Autopilot.ENV_FAIL.test(ok));
+});

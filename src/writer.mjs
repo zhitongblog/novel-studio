@@ -111,10 +111,14 @@ export function writeLaunchScript(book, model, instruction, cfg) {
   assertCliModel(m, model);
   // 安全网：把任何换行折叠成空格 —— 多行 prompt 会被 agent 当多行草稿、等人工回车，无法自动开跑。
   const seed = m.seedArgs(instruction, cfg).map(a => String(a).replace(/[\r\n]+/g, ' '));
-  // agy 走直连：Google 按出口 IP 判地区，代理节点一旦落在不支持的地区就整段拒绝
-  // （error: FAILED_PRECONDITION (code 400): User location is not supported for the API use.），
-  // 而本机直连是通的。见 planner.mjs runModelOnce 里的同一条说明。
-  const proxy = (cfg.enableProxy && m.id !== 'agy') ? proxyUrl() : '';
+  // ⚠️【别再给 agy 写死"走直连"】两天里同一台机器上翻了个个儿：
+  //   09-13：直连能回答；挂代理 → FAILED_PRECONDITION: User location is not supported
+  //   09-15：直连 → Eligibility check failed: Get ".../oauth2/v2/userinfo": EOF（连不上）；挂代理 → 正常
+  // 原因是代理是【节点轮换】的（proxyNode: 'auto'）：换到不支持的地区就被 Google 按 IP 拒，
+  // 换回来又好了。所以"agy 永远不要代理"这条是对着某一刻的网络状态过拟合，
+  // 我 09-13 写死它，结果 09-15 这本书的窗口每一轮都失败、白跑了几个小时。
+  // 现在跟其它模型一样【听 cfg.enableProxy 的】；地区被拒那种失败由 CLI_FAIL_PATTERNS 认出来报给作者。
+  const proxy = cfg.enableProxy ? proxyUrl() : '';
   // 顺手把本书目录写进 agy 的 trustedWorkspaces：这样窗口起来就不会弹"是否信任此项目"，
   // 少一个要 autopilot 去认的弹窗（认弹窗是这套编排里最脆的一环，能绕开就绕开）。
   if (m.id === 'agy') { try { trustAgyWorkspace(book.dir); } catch {} }

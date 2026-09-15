@@ -169,7 +169,9 @@ export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
   // 这条报错再被上层当成"模型的回答"去解析，作者看到的就是那句莫名其妙的
   //「AI 返回未能解析为书名候选，请重试或换模型」。
   // 所以对 agy 主动【清掉】继承来的代理变量（引擎进程自己是带着代理跑的），不只是不设。
-  const noProxy = useId === 'agy';
+  // 同上：agy 的"要不要代理"两天里翻过一次个儿（见 writer.mjs 那段注释），别写死。
+  // 这里保留一个显式开关：想让某个模型走直连，在配置里写 noProxyModels: ['agy']。
+  const noProxy = Array.isArray(cfg?.noProxyModels) && cfg.noProxyModels.includes(useId);
   if (noProxy) {
     for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) delete env[k];
   } else if (cfg?.enableProxy) {
