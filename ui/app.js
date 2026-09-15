@@ -1826,6 +1826,7 @@ async function openCover() {
   $('#cvTheme').value = 'ink';
   $('#cvErr').textContent = ''; $('#coverModal').classList.remove('hidden');
   cvLoadChatProfiles();   // 填充 ChatGPT 账号下拉
+  cvLoadGeminiProfiles(); // 填充 Gemini 账号下拉
   // 若书里已有 AI 底图，预加载并默认用它
   if (CUR.stats?.coverBg) {
     try { await loadCoverBg(`${API}/api/book/cover-bg?book=${encodeURIComponent(CUR.slug)}&t=${CUR.stats.coverBgMtime || 0}`); $('#cvTheme').value = 'ai'; } catch {}
@@ -1853,12 +1854,15 @@ $('#cvGenAI').addEventListener('click', async () => {
   finally { btn.disabled = false; btn.textContent = old; }
 });
 // ===== ChatGPT 网页版生成封面（免费·慢：后台跑 + 轮询状态）=====
-async function cvLoadChatProfiles() {
-  const sel = $('#cvChatProfile'); if (!sel) return;
+async function cvLoadChatProfiles() { await cvLoadProfilesInto('#cvChatProfile', 'ChatGPT'); }
+// Gemini 那一栏用同一份账号列表（都是 Unzoo 的浏览器账号），只是提示语不同。
+async function cvLoadGeminiProfiles() { await cvLoadProfilesInto('#cvGemProfile', 'Gemini'); }
+async function cvLoadProfilesInto(selId, siteName) {
+  const sel = $(selId); if (!sel) return;
   try {
     if (!WEB_PROFILES) { const r = await api('/api/unzoo/profiles', 'POST', {}); WEB_PROFILES = r.profiles || []; }
     const remembered = (CUR && localStorage.getItem(webProfileKey(CUR.slug))) || (CUR?.publish || {}).profilePath || '';
-    if (!WEB_PROFILES.length) { sel.innerHTML = '<option value="">（未检测到 Unzoo 账号，请先开浏览器并登录 ChatGPT）</option>'; return; }
+    if (!WEB_PROFILES.length) { sel.innerHTML = '<option value="">（未检测到 Unzoo 账号，请先开浏览器并登录 ' + siteName + '）</option>'; return; }
     sel.innerHTML = WEB_PROFILES.map(p => {
       const tag = p.running ? '○运行中' : '·未启动';
       const label = p.dir && p.dir !== p.name ? `${p.name} · ${p.dir}` : p.name;
@@ -1937,6 +1941,49 @@ $('#cvGrabChatGPT')?.addEventListener('click', async () => {
     hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
   }
 });
+// ===== Gemini 网页版生成封面（免费·快：后台跑 + 轮询状态，与 ChatGPT 那条共用 coverJobs 状态机）=====
+// 生成与抓取只差一个端点和几句文案，所以做成同一个工厂，省得两份几乎一样的轮询代码各自跑偏。
+let cvGemPoll = null;
+function cvGeminiRun(apiPath, btnId, runningText, doneToast) {
+  return async () => {
+    if (!CUR) return;
+    const profilePath = $('#cvGemProfile').value;
+    if (!profilePath) { $('#cvErr').textContent = '请先选一个【已登录 Gemini】的浏览器账号'; return; }
+    localStorage.setItem(webProfileKey(CUR.slug), profilePath);
+    const btn = $(btnId); btn.disabled = true; const old = btn.textContent;
+    $('#cvErr').textContent = '';
+    const hint = $('#cvGemHint'); const hintOld = hint.textContent;
+    try {
+      await api(apiPath, 'POST', { book: CUR.slug, profilePath, prompt: $('#cvPrompt').value.trim() || undefined });
+      btn.textContent = runningText;
+      if (cvGemPoll) clearInterval(cvGemPoll);
+      cvGemPoll = setInterval(async () => {
+        try {
+          const st = await api('/api/book/gen-cover-status', 'POST', { book: CUR.slug });
+          if (st.msg) hint.textContent = '⏳ ' + st.msg;
+          if (st.status === 'done') {
+            clearInterval(cvGemPoll); cvGemPoll = null;
+            await loadCoverBg(API + st.url + '&r=' + Date.now());
+            $('#cvTheme').value = 'ai'; drawCover();
+            if (st.prompt && !$('#cvPrompt').value.trim()) $('#cvPrompt').value = st.prompt;
+            hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+            toast(doneToast);
+          } else if (st.status === 'error') {
+            clearInterval(cvGemPoll); cvGemPoll = null;
+            $('#cvErr').textContent = 'Gemini 失败：' + (st.error || '未知');
+            hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+          }
+        } catch {}
+      }, 5000);
+    } catch (e) {
+      $('#cvErr').textContent = '启动失败：' + e.message;
+      hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+    }
+  };
+}
+$('#cvGenGemini')?.addEventListener('click', cvGeminiRun('/api/book/gen-cover-gemini', '#cvGenGemini', '✨ Gemini 生成中…', 'Gemini 封面已生成'));
+$('#cvGrabGemini')?.addEventListener('click', cvGeminiRun('/api/book/grab-cover-gemini', '#cvGrabGemini', '📥 抓取中…', '已抓取 Gemini 封面'));
+
 // ===== 更换番茄封面（把 cover.png 推到番茄；开关：全自动提交 / 停在待提交）=====
 let cvFqPoll = null;
 $('#cvPushFanqie')?.addEventListener('click', async () => {

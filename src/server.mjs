@@ -43,6 +43,7 @@ import { previewFanqieImport, importFromFanqie } from './import_fanqie.mjs';
 import { generateCoverBg, buildArtPromptAuto } from './imagegen.mjs';
 import { generateNameExperiment, readNameExperiment } from './nameexp.mjs';
 import { generateCoverViaChatGPT, grabCoverFromChatGPT, buildChatGptCoverPrompt } from './covergen_web.mjs';
+import { generateCoverViaGemini, grabCoverFromGemini } from './covergen_gemini.mjs';
 
 const UI_DIR = path.resolve(fileURLToPath(import.meta.url), '..', '..', 'ui');
 
@@ -615,6 +616,50 @@ async function api(p, req, res, u) {
           .then((r) => {
             coverJobs.set(slug, { status: 'done', url: '/api/book/cover-bg?book=' + encodeURIComponent(slug) + '&t=' + Date.now(), w: r.w, h: r.h, msg: '封面已抓取' });
             pushLog(slug, { level: 'act', source: 'cover', msg: '✅ 已抓取 ChatGPT 封面底图' });
+          })
+          .catch((e) => {
+            coverJobs.set(slug, { status: 'error', error: e.message, msg: e.message });
+            pushLog(slug, { level: 'error', source: 'cover', msg: '抓取封面失败：' + e.message });
+          });
+        return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/gen-cover-gemini') {   // 用【已登录的 Gemini】网页版生成封面底图（实测出图比 ChatGPT 快，十几秒～1分钟）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
+        if (!profilePath) return json(res, 400, { error: '请先选一个【已登录 Gemini】的浏览器账号' });
+        const slug = book.slug;
+        const cur = coverJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        coverJobs.set(slug, { status: 'running', msg: '正在打开 Gemini…' });
+        const onLog = (e) => { const j = coverJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'cover' }); };
+        generateCoverViaGemini(book, { prompt: body.prompt, profilePath, onLog })
+          .then((r) => {
+            coverJobs.set(slug, { status: 'done', url: '/api/book/cover-bg?book=' + encodeURIComponent(slug) + '&t=' + Date.now(), prompt: r.prompt, w: r.w, h: r.h, msg: '封面已生成' });
+            pushLog(slug, { level: 'act', source: 'cover', msg: '✅ Gemini 封面底图已生成' });
+          })
+          .catch((e) => {
+            coverJobs.set(slug, { status: 'error', error: e.message, msg: e.message });
+            pushLog(slug, { level: 'error', source: 'cover', msg: 'Gemini 生成封面失败：' + e.message });
+          });
+        return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/grab-cover-gemini') {   // 手动【抓取封面】：从当前 Gemini 页把已生成好的图抓下来（不再生成，快）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
+        if (!profilePath) return json(res, 400, { error: '请先选一个【已登录 Gemini】的浏览器账号' });
+        const slug = book.slug;
+        const cur = coverJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        coverJobs.set(slug, { status: 'running', msg: '正在抓取当前 Gemini 页的图…' });
+        const onLog = (e) => { const j = coverJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'cover' }); };
+        grabCoverFromGemini(book, { profilePath, onLog })
+          .then((r) => {
+            coverJobs.set(slug, { status: 'done', url: '/api/book/cover-bg?book=' + encodeURIComponent(slug) + '&t=' + Date.now(), w: r.w, h: r.h, msg: '封面已抓取' });
+            pushLog(slug, { level: 'act', source: 'cover', msg: '✅ 已抓取 Gemini 封面底图' });
           })
           .catch((e) => {
             coverJobs.set(slug, { status: 'error', error: e.message, msg: e.message });
