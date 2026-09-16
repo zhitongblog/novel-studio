@@ -122,6 +122,38 @@ function detectCliFailure(raw, prompt) {
   return { why: hit[1], detail: line.slice(0, 160) };
 }
 
+// —— 代理该不该开：别猜，记住上次什么配置真的成功过 ——
+// 血泪：09-13 实测 agy【直连通、代理被 Google 按地区拒】，我就把"agy 不用代理"写死进代码；
+// 09-15 同一台机器正好反过来（直连 EOF、代理正常），那本书的窗口每轮都失败、几个小时白跑。
+// 代理是节点轮换的，"哪种配置能用"本来就会变，写死必然过期。
+// 所以：按模型记住上次成功的模式，失败了就翻过来再试一次，并把结果记下来。
+const NETMODE_FILE = path.join(os.homedir(), '.novel-studio', 'netmode.json');
+function readNetMode() { try { return JSON.parse(fs.readFileSync(NETMODE_FILE, 'utf8')) || {}; } catch { return {}; } }
+export function getNetMode(id) { const v = readNetMode()[id]; return v === 'proxy' || v === 'direct' ? v : null; }
+export function rememberNetMode(id, mode) {
+  try {
+    const m = readNetMode(); if (m[id] === mode) return;
+    m[id] = mode;
+    fs.mkdirSync(path.dirname(NETMODE_FILE), { recursive: true });
+    fs.writeFileSync(NETMODE_FILE, JSON.stringify(m, null, 2), 'utf8');
+  } catch {}
+}
+// 这次要不要挂代理：优先用记住的模式，其次跟随配置。
+function wantProxy(id, cfg) {
+  const remembered = getNetMode(id);
+  if (remembered) return remembered === 'proxy';
+  return !!cfg?.enableProxy;
+}
+function applyProxy(env, on) {
+  const keys = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
+  if (on) { const px = proxyUrl(); if (px) for (const k of keys) env[k] = px; }
+  else for (const k of keys) delete env[k];
+  return env;
+}
+// 这次失败像不像"网络/地区"这一类（值得翻过来再试一次）
+const NET_FAIL_RE = /User location is not supported|FAILED_PRECONDITION|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)|eligibility check failed|userinfo": EOF|Request not allowed|403/i;
+export function looksNetworkFailure(out) { return NET_FAIL_RE.test(String(out || '')); }
+
 // 一次性调用某个 CLI 时，参数怎么摆、prompt 从哪进、要不要过 shell。抽成纯函数只为可测——
 // 这三件事各踩过一次坑，全都表现为"AI 返回解析不了"，从报错完全看不出真因。
 //
@@ -161,32 +193,41 @@ export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
       + '请先装一个 CLI（如 qwen / gemini / codex），或在上一步用「✍️ 我自己起名（跳过 AI 建议）」直接立项。');
   }
   const m = getModel(useId);
-  const env = { ...process.env };
-  // 【agy 要走直连，不能挂代理】实测（2026-09-13）同一台机器上：
-  //   直连          → 正常回答
-  //   挂 127.0.0.1:7897 → error: FAILED_PRECONDITION (code 400): User location is not supported for the API use.
-  // Google 按出口 IP 判地区，代理节点落在不支持的地区就整段拒绝；而本机直连是通的。
-  // 这条报错再被上层当成"模型的回答"去解析，作者看到的就是那句莫名其妙的
-  //「AI 返回未能解析为书名候选，请重试或换模型」。
-  // 所以对 agy 主动【清掉】继承来的代理变量（引擎进程自己是带着代理跑的），不只是不设。
-  // 同上：agy 的"要不要代理"两天里翻过一次个儿（见 writer.mjs 那段注释），别写死。
-  // 这里保留一个显式开关：想让某个模型走直连，在配置里写 noProxyModels: ['agy']。
-  const noProxy = Array.isArray(cfg?.noProxyModels) && cfg.noProxyModels.includes(useId);
-  if (noProxy) {
-    for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) delete env[k];
-  } else if (cfg?.enableProxy) {
-    const px = proxyUrl();
-    if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; }
-  }
   const bin = resolveBin(useId);
   const { args, viaStdin, useShell } = planCliInvocation(useId, prompt, bin);
-  const r = spawnSync(bin, args, {
-    encoding: 'utf8', timeout: timeoutMs, ...(viaStdin ? { input: prompt } : {}), cwd: os.tmpdir(),
-    env, maxBuffer: 8 * 1024 * 1024, shell: useShell, windowsHide: true,
-  });
-  if (r.error) throw new Error(m.name + ' 调用失败：' + r.error.message);
-  const out = (r.stdout || '') + '\n' + (r.stderr || '');
-  const fail = detectCliFailure(out, prompt);
+
+  // 跑一次（proxyOn 决定挂不挂代理）
+  const once = (proxyOn) => {
+    const env = applyProxy({ ...process.env }, proxyOn);
+    const r = spawnSync(bin, args, {
+      encoding: 'utf8', timeout: timeoutMs, ...(viaStdin ? { input: prompt } : {}), cwd: os.tmpdir(),
+      env, maxBuffer: 8 * 1024 * 1024, shell: useShell, windowsHide: true,
+    });
+    if (r.error) throw new Error(m.name + ' 调用失败：' + r.error.message);
+    return (r.stdout || '') + String.fromCharCode(10) + (r.stderr || '');
+  };
+
+  // 显式配了"这个模型走直连"就照办，不做协商
+  const forcedDirect = Array.isArray(cfg?.noProxyModels) && cfg.noProxyModels.includes(useId);
+  let proxyOn = forcedDirect ? false : wantProxy(useId, cfg);
+  let out = once(proxyOn);
+  let fail = detectCliFailure(out, prompt);
+
+  // 【失败像网络/地区问题 → 把代理翻过来再试一次】别再让我靠猜：
+  // 同一台机器两天里 agy 的可用配置正好反了个个儿（见本文件 netmode 那段注释）。
+  if (fail && !forcedDirect && looksNetworkFailure(out)) {
+    const flipped = !proxyOn;
+    const out2 = once(flipped);
+    const fail2 = detectCliFailure(out2, prompt);
+    if (!fail2) {
+      rememberNetMode(useId, flipped ? 'proxy' : 'direct');   // 记住这次成功的模式，下次先用它
+      return out2;
+    }
+    out = out2; fail = fail2;   // 两种都不行 → 报后一次的错（更接近当前网络真相）
+  } else if (!fail) {
+    rememberNetMode(useId, proxyOn ? 'proxy' : 'direct');
+  }
+
   if (fail) { const e = new Error(`${m.name} 跑不动：${fail.why}${fail.detail ? '（' + fail.detail + '）' : ''}`); e.cliFailed = useId; throw e; }
   return out;
 }

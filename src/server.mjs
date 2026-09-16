@@ -103,8 +103,26 @@ export function runServer(port = 8787) {
   // 或未捕获 promise 拒绝整个拖崩（一崩全崩：图书预览/阅读/发布/写作都没了）。这里兜底记录、保持存活。
   if (!globalThis.__nsEngineGuarded) {
     globalThis.__nsEngineGuarded = true;
-    process.on('uncaughtException', (e) => { try { console.error('[engine] uncaughtException(已忽略保活):', e?.stack || e?.message || e); } catch {} });
-    process.on('unhandledRejection', (e) => { try { console.error('[engine] unhandledRejection(已忽略保活):', e?.message || e); } catch {} });
+    // ⚠️【崩了要留下案发现场】原来这两行只 console.error，而引擎是 Tauri 用 CREATE_NO_WINDOW 拉起来的，
+    // stdout/stderr 没人接——2026-09-15 引擎两次无声消失，事后一点线索都没有，只能靠"HTTP 000"发现。
+    // 现在同时写进 ~/.novel-studio/engine.log，带时间戳和完整堆栈。
+    const crashLog = (tag, e) => {
+      const line = `[${new Date().toISOString()}] ${tag}: ${(e && (e.stack || e.message)) || e}
+`;
+      try { console.error('[engine] ' + line.trim()); } catch {}
+      try {
+        const dir = path.join(os.homedir(), '.novel-studio');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.appendFileSync(path.join(dir, 'engine.log'), line, 'utf8');
+      } catch {}
+    };
+    process.on('uncaughtException', (e) => crashLog('uncaughtException(已忽略保活)', e));
+    process.on('unhandledRejection', (e) => crashLog('unhandledRejection(已忽略保活)', e));
+    // 进程真要退了也记一笔：区分"自己退的"和"被外面杀的"，下次崩了才有得对。
+    process.on('exit', (code) => { if (code !== 0) crashLog('process exit', new Error('exit code ' + code)); });
+    for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGBREAK']) {
+      try { process.on(sig, () => { crashLog('收到信号退出', new Error(sig)); process.exit(0); }); } catch {}
+    }
   }
   const server = http.createServer(async (req, res) => {
     // CORS（Tauri webview 跨源调用）
