@@ -529,22 +529,8 @@
         <p class="modal-hint" style="margin-top:6px">本地书还没在番茄建过时用。自动带入：<b>书名</b>=本书名、<b>简介</b>=下方「作品简介」（需 50–500 字）。你选频道+主分类、可填主角名，点创建——<b>会在你番茄账号真实建一本新书（不可逆）</b>，成功后自动回填上方「番茄书籍」的 bookId。主分类<b>签约后不可改</b>，男/女频分类不同。</p>
         <div class="pb-grid" style="margin-top:6px">
           <label class="field"><span>频道</span><select id="cbChannel"><option value="男频">男频</option><option value="女频">女频</option></select></label>
-          <label class="field"><span>主分类（签约后不可改）</span><select id="cbCategory">
-            <option value="历史脑洞">历史脑洞（脑洞向历史·一般有金手指）</option>
-            <option value="历史古代">历史古代（种田·朝堂·智谋·争霸·科举）</option>
-            <option value="都市高武">都市高武</option>
-            <option value="都市脑洞">都市脑洞</option>
-            <option value="都市种田">都市种田</option>
-            <option value="都市日常">都市日常</option>
-            <option value="悬疑脑洞">悬疑脑洞</option>
-            <option value="悬疑灵异">悬疑灵异</option>
-            <option value="抗战谍战">抗战谍战</option>
-            <option value="玄幻脑洞">玄幻脑洞</option>
-            <option value="东方仙侠">东方仙侠</option>
-            <option value="西方奇幻">西方奇幻</option>
-            <option value="科幻末世">科幻末世</option>
-            <option value="男频衍生">男频衍生</option>
-          </select></label>
+          <label class="field"><span>主分类（签约后不可改）</span><select id="cbCategory"><option value="">（加载中…）</option></select></label>
+          <div id="cbCatHint" class="modal-hint" style="grid-column:1/-1"></div>
           <label class="field"><span>主角名1（≤5字，可空）</span><input id="cbHero" type="text" maxlength="5" placeholder="如 朱由检"></label>
           <label class="field"><span>主角名2（≤5字，可空）</span><input id="cbHero2" type="text" maxlength="5" placeholder="可空"></label>
         </div>

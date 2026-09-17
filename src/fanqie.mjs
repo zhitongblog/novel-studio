@@ -3364,13 +3364,65 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
 
   // 5. 作品标签弹窗 → 主分类卡片 → 确认（CDP 可信点击）
   log(`选择主分类「${cat}」…`);
-  const selCoord = await client.evaluate("(function(){var s=[].slice.call(document.querySelectorAll('.arco-select,[class*=select]')).find(function(e){return /请选择作品标签/.test(e.textContent);});if(!s)return '';var r=s.getBoundingClientRect();return Math.round(r.x+30)+','+Math.round(r.y+r.height/2);})()");
-  if (!selCoord) return { ok: false, error: '未找到「作品标签」选择框' };
+  // 【先把挡路的引导弹窗关掉】2026-09-17 实测：创建作品页会弹一个「签约模式说明」(.sign-pattern-guide-modal，
+  // 640x404) 盖在表单上。它一挡，下面这一下点击就落到遮罩上 → 标签弹窗根本不开，
+  // 最后报出来的却是"未找到「作品标签」选择框"或"没找到主分类"，跟真因差着十万八千里。
+  await client.evaluate(`(function(){
+    var n=0;
+    [].slice.call(document.querySelectorAll('.arco-modal')).forEach(function(md){
+      if(md.getBoundingClientRect().width<100) return;
+      if(/阅读标签|内容标签/.test(md.textContent||'')) return;   // 别误关我们要用的那个
+      var b=[].slice.call(md.querySelectorAll('button,.arco-btn')).find(function(x){return /我知道了|知道了|开始创作|关闭|取消/.test((x.textContent||'').trim());});
+      if(b){b.click();n++;return;}
+      var c=md.querySelector('.arco-modal-close-icon,[class*=close]'); if(c){c.click();n++;}
+    });
+    return n;
+  })()`);
+  await client.sleep(1200);
+  // 【必须认准「阅读标签」那一个】页面上有两个"请选择作品标签"：阅读标签(主分类在这里) 和 内容标签。
+  // 原来按 /请选择作品标签/ 取第一个匹配，纯靠 DOM 顺序碰运气——番茄一调整顺序就点到内容标签去了。
+  // 现在按 .cate-wrap 里的 label 文字定位，点卡片正中（原来点 x+30 会蹭到边框）。
+  const selCoord = await client.evaluate(`(function(){
+    var wrap=[].slice.call(document.querySelectorAll('.cate-wrap')).find(function(e){return (e.textContent||'').indexOf('阅读标签')>=0;});
+    if(!wrap){ wrap=[].slice.call(document.querySelectorAll('*')).find(function(e){return /请选择作品标签/.test(e.textContent||'')&&e.querySelector&&e.querySelector('.select-view');}); }
+    if(!wrap) return '';
+    var sv=wrap.querySelector('.select-view')||wrap.querySelector('.select-row');
+    if(!sv) return '';
+    var r=sv.getBoundingClientRect();
+    return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);
+  })()`);
+  if (!selCoord) return { ok: false, error: '未找到「阅读标签」选择框（番茄改版？）' };
   { const [x, y] = selCoord.split(',').map(Number); await client.cdpClick(x, y); }
   await client.sleep(1600);
   // 主分类卡片：番茄弹窗里每张分类卡为 .category-choose-item（含标题+描述）。优先按此类名匹配，兜底取含分类名的最小元素。
-  const cardCoord = await client.evaluate(`(function(){var name=${JSON.stringify(cat)};var els=[].slice.call(document.querySelectorAll('.category-choose-item')).filter(function(e){return (e.textContent||'').indexOf(name)>=0;});if(!els.length){els=[].slice.call(document.querySelectorAll('*')).filter(function(e){var t=e.textContent||'';return t.indexOf(name)>=0&&t.length<40;}).sort(function(a,b){return a.textContent.length-b.textContent.length;});}var c=els[0];if(!c)return '';var r=c.getBoundingClientRect();return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);})()`);
-  if (!cardCoord) return { ok: false, error: `标签弹窗里没找到主分类「${cat}」（频道选对了吗？男/女频分类不同）` };
+  // 【必须限定在「主分类」那一栏里找，且必须全名相等】
+  // 弹窗里有四栏：主分类 / 主题 / 角色 / 情节，四栏用的都是 .category-choose-item。
+  // 原来在整个弹窗里按 indexOf 找，两个隐患：
+  //   ① 可能点到「主题」栏的同名词上——主分类没选中，"确认"要么灰着要么存了个错的；
+  //   ② indexOf 是子串匹配：要「悬疑」会先撞上「悬疑脑洞」「悬疑恋爱」（实测这几个都在 DOM 里）。
+  // 主分类【签约后不可改】，这里不能靠"多半能撞对"。
+  const cardCoord = await client.evaluate(`(function(){
+    var name=${JSON.stringify(cat)};
+    var modal=[].slice.call(document.querySelectorAll('.arco-modal')).filter(function(e){return /主分类/.test(e.textContent||'')&&e.getBoundingClientRect().width>300;}).pop();
+    if(!modal) return '';
+    // 主分类区 = 含"主分类"三字、且内部有分类卡的【最小】容器
+    var host=null, best=1e9;
+    [].slice.call(modal.querySelectorAll('*')).forEach(function(e){
+      var t=e.textContent||'';
+      if(t.indexOf('主分类')<0) return;
+      if(!e.querySelectorAll('.category-choose-item').length) return;
+      if(t.length<best){best=t.length;host=e;}
+    });
+    var scope=host||modal;
+    var hit=[].slice.call(scope.querySelectorAll('.category-choose-item')).find(function(e){
+      var ti=e.querySelector('.category-choose-item-title');
+      return ((ti?ti.textContent:e.textContent)||'').trim()===name;   // 全名相等，不是包含
+    });
+    if(!hit) return '';
+    var r=hit.getBoundingClientRect();
+    return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);
+  })()`);
+  if (!cardCoord) return { ok: false, error: `「阅读标签」弹窗的主分类栏里没有「${cat}」——${channel}的主分类不含这一项（男/女频分类不同）` };
   { const [x, y] = cardCoord.split(',').map(Number); await client.cdpClick(x, y); }
   await client.sleep(900);
   const okCoord = await client.evaluate("(function(){var b=[].slice.call(document.querySelectorAll('button')).find(function(e){return (e.textContent||'').trim()==='确认';});if(!b)return '';var r=b.getBoundingClientRect();return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);})()");

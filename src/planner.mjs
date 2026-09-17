@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { getModel, detectAll, resolveBin } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { STYLES, getStyle } from './styles.mjs';
+import { FANQIE_CATEGORIES, categoriesOf, isValidCategory, normalizeChannel } from './categories.mjs';
 
 // runModelOnce 能非交互驱动的本地 CLI（一次性喂 prompt 走 stdin 取文本）。trae 用法不同(run 子命令)，不在此列。
 //
@@ -296,6 +297,50 @@ export async function recommendStyle({ theme, model }, cfg) {
   }
   const s = getStyle(id);
   return { id, name: s.name, short: s.short, reason, tweak };
+}
+
+// 据题材推断【番茄主分类 + 男/女频】。
+//
+// 为什么放在立项这一步：主分类【签约后不可改】，而原来它是发书那天才第一次被问到的事——
+// 那个下拉不从书里带任何东西，永远停在第一项「历史脑洞」，作者不手动改就这么建出去了。
+// 题材那句话在立项时就有了，没道理等到发书再猜。
+//
+// 只做【建议】：写进书里、发书时带入下拉，作者随时能改。AI 挑错了不至于不可逆——
+// 真正不可逆的是"根本没人问过这件事"。
+export async function recommendCategory({ theme, title = '', model }, cfg) {
+  const t = String(theme || title || '').trim();
+  if (!t) throw new Error('没有题材，无法推断分类');
+  const listOf = (ch) => categoriesOf(ch).join('、');
+  const prompt =
+    `你是番茄小说的资深编辑。下面是一本书的题材/故事线，请判断它在番茄上应该归到哪个【频道】和哪个【主分类】。\n` +
+    `题材：${t}\n` +
+    `男频可选主分类：${listOf('男频')}\n` +
+    `女频可选主分类：${listOf('女频')}\n` +
+    `规则：①主分类【必须】是上面列表里的原词，一个字都不能改、不能自造；②选定频道后只能从该频道的列表里挑；` +
+    `③"脑洞"类指有金手指/系统/穿越重生等超常设定，写实向的走对应的非脑洞分类。\n` +
+    `只输出严格 JSON，不要多余文字：{"channel":"男频或女频","mainCategory":"列表里的原词","reason":"一句话理由"}`;
+  const out = runModelOnce(model, prompt, cfg, 120000);
+  const j = (() => { try { const m = out.match(/\{[\s\S]*?\}/); return m ? JSON.parse(m[0]) : null; } catch { return null; } })();
+  let channel = normalizeChannel(j?.channel);
+  let mainCategory = String(j?.mainCategory || '').trim();
+  let reason = String(j?.reason || '').trim();
+
+  // 兜底一：模型没给合法分类 → 直接在原文里找一个真实存在的分类名。
+  // 【不能瞎填一个默认值】填了作者就更不会去看那个下拉了，而错的主分类签约后改不了。
+  if (!isValidCategory(channel, mainCategory)) {
+    const hit = categoriesOf(channel).find(c => out.includes(c));
+    if (hit) { mainCategory = hit; if (!reason) reason = 'AI 推荐'; }
+  }
+  // 兜底二：分类对但频道判反了（例如给了"宫斗宅斗"却说男频）→ 以分类为准反推频道。
+  if (!isValidCategory(channel, mainCategory)) {
+    const other = channel === '男频' ? '女频' : '男频';
+    if (isValidCategory(other, mainCategory)) channel = other;
+  }
+  if (!isValidCategory(channel, mainCategory)) {
+    // 真没认出来就【明说没认出来】，返回空分类让 UI 提示作者自己挑，而不是硬塞一个。
+    return { channel, mainCategory: '', reason: '', undecided: true };
+  }
+  return { channel, mainCategory, reason: reason.slice(0, 80), undecided: false };
 }
 
 // 对标书风格学习：给一段对标作品的正文样本，让强模型分析出一份「照着这个腔写」的文风指南。

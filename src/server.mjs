@@ -13,9 +13,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance} from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance, setBookCategory} from './books.mjs';
 import { STYLES } from './styles.mjs';
-import { recommendStyle } from './planner.mjs';
+import { recommendStyle, recommendCategory } from './planner.mjs';
 import { detectAll, getModel, canRunHeadless } from './models.mjs';
 import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
 import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
@@ -29,6 +29,7 @@ import { brainstorm, writeChapterInWindow, writeChapterFromIntent, writeChapters
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { chapterProgressLine, isFirstSight } from './progress.mjs';
+import { FANQIE_CATEGORIES, isValidCategory } from './categories.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
@@ -465,6 +466,8 @@ async function api(p, req, res, u) {
     }
     if (p === '/api/books') return json(res, 200, withUsage(listBooksWithStats()));
     if (p === '/api/sessions') return json(res, 200, sessionsInfo());
+    // 番茄主分类清单（男频/女频各一套，实抓自创建作品页）。前端据此渲染下拉，不再各写各的硬编码。
+    if (p === '/api/fanqie/categories') return json(res, 200, { ok: true, categories: FANQIE_CATEGORIES });
     if (p === '/api/usage') {
       const usage = loadUsage();
       const books = {};
@@ -771,6 +774,12 @@ async function api(p, req, res, u) {
         if (!title) return json(res, 400, { error: '书名为空' });
         if (title.length > 15) return json(res, 400, { error: `书名「${title}」超过番茄上限(15字)` });
         if (!mainCategory) return json(res, 400, { error: '请选择主分类' });
+        // 【频道与分类必须对得上】番茄的分类卡是按频道渲染的：拿男频的名字去女频弹窗里找，
+        // 只会得到一句"标签弹窗里没找到主分类"，作者看到的是创建失败，不知道错在频道。
+        // 病根是 UI 那个下拉切频道时纹丝不动（列表写死一套男频子集），这里再守一道。
+        if (!isValidCategory(channel, mainCategory)) {
+          return json(res, 400, { error: `「${mainCategory}」不是${channel}的主分类。${channel}可选：${FANQIE_CATEGORIES[channel].join('、')}` });
+        }
         if (synopsis.length < 50) return json(res, 400, { error: `简介仅 ${synopsis.length} 字，番茄要求 50–500 字，请先在「作品简介」写好` });
         const slug = book.slug;
         const cur = fanqieCreateJobs.get(slug);
@@ -896,6 +905,11 @@ async function api(p, req, res, u) {
       try { const b = setBookStyle(body.book, body.style); return json(res, 200, { ok: true, style: b.style }); }
       catch (e) { return json(res, 400, { error: e.message }); }
     }
+    if (p === '/api/book/set-category') {
+      // 作者自己改番茄频道/主分类。改过的标 by:'user'，之后 AI 不再覆盖。
+      try { const b = setBookCategory(body.book, { channel: body.channel, mainCategory: body.mainCategory, by: 'user' }); return json(res, 200, { ok: true, category: b.category }); }
+      catch (e) { return json(res, 400, { error: e.message }); }
+    }
     if (p === '/api/book/set-romance') {   // 设定该书感情线档位（none|light|warm|bold），改完当场刷新写作规范
       try { const b = setBookRomance(body.book, body.romance); return json(res, 200, { ok: true, romance: b.romance }); }
       catch (e) { return json(res, 400, { error: e.message }); }
@@ -944,6 +958,20 @@ async function api(p, req, res, u) {
           pushLog(book.slug, { level: 'act', source: 'voice', msg: `🖋️ 文风已锚定：《${body.voiceRef.name || '样章'}》已成为本书范本，全书向它看齐` });
         } catch (e) { pushLog(book.slug, { level: 'warn', source: 'voice', msg: '文风范本落盘失败：' + e.message }); }
       }
+      // 【番茄主分类在这一步就定下来】原来它只活在发布弹窗那个下拉的默认值里——永远是第一项
+      // 「历史脑洞」，作者不手动改就那样建到番茄上，而页面自己写着【主分类签约后不可改】。
+      // 题材那句话现在就有，没道理等到发书那天再猜。后台跑，不挡立项（推断失败也只是少个建议）。
+      (async () => {
+        try {
+          const c = await recommendCategory({ theme: body.theme || body.genre, title: body.title, model: body.model || cfg.defaultModel }, cfg);
+          if (c.undecided || !c.mainCategory) {
+            pushLog(book.slug, { level: 'warn', source: 'category', msg: '没能从题材判断番茄主分类 → 发书前请自己在发布弹窗里挑一个（主分类签约后不可改）' });
+            return;
+          }
+          setBookCategory(book.slug, { channel: c.channel, mainCategory: c.mainCategory, by: 'ai', reason: c.reason });
+          pushLog(book.slug, { level: 'act', source: 'category', msg: `🏷️ 番茄分类建议：${c.channel} · ${c.mainCategory}${c.reason ? '（' + c.reason + '）' : ''} —— 发书时自动带入，可改` });
+        } catch (e) { pushLog(book.slug, { level: 'warn', source: 'category', msg: '番茄分类推断失败：' + e.message + '（发书时自己挑即可）' }); }
+      })();
       // 立项时选择参与度；startWriting 会据 book.writeMode/reviewEvery 播种运行时审核开关
       if (body.participation != null) {
         try { setParticipation(book.slug, body.participation); } catch {}

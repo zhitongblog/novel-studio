@@ -745,6 +745,9 @@ async function openPublish(book) {
   setSynopsisBox(b);
   if ($('#cbHero')) $('#cbHero').value = '';
   if ($('#cbHero2')) $('#cbHero2').value = '';
+  // 频道+主分类：按这本书存的（立项时 AI 推断，或作者改过的）渲染并预选，别留上一本的
+  if ($('#cbCategory')) delete $('#cbCategory').dataset.want;
+  renderCategorySelect(b);
   pbSyncStopBtn();   // 若这本正在发布，展示「停止发布」并接回进度
   $('#publishModal').classList.remove('hidden');
   // 从设定圣经自动带入主角名/配角名到「创建新书」的主角框（空框才填，不覆盖手改）
@@ -782,6 +785,59 @@ async function openPublish(book) {
     }
   } catch {}
 }
+
+// —— 番茄频道 / 主分类 ——
+// 病根（2026-09-17）：这个下拉的选项是在 index.html 里【写死的一套男频子集】，
+// 切到女频纹丝不动（里面还杵着「男频衍生」），点创建必然撞「标签弹窗里没找到主分类」；
+// 而且它不从书里带任何东西，永远停在第一项「历史脑洞」——页面自己写着【主分类签约后不可改】。
+// 现在：清单由引擎给（实抓自番茄创建页，男频 19/女频 21），随频道切换重渲染，
+// 并按这本书立项时 AI 推断的结果预选。
+let FQ_CATS = null;
+async function fqCats() {
+  if (FQ_CATS) return FQ_CATS;
+  try { const r = await api('/api/fanqie/categories'); FQ_CATS = r.categories || {}; } catch { FQ_CATS = {}; }
+  return FQ_CATS;
+}
+async function renderCategorySelect(book) {
+  const chSel = $('#cbChannel'), catSel = $('#cbCategory');
+  if (!chSel || !catSel) return;
+  const cats = await fqCats();
+  const saved = (book && book.category) || {};
+  // 频道：书上存过就用书上的（只在打开弹窗那次定，之后听用户的）
+  if (saved.channel && chSel.value !== saved.channel) chSel.value = saved.channel;
+  const list = cats[chSel.value] || [];
+  const want = catSel.dataset.want || saved.mainCategory || '';
+  catSel.innerHTML = '';
+  if (!list.length) { catSel.innerHTML = '<option value="">（清单取不到，请重启引擎）</option>'; return; }
+  for (const name of list) {
+    const o = document.createElement('option');
+    o.value = name; o.textContent = name;
+    if (name === want) o.selected = true;
+    catSel.appendChild(o);
+  }
+  // 换频道后原分类不在新频道里 → 【不要静默改成第一项】，明确告诉作者要重挑
+  if (want && !list.includes(want)) {
+    const o = document.createElement('option');
+    o.value = ''; o.textContent = `（原选「${want}」不属于${chSel.value}，请重挑）`;
+    o.selected = true; catSel.insertBefore(o, catSel.firstChild);
+  }
+  const hint = $('#cbCatHint');
+  if (hint) {
+    hint.textContent = saved.mainCategory
+      ? (saved.by === 'ai' ? `立项时 AI 建议：${saved.channel} · ${saved.mainCategory}${saved.reason ? '（' + saved.reason + '）' : ''}——不对就改，改完记在书上` : `上次选定：${saved.channel} · ${saved.mainCategory}`)
+      : '这本书还没定分类。主分类签约后不可改，挑之前先想清楚。';
+  }
+}
+$('#cbChannel')?.addEventListener('change', () => { const c = $('#cbCategory'); if (c) delete c.dataset.want; renderCategorySelect(getBookBySlug(CUR?.slug) || CUR); });
+// 作者改了就记在书上，下次自动带入，AI 不再覆盖
+$('#cbCategory')?.addEventListener('change', async () => {
+  const cat = $('#cbCategory').value, ch = $('#cbChannel').value;
+  if (!cat || !CUR) return;
+  try {
+    await api('/api/book/set-category', 'POST', { book: CUR.slug, channel: ch, mainCategory: cat });
+    const b = getBookBySlug(CUR.slug); if (b) b.category = { channel: ch, mainCategory: cat, by: 'user' };
+  } catch {}
+});
 
 // 取书架里最新的那份 book 记录（publish 配置可能刚被保存过）
 function getBookBySlug(slug) { return (STATE.books || []).find(b => b.slug === slug) || null; }
@@ -885,6 +941,9 @@ $('#cbCreate')?.addEventListener('click', async () => {
   const hero = $('#cbHero').value.trim();
   const hero2 = $('#cbHero2').value.trim();
   if (!profilePath) { hint.textContent = '⚠️ 请先在上方选 Unzoo 账号'; hint.style.color = '#e57'; return; }
+  // 换频道后原分类不属于新频道时，下拉会停在那条空的提示项——这里必须拦住。
+  // 主分类签约后不可改，宁可让作者多点一下，也不能带着空/错的分类去建书。
+  if (!mainCategory) { hint.textContent = '⚠️ 请先挑主分类（签约后不可改，挑之前想清楚）'; hint.style.color = '#e57'; return; }
   if (synopsis.length < 50) { hint.textContent = `⚠️ 简介只有 ${synopsis.length} 字，番茄要求 50–500 字。请先在「作品简介」写好（可点生成）`; hint.style.color = '#e57'; return; }
   if (!confirm(`将在你番茄账号真实创建一本新书：\n《${CUR.title}》· ${channel} · ${mainCategory}\n简介 ${synopsis.length} 字${hero ? ' · 主角 ' + hero : ''}\n\n创建不可逆，确定？`)) return;
   const btn = $('#cbCreate'); btn.disabled = true; const old = btn.textContent; btn.textContent = '📕 创建中…';

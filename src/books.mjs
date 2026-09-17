@@ -7,6 +7,7 @@ import { ensureProfile, cli, closeWindow } from './unterm.mjs';
 import { getSession, removeSession } from './sessions.mjs';
 import { getStyle } from './styles.mjs';
 import { resolveRomance, DEFAULT_ROMANCE } from './romance.mjs';
+import { isValidCategory } from './categories.mjs';
 
 // 删除一本书：停会话、删 profile、移出书架；可选连磁盘文件夹一起删（危险）
 export function deleteBook(slugOrId, { deleteFiles = false } = {}) {
@@ -244,6 +245,24 @@ export function setBookPublish(slugOrId, patch) {
   const b = getBook(slugOrId);
   if (!b) throw new Error('找不到书：' + slugOrId);
   b.publish = { ...(b.publish || {}), ...(patch || {}) };
+  upsertBook(b);
+  return b;
+}
+
+// 存这本书的【番茄频道 + 主分类】。
+//
+// 为什么要存在书上而不是发书时现选：主分类【签约后不可改】，而它原来只存在于发布弹窗那个
+// 下拉的默认值里——永远是第一项「历史脑洞」，作者不手动改就那样建出去了，且事后不可逆。
+// 存下来之后：立项时 AI 给建议 → 发书时自动带入 → 作者改一次就一直是那个。
+//
+// by: 'ai'（立项时推断）| 'user'（作者自己改的）。作者改过的【不再被 AI 覆盖】。
+export function setBookCategory(slugOrId, { channel, mainCategory, by = 'user', reason = '' } = {}) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  const ch = channel === '女频' ? '女频' : '男频';
+  const cat = String(mainCategory || '').trim();
+  if (!isValidCategory(ch, cat)) throw new Error(`「${cat}」不是${ch}的主分类（番茄按频道渲染分类卡，拿另一个频道的名字去找必然找不到）`);
+  b.category = { channel: ch, mainCategory: cat, by, reason: String(reason || '').slice(0, 80), at: new Date().toISOString() };
   upsertBook(b);
   return b;
 }
