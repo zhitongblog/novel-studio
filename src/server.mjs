@@ -16,7 +16,7 @@ import { CONFIG_DIR } from './paths.mjs';
 import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance} from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle } from './planner.mjs';
-import { detectAll, getModel } from './models.mjs';
+import { detectAll, getModel, canRunHeadless } from './models.mjs';
 import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
 import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
 import { startWriting, snapshotPaneIds } from './writer.mjs';
@@ -28,12 +28,13 @@ import { localHealth, probeText, probeImage } from './localai.mjs';
 import { brainstorm, writeChapterInWindow, writeChapterFromIntent, writeChaptersFromPlot, rewriteChapter, reflowChapter, isCowriteModel, isCowriteWindowModel, COWRITE_MODELS, STYLE_SLANTS } from './cowrite.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
+import { chapterProgressLine, isFirstSight } from './progress.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
 import { gitSnapshot } from './scaffold.mjs';
-import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction } from './editor.mjs';
-import { getPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
+import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction, parseReviewItems, critiqueOf } from './editor.mjs';
+import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
@@ -43,6 +44,7 @@ import { previewFanqieImport, importFromFanqie } from './import_fanqie.mjs';
 import { generateCoverBg, buildArtPromptAuto } from './imagegen.mjs';
 import { generateNameExperiment, readNameExperiment } from './nameexp.mjs';
 import { generateCoverViaChatGPT, grabCoverFromChatGPT, buildChatGptCoverPrompt } from './covergen_web.mjs';
+import { generateCoverViaGemini, grabCoverFromGemini } from './covergen_gemini.mjs';
 
 const UI_DIR = path.resolve(fileURLToPath(import.meta.url), '..', '..', 'ui');
 
@@ -102,8 +104,26 @@ export function runServer(port = 8787) {
   // 或未捕获 promise 拒绝整个拖崩（一崩全崩：图书预览/阅读/发布/写作都没了）。这里兜底记录、保持存活。
   if (!globalThis.__nsEngineGuarded) {
     globalThis.__nsEngineGuarded = true;
-    process.on('uncaughtException', (e) => { try { console.error('[engine] uncaughtException(已忽略保活):', e?.stack || e?.message || e); } catch {} });
-    process.on('unhandledRejection', (e) => { try { console.error('[engine] unhandledRejection(已忽略保活):', e?.message || e); } catch {} });
+    // ⚠️【崩了要留下案发现场】原来这两行只 console.error，而引擎是 Tauri 用 CREATE_NO_WINDOW 拉起来的，
+    // stdout/stderr 没人接——2026-09-15 引擎两次无声消失，事后一点线索都没有，只能靠"HTTP 000"发现。
+    // 现在同时写进 ~/.novel-studio/engine.log，带时间戳和完整堆栈。
+    const crashLog = (tag, e) => {
+      const line = `[${new Date().toISOString()}] ${tag}: ${(e && (e.stack || e.message)) || e}
+`;
+      try { console.error('[engine] ' + line.trim()); } catch {}
+      try {
+        const dir = path.join(os.homedir(), '.novel-studio');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.appendFileSync(path.join(dir, 'engine.log'), line, 'utf8');
+      } catch {}
+    };
+    process.on('uncaughtException', (e) => crashLog('uncaughtException(已忽略保活)', e));
+    process.on('unhandledRejection', (e) => crashLog('unhandledRejection(已忽略保活)', e));
+    // 进程真要退了也记一笔：区分"自己退的"和"被外面杀的"，下次崩了才有得对。
+    process.on('exit', (code) => { if (code !== 0) crashLog('process exit', new Error('exit code ' + code)); });
+    for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGBREAK']) {
+      try { process.on(sig, () => { crashLog('收到信号退出', new Error(sig)); process.exit(0); }); } catch {}
+    }
   }
   const server = http.createServer(async (req, res) => {
     // CORS（Tauri webview 跨源调用）
@@ -129,6 +149,7 @@ export function runServer(port = 8787) {
     setTimeout(reattachLiveSessions, 1500);
     setTimeout(() => { resumeStatelessRuns().catch(e => console.error('[engine] resumeStatelessRuns:', e?.message || e)); }, 2500);
     startOrphanWatchdog();
+    startChapterProgressWatchdog();
   });
   return server;
 }
@@ -215,6 +236,31 @@ function startOrphanWatchdog() {
     }
   }, 60000);
   globalThis.__nsOrphanWatchdog.unref?.();
+}
+
+// 【落章播报】每 20 秒对在册的窗口会话点一次章数，涨了就播一行（缘由见 progress.mjs）。
+// 只管【在册的 Unterm 会话】=窗口模式；无状态那条自己每批都报，不重复播。
+const _chapHigh = new Map();   // slug -> 上次播报时的最高章号
+function startChapterProgressWatchdog() {
+  if (globalThis.__nsChapterWatchdog) return;
+  globalThis.__nsChapterWatchdog = setInterval(() => {
+    let live;
+    try { live = listSessions(); } catch { return; }
+    const alive = new Set();
+    for (const s of live) {
+      const slug = s.slug; alive.add(slug);
+      const book = getBook(slug); if (!book) continue;
+      let st; try { st = bookStats(book); } catch { continue; }
+      const prev = _chapHigh.get(slug);
+      if (isFirstSight(prev)) { _chapHigh.set(slug, st?.maxChapter || 0); continue; }
+      const line = chapterProgressLine(prev, st);
+      if (!line) continue;
+      _chapHigh.set(slug, st.maxChapter);
+      pushLog(slug, { level: 'act', source: 'progress', msg: line });
+    }
+    for (const slug of _chapHigh.keys()) if (!alive.has(slug)) _chapHigh.delete(slug);   // 会话没了就别占着
+  }, 20000);
+  globalThis.__nsChapterWatchdog.unref?.();
 }
 
 // 启动一次无状态写作（后台跑、日志推 SSE、登记 rt + 落盘 stateless-active 供崩溃后自愈）。
@@ -623,6 +669,50 @@ async function api(p, req, res, u) {
         return json(res, 200, { ok: true, started: true });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
+    if (p === '/api/book/gen-cover-gemini') {   // 用【已登录的 Gemini】网页版生成封面底图（实测出图比 ChatGPT 快，十几秒～1分钟）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
+        if (!profilePath) return json(res, 400, { error: '请先选一个【已登录 Gemini】的浏览器账号' });
+        const slug = book.slug;
+        const cur = coverJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        coverJobs.set(slug, { status: 'running', msg: '正在打开 Gemini…' });
+        const onLog = (e) => { const j = coverJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'cover' }); };
+        generateCoverViaGemini(book, { prompt: body.prompt, profilePath, onLog })
+          .then((r) => {
+            coverJobs.set(slug, { status: 'done', url: '/api/book/cover-bg?book=' + encodeURIComponent(slug) + '&t=' + Date.now(), prompt: r.prompt, w: r.w, h: r.h, msg: '封面已生成' });
+            pushLog(slug, { level: 'act', source: 'cover', msg: '✅ Gemini 封面底图已生成' });
+          })
+          .catch((e) => {
+            coverJobs.set(slug, { status: 'error', error: e.message, msg: e.message });
+            pushLog(slug, { level: 'error', source: 'cover', msg: 'Gemini 生成封面失败：' + e.message });
+          });
+        return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/grab-cover-gemini') {   // 手动【抓取封面】：从当前 Gemini 页把已生成好的图抓下来（不再生成，快）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
+        if (!profilePath) return json(res, 400, { error: '请先选一个【已登录 Gemini】的浏览器账号' });
+        const slug = book.slug;
+        const cur = coverJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        coverJobs.set(slug, { status: 'running', msg: '正在抓取当前 Gemini 页的图…' });
+        const onLog = (e) => { const j = coverJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'cover' }); };
+        grabCoverFromGemini(book, { profilePath, onLog })
+          .then((r) => {
+            coverJobs.set(slug, { status: 'done', url: '/api/book/cover-bg?book=' + encodeURIComponent(slug) + '&t=' + Date.now(), w: r.w, h: r.h, msg: '封面已抓取' });
+            pushLog(slug, { level: 'act', source: 'cover', msg: '✅ 已抓取 Gemini 封面底图' });
+          })
+          .catch((e) => {
+            coverJobs.set(slug, { status: 'error', error: e.message, msg: e.message });
+            pushLog(slug, { level: 'error', source: 'cover', msg: '抓取封面失败：' + e.message });
+          });
+        return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
     if (p === '/api/book/gen-cover-status') {   // 轮询 ChatGPT 生成/抓取封面进度
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
@@ -908,7 +998,12 @@ async function api(p, req, res, u) {
           return json(res, 200, { ok: true, mode: 'inserted', ...r });
         }
         // 未在写 → 开一个会话专门做复检
+        // ⚠️ 这行清空日志【在存档之后】，会把上面那句"已 git 存档：xxxxx"一起冲掉——
+        // 存档明明成功了，界面上却一个字都看不到，作者以为没存（实测 cd3054e 那次就是这样）。
+        // 清空是为了让新一轮的日志从头开始，那就清完再把存档那句补回去。
+        const snapMsg = (rtOf(book.slug).logs || []).find(e => String(e.msg || '').startsWith('已 git 存档：'));
         rtOf(book.slug).logs = [];
+        if (snapMsg) pushLog(book.slug, snapMsg);
         const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         rtOf(book.slug).session = session;
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, pane: session.paneId });
@@ -1069,6 +1164,53 @@ async function api(p, req, res, u) {
         const b = setBookStatus(book.slug, body.status);
         return json(res, 200, { ok: true, status: b.status });
       } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/outline-reviews') {
+      // 列出这本书 reviews/ 下【已有的大纲审稿报告】，好让作者随时拿来改大纲。
+      // 为什么需要：审稿门的"逐条挑"只在【卷边界那一刻】存在，而那个待挑状态在内存里——
+      // 引擎一重启就没了（2026-09-15 实证：王莽卷02 的报告好好躺在硬盘上，30KB，却没有入口能用它）。
+      // 报告是文件，早就落盘了，没道理只有一次机会。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const dir = path.join(book.dir, 'reviews');
+        let files = [];
+        try { files = fs.readdirSync(dir).filter(f => /^大纲审稿-.*\.md$/.test(f)); } catch {}
+        const out = files.map(f => {
+          const full = path.join(dir, f);
+          let items = 0, verdict = '';
+          try {
+            const txt = fs.readFileSync(full, 'utf8');
+            items = parseReviewItems(critiqueOf(txt)).length;
+            const vm = txt.match(/【总评】\s*(.+)/);
+            verdict = vm ? vm[1].trim().slice(0, 120) : '';
+          } catch {}
+          let mtime = 0; try { mtime = fs.statSync(full).mtimeMs; } catch {}
+          return { file: f, scope: (f.match(/^大纲审稿-(.+)\.md$/) || [])[1] || '', items, verdict, mtime };
+        }).sort((a, b) => b.mtime - a.mtime);
+        return json(res, 200, { ok: true, reviews: out });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/outline-review-load') {
+      // 把一份【已有的】审稿报告重新摆回"待逐条挑"的状态：拆条 → setPending。
+      // 之后就完全复用原来那套 UI 与 /api/book/review-decision，不另造一条流程。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const name = path.basename(String(body.file || ''));
+        if (!/^大纲审稿-.*\.md$/.test(name)) return json(res, 400, { error: '只能加载 reviews/ 下的大纲审稿报告' });
+        const full = path.join(book.dir, 'reviews', name);
+        let txt = '';
+        try { txt = fs.readFileSync(full, 'utf8'); } catch { return json(res, 400, { error: '读不到这份报告：' + name }); }
+        const seenTxt = new Set();
+        const items = parseReviewItems(critiqueOf(txt))
+          .filter(x => { const k = x.text.trim(); if (seenTxt.has(k)) return false; seenTxt.add(k); return true; })
+          .map((x, i) => ({ ...x, id: 'r' + i }));
+        if (!items.length) return json(res, 400, { error: '这份报告里没解析出可挑的条目（格式可能不是【硬伤】/【隐患】/【建议】那种）' });
+        const scope = (name.match(/^大纲审稿-(.+)\.md$/) || [])[1] || '全书';
+        setPending(book.slug, { kind: 'outline', scope, file: full, critique: txt.slice(0, 6000), items });
+        pushLog(book.slug, { level: 'act', source: 'editor', kind: 'pending-review', scope, file: name,
+          msg: `⏸ 已载入《${name}》：${items.length} 条意见待你逐条挑（挑完自动改大纲）` });
+        return json(res, 200, { ok: true, scope, file: name, items });
+      } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/review-decision') {
       // 全局确认门的裁决：apply=true 应用审稿(作者据意见修订大纲)；否则跳过(不改，继续)。清除待确认 → autopilot 恢复。
@@ -1579,9 +1721,18 @@ async function api(p, req, res, u) {
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
         const isRe = p === '/api/book/reproject';
-        if (!isRe && !String(body.range || '').trim()) return json(res, 400, { error: '请填重写范围（如 001-008 或 卷01）' });
-        const hash = gitSnapshot(book.dir, isRe ? '整本重立项前存档' : ('重写' + (body.range || '') + '前存档'));
-        const instruction = isRe ? buildReprojectInstruction(book, body.note) : buildRewriteInstruction(book, body.range, body.note);
+        // 范围可以留空，但只有在【勾了按复检报告重写】时才行——那种情况下"哪几章有问题"是报告说了算，
+        // 不该反过来要作者先知道。作者要是既不填范围、又不让它读报告，那就真的没有任何依据可循。
+        const autoScope = !isRe && !String(body.range || '').trim();
+        if (autoScope && body.useReviews === false) {
+          return json(res, 400, { error: '要么填重写范围（如 001-008 或 卷01），要么勾上「按复检报告重写」让它自己从报告里找出问题章节。' });
+        }
+        const hash = gitSnapshot(book.dir, isRe ? '整本重立项前存档'
+          : (autoScope ? '按复检报告重写前存档' : '重写' + (body.range || '') + '前存档'));
+        // useReviews：勾了「按复检报告重写」→ 指令里先让它去 reviews/ 里检索本范围相关的条目当必办清单。
+        // 之前这里断着：复检把问题写进报告，重写却完全不知道报告存在，只能靠作者人肉复制粘贴。
+        const instruction = isRe ? buildReprojectInstruction(book, body.note)
+          : buildRewriteInstruction(book, body.range, body.note, { useReviews: body.useReviews !== false });
         // 只有【窗口在且 AI 真的在跑】才穿插指令；若 AI 已退出到命令行（只剩 shell 提示符），
         // 绝不能把指令打进命令行——改为开新窗口重启 AI（治"没打开 ai 就给命令行发命令"）。
         if (sessionLive(book.slug) && await sessionAgentAlive(book.slug, cfg)) {
@@ -1634,6 +1785,18 @@ async function api(p, req, res, u) {
         if (busyNow) return json(res, 409, { error: busyNow + '，不能同时开始写作' });
         const model = body.model || book.model || cfg.defaultModel;
         if (body.model) { try { setBookModel(slug, body.model); } catch {} }
+        // 【跑不了无头的模型，就别在这儿白跑一批】agy 的凭据不落盘，-p 每次都要人贴授权码（见 canRunHeadless）。
+        // 作者点的是"放手让他写"，要的是【把书写出来】，不是"用无状态这条路写"——
+        // 所以这里不报错、不空转，直接改用【有窗口】那条路（agy 在窗口里是通的，立项实测跑通过）。
+        if (!canRunHeadless(model)) {
+          const mm = getModel(model);
+          if (mm && mm.kind !== 'web' && mm.kind !== 'api') {
+            // 缘由交给 doWrite 去发：它开头会清空日志，在这儿 pushLog 等于白发（见 doWrite 上的注释）
+            return await doWrite({ ...body, model }, cfg, res,
+              { note: `「${mm.name}」没法无头跑（凭据不落盘，每次都要人贴授权码）→ 自动改用【窗口模式】开写` });
+          }
+          return json(res, 400, { error: `「${mm ? mm.name : model}」不是本地 CLI，用不了无状态模式。网页版请点写作台的 ▶（走网页版引擎），API 模型请用 API 写作。` });
+        }
         if (body.participation != null) { try { setParticipation(slug, body.participation); } catch {} }
         const untilTarget = body.untilTarget === true || (book.targetChapters > 0 && body.batches == null);
         const batches = Math.max(1, parseInt(body.batches, 10) || 1);
@@ -1811,7 +1974,13 @@ async function resumeWriting(slug, cfg, extraTask = '', model = null) {
   return session;
 }
 
-async function doWrite(body, cfg, res) {
+// opts.note：调用方想让作者看见的【开写缘由】（例：从无状态自动改道到窗口模式）。
+// 【必须从这儿走，不能在调用前 pushLog】血泪（2026-09-17 王莽）：无状态入口先 pushLog 了
+// 「Antigravity 没法无头跑 → 自动改用窗口模式」，转头 doWrite 开头一句 rtOf(slug).logs = []
+// 把它连同一切当场抹掉——作者点完写作，日志里第一条是「确保 profile」，
+// 没有任何一个字解释为什么模式变了，看起来就是"点了没反应"。
+// 缘由得在【清空之后】补，不能在之前发。
+async function doWrite(body, cfg, res, opts = {}) {
   const book = getBook(body.book);
   if (!book) return json(res, 400, { error: '找不到书：' + body.book });
   // 长驻续写：此刻 autopilot 还没起来，writingBusy 认不出"自己"，但认得出共创/无状态/后台写作在跑。
@@ -1830,10 +1999,32 @@ async function doWrite(body, cfg, res) {
     try { setBookWriteMode(book.slug, mode, every || 1); } catch {}
     setReviewEvery(book.slug, every);
   }
+  // 【必须把起点写死在指令里】血泪（《大宋第一女帝：我成了李清照》）：这条指令原来只写
+  // "请阅读 AGENTS.md 与 novel_bible.md，续写下一批 3 章并自检"，【一个字都没说从第几章开始】。
+  // 第一次点没问题（本来就从 001 起）；但会话死掉后再点一次「开始写作」，新窗口的 agent 上下文是空的，
+  // 读完 bible 就"续写下一批"——它眼里的下一批就是 001，于是从头重写了一遍：
+  // 那本书里 001红烛未剪/002火印 与 001新妇不睡/002西壁第三格 是同一场新婚夜的两个版本，
+  // chapter_index.md 里两个 001、两个 002 并排登记成"已写"，谁都没发现撞号。
+  // 导入的书走 buildResumeInstruction 一直是对的（它明写"确认当前最新章号、从最新章节之后接着写、
+  // 不要重写已写章节"）——新书这条落了这一段，补上，并且把【服务端算出来的真实最高章号】直接告诉它。
+  const already = bookStats(book);
+  const nextNum = (already?.maxChapter || 0) + 1;
+  const batchN = book.standards?.batchSize || 3;
   const instruction = body.task || (book.imported
     ? buildResumeInstruction(book)
-    : `请阅读 AGENTS.md 写作规范与 novel_bible.md，续写下一批 ${book.standards?.batchSize || 3} 章并自检。`);
+    : (already?.maxChapter > 0
+      ? `继续写《${book.title}》。本书【已经写到第 ${String(already.maxChapter).padStart(3, '0')} 章】，`
+        + `你要写的是【第 ${String(nextNum).padStart(3, '0')} 章起的下一批 ${batchN} 章】。`
+        + `动笔前先重建上下文：读 chapter_index.md 与 continuity_ledger.md，再读最近 2 章正文与本卷 outlines/ 中对应章号段的分章大纲，`
+        + `确认最新章号、主角处境、未回收伏笔、欠债与伤势。`
+        + `⚠️【严禁重写或改动任何已写章节、严禁重复使用已有章号】——新章一律从第 ${String(nextNum).padStart(3, '0')} 章往后编号；`
+        + `取章名前先在 chapter_index.md 全表检索，确保不与已有章名重复。`
+        + `写完把新章登记进 chapter_index.md、更新 continuity_ledger.md，并做常规批次自检。`
+        + `全程严格遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范。`
+      : `请阅读 AGENTS.md 写作规范与 novel_bible.md，从第 001 章开始写第一批 ${batchN} 章并自检。`));
   const slug = book.slug;
+  // 开写缘由：只要发得出去就发（下面清空日志的那条路径会在清空之后再补一次）
+  const sayNote = () => { if (opts.note) pushLog(slug, { level: 'act', msg: opts.note }); };
   // 已有活窗口 → 不再开第二个：直接把指令插进去并确保监控（点“写作”=继续处理）
   if (sessionLive(slug)) {
     const liveModel = getSession(slug)?.model || null;
@@ -1846,6 +2037,7 @@ async function doWrite(body, cfg, res) {
     } else {
       try {
         const r = await injectToBook(slug, instruction, cfg);
+        sayNote();
         pushLog(slug, { level: 'act', msg: '窗口已在运行 → 直接续写指令已送达' });
         await ensureAutopilot(slug, cfg);
         return json(res, 200, { ...r, mode: 'inserted' });
@@ -1853,6 +2045,7 @@ async function doWrite(body, cfg, res) {
     }
   }
   rtOf(slug).logs = [];
+  sayNote();   // ← 必须在清空之后：清空之前发的任何解释都会被上面这一行吃掉
   try {
     const session = await startWriting({
       book, model, instruction, cfg,
@@ -1860,6 +2053,9 @@ async function doWrite(body, cfg, res) {
       onFreshRestart: mkFresh(slug, cfg),
     });
     rtOf(slug).session = session;
+    // 把落章播报的水位定在【点写作这一刻】，而不是等看门狗 20 秒后自己去认：
+    // 否则这中间落的章会被当成"开写前就有的"，第一章永远播不出来。
+    _chapHigh.set(slug, already?.maxChapter || 0);
     return json(res, 200, { ok: true, instance: session.instance.id, pane: session.paneId });
   } catch (e) {
     pushLog(slug, { level: 'error', msg: e.message });
@@ -1961,3 +2157,5 @@ function readJson(req) {
     let d = ''; req.on('data', c => d += c); req.on('end', () => { try { resolve(d ? JSON.parse(d) : {}); } catch { resolve({}); } });
   });
 }
+
+

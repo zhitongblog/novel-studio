@@ -148,11 +148,26 @@ document.getElementById('e').addEventListener('input',e=>__ev.i.push({t:e.isTrus
     await new Promise(r => setTimeout(r, 800));
 
     const box = await evaluate(tab, `(function(){var r=document.getElementById('b').getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`);
+    // ⚠️ page_click 的坐标点击打的是【屏幕最前面那个窗口】，不是 tab_id 指定的那个（2026-09-13 实测，
+    // 详见 src/unzoo.mjs clickAt 注释）。前台恰好是别的 profile 的 Unzoo 窗口时，这一下静默落空、
+    // page_click 还返回 null。所以这里不能只断言 page_click：落空就改用 cdpClick（按 page-id 直投、
+    // 不看 OS 焦点）再验一次——"我们能造出可信点击"这条保证必须是确定的，
+    // 而"page_click 依赖窗口前后顺序"这条事实要记下来，不许被一条绿色测试掩盖。
     await clickAt(tab, box.x, box.y);
     await new Promise(r => setTimeout(r, 700));
-    const clicks = await evaluate(tab, `window.__ev.c`);
-    assert.ok(clicks?.[0]?.t === true, 'page_click 必须产出 isTrusted=true 的点击（替代已弃用的 /api/v1/click）');
+    let clicks = await evaluate(tab, `window.__ev.c`);
+    let via = 'page_click';
+    if (!clicks?.length) {
+      console.log('⚠ page_click 没落在目标页（前台窗口不是它）——改用 CDP 直投再验');
+      const { cdpClickAt } = await import('../src/unzoo.mjs');
+      await cdpClickAt(tab, box.x, box.y);
+      await new Promise(r => setTimeout(r, 700));
+      clicks = await evaluate(tab, `window.__ev.c`);
+      via = 'cdpClickAt';
+    }
+    assert.ok(clicks?.[0]?.t === true, `必须能产出 isTrusted=true 的坐标点击（page_click 与 CDP 直投都没成功；page_click 会跟着前台窗口跑）`);
     assert.strictEqual(clicks[0].x, box.x, '点击坐标要精确命中');
+    console.log(`  坐标可信点击走的是 ${via}`);
 
     await evaluate(tab, `(function(){document.getElementById('e').focus();return 1;})()`);
     await inputText(tab, '可信输入');

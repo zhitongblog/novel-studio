@@ -150,3 +150,43 @@ function makePublisher(client, { fanqieVolumes = [], volumeIndex = 1 } = {}) {
 }
 
 console.log('\n全部通过 ✅  编辑模式：不混批、按卷切卷、翻页等渲染');
+
+// —— 缺号不该毁掉整批（2026-09-14 实录）——
+// 《天皇》本地把 129《金流暗涌》改号成 089，而番茄上那一章仍挂在第129章 → 番茄根本没有"第89章"。
+// 原来同一章刷新重试 3 次就 pause 整批：230 章的活在第 36 章上停住，剩下 194 章一章没发。
+// 现在：同一章试 2 次仍找不到 → 记下、跳过、继续；但连着 5 个【不同的】章都找不到仍要停
+//（那是卷选错/页面不对，继续跑只会一路空转）。
+{
+  // pages: 卷1 只有这些章号；本地要改的章号里混着番茄没有的
+  const client = new FakeClient({ pages: { 1: [[90, 89, 88], [87, 86, 85]] } });
+  const pub = new FanqiePublisher(client);
+  pub.onLog = () => {};
+  const chapters = [88, 89, 90].map(n => ({ num: n, chapterNumber: n, title: `第${n}章 测试`, content: 'x', mode: 'edit' }));
+  // editChapter 打桩：番茄上没有第 89 章
+  pub.editChapter = async (_ch, num) => (num === 89 ? { success: false, notFound: true, message: `未找到第 ${num} 章` }
+    : { success: true });
+  pub.chapters = chapters;
+  pub.config = { editMode: true, intervalSeconds: 0 };
+  pub.status = 'running';
+  pub.currentIndex = 0;
+  await pub.editLoop();
+  assert.equal(pub.status, 'completed', `缺一个章号不该把整批停掉，实际 status=${pub.status}（${pub.interruptReason || ''}）`);
+  assert.deepEqual(pub.skipped, [89], '跳过的章号要记下来，好在收尾报给作者');
+  console.log('✓ 番茄上缺某个章号 → 跳过并记录，其余照发');
+}
+
+{
+  // 连着 5 个都找不到 = 系统性问题（卷选错/页面不对），必须停
+  const client = new FakeClient({ pages: { 1: [[1]] } });
+  const pub = new FanqiePublisher(client);
+  pub.onLog = () => {};
+  pub.chapters = [10, 11, 12, 13, 14, 15].map(n => ({ num: n, chapterNumber: n, title: `第${n}章`, content: 'x', mode: 'edit' }));
+  pub.editChapter = async (_ch, num) => ({ success: false, notFound: true, message: `未找到第 ${num} 章` });
+  pub.config = { editMode: true, intervalSeconds: 0 };
+  pub.status = 'running';
+  pub.currentIndex = 0;
+  await pub.editLoop();
+  assert.equal(pub.status, 'paused', '连着 5 章都找不到必须停下来等人看');
+  assert.ok((pub.skipped || []).length >= 5, `应记录跳过的章，实际 ${JSON.stringify(pub.skipped)}`);
+  console.log('✓ 连着 5 章找不到 → 判为卷/页面不对，停下');
+}

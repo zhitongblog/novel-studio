@@ -630,12 +630,21 @@ $('#rwGo').addEventListener('click', async () => {
   const mode = $('#rwMode').value;
   const range = $('#rwRange').value.trim();
   const note = $('#rwNote').value.trim();
-  if (mode === 'range' && !range) { $('#rwErr').textContent = '请填重写范围（如 001-008 或 卷01）'; return; }
+  const useReviews = $('#rwUseReviews')?.checked !== false;
+  // 范围可以留空——那表示"让它自己从复检报告里找出该重写哪些章"。
+  // 但前提是勾了「按复检报告重写」：既不填范围、又不让它读报告，就真的没有任何依据可循了。
+  if (mode === 'range' && !range && !useReviews) {
+    $('#rwErr').textContent = '要么填重写范围（如 001-008 或 卷01），要么勾上「按复检报告重写」让它自己找问题章节';
+    return;
+  }
+  if (mode === 'range' && !range && !confirm('范围留空：将由 AI 通读复检报告，自己找出仍未解决的问题章节并整章重写（一次最多 10 章，开始前自动 git 存档）。确定？')) return;
   if (mode === 'reproject' && !confirm('整本重立项会让作者从头重写 bible+大纲+全部正文（旧内容已 git 存档可回退）。确定？')) return;
   $('#rwGo').disabled = true; $('#rwErr').textContent = '准备中…';
   try {
     const url = mode === 'reproject' ? '/api/book/reproject' : '/api/book/rewrite';
-    const r = await api(url, 'POST', { book: CUR.slug, range, note });
+    // useReviews：让重写指令自己去 reviews/ 里找本范围相关的条目当必办清单。
+    // 之前这条链是断的——复检把问题写进报告，重写却不知道报告存在，只能靠人复制粘贴。
+    const r = await api(url, 'POST', { book: CUR.slug, range, note, useReviews });
     $('#rewriteModal').classList.add('hidden');
     if (r.mode === 'started') { setWriting(true); openStream(CUR.slug); }
     toast((r.mode === 'inserted' ? '已穿插重写指令' : '已开窗重写') + (r.snapshot ? '（存档 ' + r.snapshot + '）' : ''));
@@ -1442,7 +1451,40 @@ function openOutline() {
     .concat(vols.map(v => `<option value="${esc(v)}">${esc(v)} 大纲</option>`)).join('');
   $('#olStart').disabled = false; $('#olStart').textContent = '开始审稿 ▶';
   $('#outlineModal').classList.remove('hidden');
+  olLoadExistingList();
 }
+
+// 列出 reviews/ 下已有的大纲审稿报告。
+// 为什么要有这一栏：审稿门的"逐条挑"只在卷边界那一刻存在，状态在内存里，引擎一重启就没了；
+// 而报告是文件，一直躺在硬盘上。没有这个入口的话，那份 30KB 的报告就只能靠人肉搬运。
+async function olLoadExistingList() {
+  const sel = $('#olExisting'); if (!sel || !CUR) return;
+  sel.innerHTML = '<option value="">（读取中…）</option>';
+  try {
+    const r = await api('/api/book/outline-reviews', 'POST', { book: CUR.slug });
+    const list = r.reviews || [];
+    if (!list.length) { sel.innerHTML = '<option value="">（还没有审稿报告，先点上面「开始审稿」）</option>'; return; }
+    sel.innerHTML = list.map(x => {
+      const when = x.mtime ? new Date(x.mtime).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+      return `<option value="${esc(x.file)}">${esc(x.scope || x.file)}｜${x.items} 条意见｜${esc(when)}</option>`;
+    }).join('');
+  } catch (e) { sel.innerHTML = '<option value="">（读取失败：' + esc(e.message) + '）</option>'; }
+}
+
+$('#olLoadExisting')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const file = $('#olExisting').value;
+  if (!file) { $('#olErr').textContent = '先选一份报告'; return; }
+  const btn = $('#olLoadExisting'); btn.disabled = true; const old = btn.textContent; btn.textContent = '载入中…';
+  $('#olErr').textContent = '';
+  try {
+    const r = await api('/api/book/outline-review-load', 'POST', { book: CUR.slug, file });
+    $('#outlineModal').classList.add('hidden');
+    await showReviewBar();          // 复用原来那条"逐条挑"的动作条，不另造流程
+    toast(`已载入 ${r.items.length} 条意见（${r.scope}），勾完点「让作者按此修订」`);
+  } catch (e) { $('#olErr').textContent = '载入失败：' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+});
 $('#btnOutline').addEventListener('click', openOutline);
 $('#btnRebuildOutline').addEventListener('click', async () => {
   if (!CUR) return;
@@ -1817,6 +1859,7 @@ async function openCover() {
   $('#cvTheme').value = 'ink';
   $('#cvErr').textContent = ''; $('#coverModal').classList.remove('hidden');
   cvLoadChatProfiles();   // 填充 ChatGPT 账号下拉
+  cvLoadGeminiProfiles(); // 填充 Gemini 账号下拉
   // 若书里已有 AI 底图，预加载并默认用它
   if (CUR.stats?.coverBg) {
     try { await loadCoverBg(`${API}/api/book/cover-bg?book=${encodeURIComponent(CUR.slug)}&t=${CUR.stats.coverBgMtime || 0}`); $('#cvTheme').value = 'ai'; } catch {}
@@ -1844,12 +1887,15 @@ $('#cvGenAI').addEventListener('click', async () => {
   finally { btn.disabled = false; btn.textContent = old; }
 });
 // ===== ChatGPT 网页版生成封面（免费·慢：后台跑 + 轮询状态）=====
-async function cvLoadChatProfiles() {
-  const sel = $('#cvChatProfile'); if (!sel) return;
+async function cvLoadChatProfiles() { await cvLoadProfilesInto('#cvChatProfile', 'ChatGPT'); }
+// Gemini 那一栏用同一份账号列表（都是 Unzoo 的浏览器账号），只是提示语不同。
+async function cvLoadGeminiProfiles() { await cvLoadProfilesInto('#cvGemProfile', 'Gemini'); }
+async function cvLoadProfilesInto(selId, siteName) {
+  const sel = $(selId); if (!sel) return;
   try {
     if (!WEB_PROFILES) { const r = await api('/api/unzoo/profiles', 'POST', {}); WEB_PROFILES = r.profiles || []; }
     const remembered = (CUR && localStorage.getItem(webProfileKey(CUR.slug))) || (CUR?.publish || {}).profilePath || '';
-    if (!WEB_PROFILES.length) { sel.innerHTML = '<option value="">（未检测到 Unzoo 账号，请先开浏览器并登录 ChatGPT）</option>'; return; }
+    if (!WEB_PROFILES.length) { sel.innerHTML = '<option value="">（未检测到 Unzoo 账号，请先开浏览器并登录 ' + siteName + '）</option>'; return; }
     sel.innerHTML = WEB_PROFILES.map(p => {
       const tag = p.running ? '○运行中' : '·未启动';
       const label = p.dir && p.dir !== p.name ? `${p.name} · ${p.dir}` : p.name;
@@ -1928,6 +1974,49 @@ $('#cvGrabChatGPT')?.addEventListener('click', async () => {
     hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
   }
 });
+// ===== Gemini 网页版生成封面（免费·快：后台跑 + 轮询状态，与 ChatGPT 那条共用 coverJobs 状态机）=====
+// 生成与抓取只差一个端点和几句文案，所以做成同一个工厂，省得两份几乎一样的轮询代码各自跑偏。
+let cvGemPoll = null;
+function cvGeminiRun(apiPath, btnId, runningText, doneToast) {
+  return async () => {
+    if (!CUR) return;
+    const profilePath = $('#cvGemProfile').value;
+    if (!profilePath) { $('#cvErr').textContent = '请先选一个【已登录 Gemini】的浏览器账号'; return; }
+    localStorage.setItem(webProfileKey(CUR.slug), profilePath);
+    const btn = $(btnId); btn.disabled = true; const old = btn.textContent;
+    $('#cvErr').textContent = '';
+    const hint = $('#cvGemHint'); const hintOld = hint.textContent;
+    try {
+      await api(apiPath, 'POST', { book: CUR.slug, profilePath, prompt: $('#cvPrompt').value.trim() || undefined });
+      btn.textContent = runningText;
+      if (cvGemPoll) clearInterval(cvGemPoll);
+      cvGemPoll = setInterval(async () => {
+        try {
+          const st = await api('/api/book/gen-cover-status', 'POST', { book: CUR.slug });
+          if (st.msg) hint.textContent = '⏳ ' + st.msg;
+          if (st.status === 'done') {
+            clearInterval(cvGemPoll); cvGemPoll = null;
+            await loadCoverBg(API + st.url + '&r=' + Date.now());
+            $('#cvTheme').value = 'ai'; drawCover();
+            if (st.prompt && !$('#cvPrompt').value.trim()) $('#cvPrompt').value = st.prompt;
+            hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+            toast(doneToast);
+          } else if (st.status === 'error') {
+            clearInterval(cvGemPoll); cvGemPoll = null;
+            $('#cvErr').textContent = 'Gemini 失败：' + (st.error || '未知');
+            hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+          }
+        } catch {}
+      }, 5000);
+    } catch (e) {
+      $('#cvErr').textContent = '启动失败：' + e.message;
+      hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
+    }
+  };
+}
+$('#cvGenGemini')?.addEventListener('click', cvGeminiRun('/api/book/gen-cover-gemini', '#cvGenGemini', '✨ Gemini 生成中…', 'Gemini 封面已生成'));
+$('#cvGrabGemini')?.addEventListener('click', cvGeminiRun('/api/book/grab-cover-gemini', '#cvGrabGemini', '📥 抓取中…', '已抓取 Gemini 封面'));
+
 // ===== 更换番茄封面（把 cover.png 推到番茄；开关：全自动提交 / 停在待提交）=====
 let cvFqPoll = null;
 $('#cvPushFanqie')?.addEventListener('click', async () => {

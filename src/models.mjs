@@ -1,5 +1,7 @@
-// 模型 CLI 支持：codex / claude / gemini 的检测、启动命令、初始指令注入方式
+// 模型 CLI 支持：codex / claude / gemini / qwen / trae / agy 的检测、启动命令、初始指令注入方式
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export const MODELS = {
   codex: {
@@ -45,6 +47,29 @@ export const MODELS = {
     },
     note: '读取本书目录 CLAUDE.md 作为写作规范。默认带 --dangerously-skip-permissions（不弹审批框，'
       + 'autopilot 不必靠认屏幕来点同意）；要恢复弹窗设 claudeSkipPermissions=false。',
+  },
+  agy: {
+    id: 'agy',
+    name: 'Antigravity（Google）',
+    bin: 'agy',
+    untermAgentId: 'agy',
+    // 实测 agy 1.1.27 的接口与 claude 几乎一致：
+    //   -i / --prompt-interactive  带初始指令进交互（编排走这条）
+    //   -p / --print               一次性喂 prompt（立项/简介那类元任务走这条）
+    //   --dangerously-skip-permissions  自动批准所有工具权限请求
+    // 默认加免审批开关，理由与 claude 那条完全相同（见下方 claude.seedArgs 的长注释）：
+    // autopilot 的职责本来就是无条件替作者点同意，不弹窗只是把"每次都点"变成"一次都不用点"，
+    // 并没有放宽实际权限；而"认弹窗"是这套编排里最脆的一环，能绕开就绕开。
+    // 要恢复弹窗设 config.agySkipPermissions=false。
+    seedArgs: (instruction, cfg) => {
+      const args = [];
+      if (!cfg || cfg.agySkipPermissions !== false) args.push('--dangerously-skip-permissions');
+      args.push('-i', instruction);
+      return args;
+    },
+    // ⚠️ agy 装完默认【不在 PATH】里（可用 `agy install` 配好，或由 detectModel 的兜底路径找到）。
+    note: 'Google Antigravity 的 CLI。读本书目录 AGENTS.md 作为写作规范。'
+      + '装完若提示"不在 PATH"，跑一次 `agy install` 配置环境变量，或让程序按默认安装路径自动找。',
   },
   gemini: {
     id: 'gemini',
@@ -195,6 +220,31 @@ export function getModel(id) {
 }
 
 // 检测某个 CLI 是否可用（在 PATH 中能解析到）
+// 各家 CLI 装完但没进 PATH 时的默认安装位置。只在 where/which 找不到时才查。
+function fallbackBins(id) {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const local = process.env.LOCALAPPDATA || (home && path.join(home, 'AppData', 'Local')) || '';
+  const map = {
+    // 实测：agy 1.1.27 装在 %LOCALAPPDATA%\agy\bin\agy.exe，默认不改 PATH
+    agy: [local && path.join(local, 'agy', 'bin', 'agy.exe'), home && path.join(home, '.agy', 'bin', 'agy')],
+    claude: [home && path.join(home, '.local', 'bin', 'claude.exe'), home && path.join(home, '.local', 'bin', 'claude')],
+  };
+  return (map[id] || []).filter(Boolean);
+}
+
+// 真正拿去 spawn 的可执行文件：PATH 里有就用命令名（便携），没有就用检测到的绝对路径。
+// 血泪：agy 装在 %LOCALAPPDATA%gyin 且【不进 PATH】，detectModel 靠兜底路径认出来了，
+// 但 runModelOnce / launch.ps1 仍然照 m.bin='agy' 去跑 → "'agy' 不是内部或外部命令"，
+// 而那句报错还会被当成"模型的回答"洗进简介里。界面上显示"可用"、一跑就废，最难查。
+export function resolveBin(id) {
+  const d = detectModel(id);
+  if (!d || !d.available) return getModel(id)?.bin || id;
+  // 只有【靠兜底路径找到】的才用绝对路径。where/which 能找到的一律仍用命令名——
+  // npm 装的 shim（codex/gemini/qwen）在 Windows 上是无扩展名文件，靠 PATHEXT 才解析到 .cmd，
+  // 直接拿 where 报的那个无扩展名路径去 spawn 反而跑不起来。
+  return d.viaFallback && d.path ? d.path : (getModel(id)?.bin || id);
+}
+
 export function detectModel(id) {
   const m = getModel(id);
   if (!m) return { id, available: false, reason: '未知模型' };
@@ -211,11 +261,54 @@ export function detectModel(id) {
   const probe = isWin
     ? spawnSync('where', [m.bin], { encoding: 'utf8' })
     : spawnSync('which', [m.bin], { encoding: 'utf8' });
-  const path = (probe.stdout || '').trim().split(/\r?\n/)[0] || '';
-  const available = probe.status === 0 && !!path;
-  return { id: m.id, name: m.name, bin: m.bin, available, path, note: m.note, untermAgentId: m.untermAgentId };
+  let path = (probe.stdout || '').trim().split(/\r?\n/)[0] || '';
+  let available = probe.status === 0 && !!path;
+  // 【PATH 之外的兜底】有些 CLI 装完默认不改 PATH（agy 就是：装在
+  // %LOCALAPPDATA%\agy\bin\agy.exe，要另跑一次 `agy install` 才进 PATH）。
+  // 只靠 where/which 会把"装了但没配 PATH"报成"不可用"——用户明明装了却在界面上选不到，
+  // 完全看不出为什么。所以再按各家的默认安装位置找一遍。
+  let viaFallback = false;
+  if (!available) {
+    for (const p of fallbackBins(m.id)) {
+      try { if (fs.existsSync(p)) { path = p; available = true; viaFallback = true; break; } } catch {}
+    }
+  }
+  return { id: m.id, name: m.name, bin: m.bin, available, path, viaFallback, note: m.note, untermAgentId: m.untermAgentId };
 }
 
 export function detectAll() {
   return Object.keys(MODELS).map(detectModel);
+}
+
+// 把一个目录写进 agy 的 trustedWorkspaces，免得窗口起来先弹一个"是否信任此项目"。
+// agy 把这份名单存在 ~/.gemini/antigravity-cli/settings.json（实测 1.2.2），只有这一个键。
+// 认弹窗是这套编排里最脆的一环（claude 那个默认停在 "No, exit" 的信任框害我们关过 agent），
+// 能从源头绕开就绕开。写失败不算错——最多是弹窗照旧，autopilot 那条路也已经能应答了。
+export function trustAgyWorkspace(dir) {
+  if (!dir) return false;
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  if (!home) return false;
+  const f = path.join(home, '.gemini', 'antigravity-cli', 'settings.json');
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(f, 'utf8')) || {}; } catch {}
+  const list = Array.isArray(cfg.trustedWorkspaces) ? cfg.trustedWorkspaces : [];
+  const want = path.resolve(dir);
+  if (list.some(x => path.resolve(String(x)) === want)) return false;
+  cfg.trustedWorkspaces = [...list, want];
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify(cfg, null, 2), 'utf8');
+  return true;
+}
+
+// 这个模型能不能【无头跑】（一次性 spawn、没有窗口、没人能点同意）。
+// agy 不行：它的交互模式(-i)能自动登录，但那份凭据【不落盘】——~/.gemini 下不生成任何 token 文件，
+// 于是非交互的 -p 每次都从零发起 OAuth：打印一条 accounts.google.com 链接、等人贴授权码（60 秒超时），
+// 而授权码与发起登录的进程用 PKCE 绑定，进程一死即作废。后台任务里无解（2026-09-13 实测）。
+// 用处：作者选了「无状态省钱模式」而书绑的是 agy 时，不该白跑一批再报错，
+// 而应该【自动改用有窗口的模式】去写——那条路 agy 是通的（立项实测跑通过）。
+export function canRunHeadless(modelId) {
+  const m = getModel(modelId);
+  if (!m) return false;
+  if (m.kind === 'web' || m.kind === 'api') return false;   // 这两类本来就不走 spawn
+  return m.id !== 'agy';
 }

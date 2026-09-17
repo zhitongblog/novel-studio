@@ -3,11 +3,20 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { getModel, detectAll } from './models.mjs';
+import { getModel, detectAll, resolveBin } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { STYLES, getStyle } from './styles.mjs';
 
 // runModelOnce 能非交互驱动的本地 CLI（一次性喂 prompt 走 stdin 取文本）。trae 用法不同(run 子命令)，不在此列。
+//
+// ⚠️【agy 不在这张表里，是有原因的，别再加回来】2026-09-13 实测：
+// agy 的交互模式(-i)能自动登录（窗口里显示 lixd220@gmail.com / Google AI Pro，直接开跑），
+// 但那份凭据【不落盘】——~/.gemini 下没有任何新文件，只有 trustedWorkspaces 被更新。
+// 于是非交互的 -p 每次都从零要 OAuth：打印一条 accounts.google.com 链接、等人贴授权码（60 秒超时），
+// 而授权码和发起那次登录的进程用 PKCE 绑定，进程一死就作废——在后台任务里根本无解。
+// 结果就是作者点「AI 起书名」看到的那句「AI 返回未能解析为书名候选」。
+// 所以：agy 只做【窗口里的写作模型】（那条路是好的，立项实测通过），
+// 书名/简介/文风这些一次性元任务一律交给 codex/gemini/qwen/claude。
 const CLI_GEN_PREF = ['codex', 'gemini', 'qwen', 'claude'];
 
 // 把「用于文本生成的模型」解析成一个真正能本地 spawn 的 CLI：
@@ -90,8 +99,14 @@ export function generateSynopsis(book, cfg) {
 const CLI_FAIL_PATTERNS = [
   [/hit your usage limit|usage limit (reached|exceeded)|out of credits|quota exceeded|额度.{0,4}(用尽|不足|耗尽)/i, '额度已用尽'],
   [/rate ?limit|too many requests|\b429\b/i, '被限流'],
-  [/not logged ?in|please log ?in|login required|unauthorized|\b401\b|authentication failed/i, '未登录或鉴权失败'],
+  [/not logged ?in|please log ?in|login required|unauthorized|\b401\b|authentication (failed|required)|accounts[.]google[.]com|visit the URL to log in/i, '未登录或鉴权失败'],
   [/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)/i, '网络/代理不通'],
+  // 命令根本不在 PATH（agy 就是这样：装了但没跑 `agy install`）。这句报错绝不能被当成模型的回答。
+  [/is not recognized as an internal|command not found|不是内部或外部命令|No such file or directory/i, '命令找不到（没装或不在 PATH）'],
+  // Google 按出口 IP 的地区拒绝（agy/gemini 常见）。挂着代理反而会踩到这条——见 runModelOnce 里的 noProxy 说明。
+  [/User location is not supported|FAILED_PRECONDITION.*location/i, '该地区不支持（多半是代理出口地区被 Google 拒绝，试试关代理）'],
+  // 参数被 shell 拼碎时 agy 的原话，绝不能当成模型的回答洗进书名/简介里
+  [/unexpected argument|flag needs an argument|Prompts are read only from/i, '命令行参数没传对'],
 ];
 
 // 判断一次 CLI 输出是不是"跑失败了"。返回 {why, detail} 或 null。
@@ -107,6 +122,68 @@ function detectCliFailure(raw, prompt) {
   return { why: hit[1], detail: line.slice(0, 160) };
 }
 
+// —— 代理该不该开：别猜，记住上次什么配置真的成功过 ——
+// 血泪：09-13 实测 agy【直连通、代理被 Google 按地区拒】，我就把"agy 不用代理"写死进代码；
+// 09-15 同一台机器正好反过来（直连 EOF、代理正常），那本书的窗口每轮都失败、几个小时白跑。
+// 代理是节点轮换的，"哪种配置能用"本来就会变，写死必然过期。
+// 所以：按模型记住上次成功的模式，失败了就翻过来再试一次，并把结果记下来。
+const NETMODE_FILE = path.join(os.homedir(), '.novel-studio', 'netmode.json');
+function readNetMode() { try { return JSON.parse(fs.readFileSync(NETMODE_FILE, 'utf8')) || {}; } catch { return {}; } }
+export function getNetMode(id) { const v = readNetMode()[id]; return v === 'proxy' || v === 'direct' ? v : null; }
+export function rememberNetMode(id, mode) {
+  try {
+    const m = readNetMode(); if (m[id] === mode) return;
+    m[id] = mode;
+    fs.mkdirSync(path.dirname(NETMODE_FILE), { recursive: true });
+    fs.writeFileSync(NETMODE_FILE, JSON.stringify(m, null, 2), 'utf8');
+  } catch {}
+}
+// 这次要不要挂代理：优先用记住的模式，其次跟随配置。
+function wantProxy(id, cfg) {
+  const remembered = getNetMode(id);
+  if (remembered) return remembered === 'proxy';
+  return !!cfg?.enableProxy;
+}
+function applyProxy(env, on) {
+  const keys = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
+  if (on) { const px = proxyUrl(); if (px) for (const k of keys) env[k] = px; }
+  else for (const k of keys) delete env[k];
+  return env;
+}
+// 这次失败像不像"网络/地区"这一类（值得翻过来再试一次）
+const NET_FAIL_RE = /User location is not supported|FAILED_PRECONDITION|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)|eligibility check failed|userinfo": EOF|Request not allowed|403/i;
+export function looksNetworkFailure(out) { return NET_FAIL_RE.test(String(out || '')); }
+
+// 一次性调用某个 CLI 时，参数怎么摆、prompt 从哪进、要不要过 shell。抽成纯函数只为可测——
+// 这三件事各踩过一次坑，全都表现为"AI 返回解析不了"，从报错完全看不出真因。
+//
+// 铁律：【prompt 进了 argv 就绝不能开 shell】。shell:true 下 Node 只是把 argv 拼成一条命令行、
+// 不做任何转义，整段中文提示词会被空格切碎——agy 于是回一句 `unexpected argument "3".` 就退出。
+// shell 的唯一用途是让 Windows 解析 npm 的 .cmd shim（codex/gemini/qwen 那种没扩展名的壳），
+// 所以只有【prompt 走 stdin】且【bin 不是真 .exe】时才需要它。
+export function planCliInvocation(useId, prompt, bin) {
+  let args;
+  let viaStdin = true;
+  if (useId === 'codex') args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
+  else if (useId === 'agy') {
+    // agy 的 -p/--print 是【带参数】的（不带就报 flag needs an argument: -p），不像 claude/gemini 从 stdin 读。
+    // 照 stdin 那套喂它，只会拿回一屏 usage 帮助——而那玩意会被当成"模型的回答"洗进简介里。
+    args = ['--dangerously-skip-permissions', '-p', prompt];
+    viaStdin = false;
+  } else if (useId === 'claude') {
+    // ⚠️【无头模式必须自带免审批】claude -p 在无头下【没法弹审批框】，一旦模型要用工具就被自动拒绝，
+    // 然后一个字都不产出，报错原文：「a tool required the "command" permission that headless mode
+    // cannot prompt for, so it was auto-denied」。作者那边看到的就是"本批无产出，停止"。
+    // 元任务（起书名/简介）本来也不用工具，带上这个开关无害；而写正文那条必须要有。
+    args = ['-p', '--dangerously-skip-permissions'];
+  } else args = ['-p', '--yolo']; // gemini / qwen：-y/--yolo 自动批准工具调用，同理
+  const useShell = viaStdin && !/\.exe$/i.test(String(bin || ''));
+  return { args, viaStdin, useShell };
+}
+
+// 只为测试导出：判定一次 CLI 输出是不是"跑失败了"（见 test/cli-invocation.test.mjs）。
+export const detectCliFailureForTest = detectCliFailure;
+
 // 非交互跑一次模型，拿文本输出
 export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
   // 网页版/无 bin 模型不能本地 spawn → 解析到一个可用的本地生成 CLI（立项/书名/简介等元任务）
@@ -116,24 +193,41 @@ export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
       + '请先装一个 CLI（如 qwen / gemini / codex），或在上一步用「✍️ 我自己起名（跳过 AI 建议）」直接立项。');
   }
   const m = getModel(useId);
-  const env = { ...process.env };
-  if (cfg?.enableProxy) {
-    const px = proxyUrl();
-    if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; }
+  const bin = resolveBin(useId);
+  const { args, viaStdin, useShell } = planCliInvocation(useId, prompt, bin);
+
+  // 跑一次（proxyOn 决定挂不挂代理）
+  const once = (proxyOn) => {
+    const env = applyProxy({ ...process.env }, proxyOn);
+    const r = spawnSync(bin, args, {
+      encoding: 'utf8', timeout: timeoutMs, ...(viaStdin ? { input: prompt } : {}), cwd: os.tmpdir(),
+      env, maxBuffer: 8 * 1024 * 1024, shell: useShell, windowsHide: true,
+    });
+    if (r.error) throw new Error(m.name + ' 调用失败：' + r.error.message);
+    return (r.stdout || '') + String.fromCharCode(10) + (r.stderr || '');
+  };
+
+  // 显式配了"这个模型走直连"就照办，不做协商
+  const forcedDirect = Array.isArray(cfg?.noProxyModels) && cfg.noProxyModels.includes(useId);
+  let proxyOn = forcedDirect ? false : wantProxy(useId, cfg);
+  let out = once(proxyOn);
+  let fail = detectCliFailure(out, prompt);
+
+  // 【失败像网络/地区问题 → 把代理翻过来再试一次】别再让我靠猜：
+  // 同一台机器两天里 agy 的可用配置正好反了个个儿（见本文件 netmode 那段注释）。
+  if (fail && !forcedDirect && looksNetworkFailure(out)) {
+    const flipped = !proxyOn;
+    const out2 = once(flipped);
+    const fail2 = detectCliFailure(out2, prompt);
+    if (!fail2) {
+      rememberNetMode(useId, flipped ? 'proxy' : 'direct');   // 记住这次成功的模式，下次先用它
+      return out2;
+    }
+    out = out2; fail = fail2;   // 两种都不行 → 报后一次的错（更接近当前网络真相）
+  } else if (!fail) {
+    rememberNetMode(useId, proxyOn ? 'proxy' : 'direct');
   }
-  // prompt 走 stdin（避免参数里 JSON 双引号/中文在 Windows cmd 下的引号地狱）；
-  // shell:true 让 Windows 能解析 npm 的 .cmd shim（codex/claude/gemini/qwen 都是 shim）。
-  let args;
-  if (useId === 'codex') args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
-  else if (useId === 'claude') args = ['-p'];
-  else args = ['-p']; // gemini / qwen（gemini-cli 分支，同样 -p + stdin）
-  const r = spawnSync(m.bin, args, {
-    encoding: 'utf8', timeout: timeoutMs, input: prompt, cwd: os.tmpdir(),
-    env, maxBuffer: 8 * 1024 * 1024, shell: true, windowsHide: true,
-  });
-  if (r.error) throw new Error(m.name + ' 调用失败：' + r.error.message);
-  const out = (r.stdout || '') + '\n' + (r.stderr || '');
-  const fail = detectCliFailure(out, prompt);
+
   if (fail) { const e = new Error(`${m.name} 跑不动：${fail.why}${fail.detail ? '（' + fail.detail + '）' : ''}`); e.cliFailed = useId; throw e; }
   return out;
 }
@@ -398,10 +492,62 @@ export function buildReviseSettingInstruction(book, { target, scope, instruction
 }
 
 // 范围重写：把指定范围的章节【推倒重写】（不是润色）。单行。
-export function buildRewriteInstruction(book, range, note) {
-  const r = (range || '全书').trim();
+// 列出本书 reviews/ 下的复检报告文件名（只列名，正文让 agent 自己去读——报告动辄上千行，塞进指令里没法要）。
+export function reviewFilesOf(book) {
+  try {
+    return fs.readdirSync(path.join(book.dir, 'reviews'))
+      .filter(f => /\.md$/i.test(f))
+      .sort();
+  } catch { return []; }
+}
+
+// useReviews：把「按复检报告重写」接上。
+// 为什么需要：复检发现问题 → 写进 reviews/*.md → 但重写指令原来【完全不知道报告存在】，
+// 只有一段自由文本「重点要求」，等于要作者把报告里那一条人肉复制粘贴过来。
+// 而报告现在十一轮、一千两百多行，翻起来比重写还累。勾上这个就自动让 agent 先去报告里
+// 检索与本范围相关的条目，把它们当成本次必须解决的清单。
+// range 留空 = 【自动定范围】：哪几章有问题是报告说了算，不该反过来要作者先知道。
+// 作者原话："必须指定章节，这个逻辑不对，不是自动重写。"
+// maxChapters：一次最多重写多少章。整章重写是不可逆的大改，报告里攒了十几轮未决项，
+// 不设上限它可能一口气动几十章——超出就先把清单摆出来让作者分批过目。
+export function buildRewriteInstruction(book, range, note, { useReviews = false, maxChapters = 10 } = {}) {
+  const auto = !String(range || '').trim() && useReviews;
+  const r = auto ? '' : (range || '全书').trim();
   const focus = note ? `本次重写的重点要求：${String(note).replace(/[\r\n]+/g, ' ')}。` : '';
-  const s = `对《${book.title}》的【范围 ${r}】做【推倒重写】——不是润色、是从头写出更好的版本（旧版本已 git 存档、可回退）。` +
+  const files = useReviews ? reviewFilesOf(book) : [];
+  const reportList = files.length ? `本书 reviews/ 下有这些报告——${files.join('、')}。` : '';
+  const caveat = '⚠️ 报告是历史记录，可能已经过期或记录过宽（此前多轮就纠正过好几处）：'
+    + '报告与正文／novel_bible.md 冲突时【一律以正文与 bible 为准】，并在报告小节里说明哪一条对不上。';
+
+  if (auto) {
+    // 【自动定范围】先找出还没解决的问题章节 → 报清单 → 再逐章重写。
+    const a = `对《${book.title}》做【按复检报告重写】——由你自己从报告里找出该重写哪些章，作者不指定范围。${reportList}`
+      + `第一步【定范围】：通读 reviews/ 下的全部报告，把其中【仍未解决】的条目挑出来`
+      + `（报告里已标注"已就地修正／已完成"的跳过；只留"隐患／未决项／需要整章重写／给了方案但没执行"这类），`
+      + `再逐条核对正文确认问题【现在确实还在】——报告可能已经过期。`
+      + `然后列出【真正需要整章重写的章节清单】，每章写明：章号、出自报告哪一条、为什么必须整章重写而不是就地改。`
+      + `把这份清单写在你的第一条回复里。${caveat}`
+      + `⚠️ 一次最多重写 ${maxChapters} 章：清单超过这个数就【只重写其中最该先动的 ${maxChapters} 章】，`
+      + `其余在报告里列成"下一轮待办"，不要一口气全动——整章重写不可逆，作者需要分批过目。`
+      + `若逐条核对下来【一章都不需要整章重写】（问题都能就地改、或早已解决），就【什么都不要改】，`
+      + `直接在报告里写明结论并停下——不要为了有产出而制造重写。`
+      + `第二步【重写】：把清单里每一章整章重写、覆盖原 .txt；动笔前先读 novel_bible.md、对应的 outlines 分章大纲，`
+      + `以及该章【之后】已写的章节，确保新版与后文在人物、伏笔、设定、时间线上严丝合缝。`
+      + `章号与卷目录结构保持不变（章名要调整则同步改 chapter_index.md）。${focus}`
+      + `严禁改动清单之外的章节、不要新增后续章节。`
+      + `第三步【交代】：逐章自检，更新 chapter_index.md 与 continuity_ledger.md，`
+      + `并把"改了哪几章、各解决了报告里的哪一条、还剩哪些没动"追加写进 reviews/复检-全书.md。`
+      + `全程严格遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范，尤其【题材承诺兑现】【节奏与格局】【连续性】；`
+      + `文风一律以 style_refs/ 的范本为准。`;
+    return a.replace(/[\r\n]+/g, ' ');
+  }
+
+  const fromReviews = files.length
+    ? `第0步【先读复检报告】：${reportList}`
+      + `先在里面检索与【范围 ${r}】相关的条目（硬伤／隐患／未决项／建议／方案），逐条列成本次重写【必须解决的清单】，`
+      + `写在你的第一条回复里；重写完成后逐条核对是否真的解决了，没解决的要说明为什么。${caveat}`
+    : '';
+  const s = `对《${book.title}》的【范围 ${r}】做【推倒重写】——不是润色、是从头写出更好的版本（旧版本已 git 存档、可回退）。` + fromReviews +
     `第一步：通读 novel_bible.md、该范围对应的 outlines 分章大纲，以及范围【之后】已写的章节，确保新版与后文在人物、伏笔、设定、时间线上严丝合缝。` +
     `第二步：把范围内每一章【整章重写】，覆盖原 .txt 文件；章号与卷目录结构保持不变（若大纲要求调整命名则同步改 chapter_index.md）。${focus}` +
     `第三步：逐章自检并更新 chapter_index.md。严禁改动范围之外的章节、不要新增后续章节。` +

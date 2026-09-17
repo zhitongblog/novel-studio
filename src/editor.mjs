@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { getModel, detectAll } from './models.mjs';
+import { getModel, detectAll , resolveBin } from './models.mjs';
+import { planCliInvocation } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 
 function readSafe(p) { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } }
@@ -42,17 +43,20 @@ function runModelOnceAsync(model, prompt, cfg, timeoutMs = 180000) {
       const px = proxyUrl();
       if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; }
     }
-    const args = model === 'codex'
-      ? ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox']
-      : ['-p'];
-    const cp = spawn(m.bin, args, { env, cwd: os.tmpdir(), shell: true, windowsHide: true });
+    // 参数怎么摆、prompt 从哪进、要不要过 shell —— 统一走 planner 里那个纯函数，
+    // 别在这儿再抄一份。抄一份的代价已经付过了：这里原来是裸 ['-p']，claude 无头跑起来
+    // 一遇到要用工具就被自动拒绝（「headless mode cannot prompt」），一个字都不产出。
+    const bin = resolveBin(model) || m.bin;
+    const { args, viaStdin, useShell } = planCliInvocation(model, prompt, bin);
+    const cp = spawn(bin, args, { env, cwd: os.tmpdir(), shell: useShell, windowsHide: true });
     let out = '', err = '';
     const to = setTimeout(() => { try { cp.kill(); } catch {} reject(new Error(m.name + ' 审稿超时')); }, timeoutMs);
     cp.stdout.on('data', d => (out += d));
     cp.stderr.on('data', d => (err += d));
     cp.on('error', e => { clearTimeout(to); reject(e); });
     cp.on('close', () => { clearTimeout(to); resolve(out + (err ? '\n' + err : '')); });
-    try { cp.stdin.write(prompt); cp.stdin.end(); } catch (e) { clearTimeout(to); reject(e); }
+    if (viaStdin) { try { cp.stdin.write(prompt); cp.stdin.end(); } catch (e) { clearTimeout(to); reject(e); } }
+    else { try { cp.stdin.end(); } catch {} }
   });
 }
 
@@ -325,4 +329,20 @@ export function verifyRevision(book, scope) {
   const changedFiles = [];
   for (const f of relevantFiles(dir, scope)) { const name = path.basename(f); if (prev[name] !== hashFile(f)) changedFiles.push(name); }
   return { hadSnapshot: true, changed: changedFiles.length > 0, changedFiles };
+}
+
+// 报告文件里【不止有审稿意见】：CLI 会把收到的 prompt 原样回显在后面，
+// 而那段 prompt 里既有"输出格式模板"（[硬伤] 一句话写清：问题是什么 → 具体怎么改），
+// 也可能整段带着上一次的意见。直接对整个文件拆条会拆出【模板行 + 重复条】——
+// 2026-09-15 实测：王莽卷02 那份 11 条真意见被拆成 25 条（11×2 + 3 条模板）。
+// 所以只取【正文那一段】：遇到 CLI 回显的标志就截断，再按文本去重。
+export function critiqueOf(txt) {
+  let t = String(txt || '');
+  const marks = ['Reading prompt from stdin', 'OpenAI Codex v', '你是一名极挑剔的资深网文主编', '# 设定圣经', '# 待审大纲'];
+  let cut = t.length;
+  for (const m of marks) {
+    const i = t.indexOf(m);
+    if (i > 200 && i < cut) cut = i;   // >200 是为了别误伤标题区
+  }
+  return t.slice(0, cut);
 }

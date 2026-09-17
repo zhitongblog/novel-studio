@@ -2,7 +2,7 @@
 // → 连上该实例 MCP → 启动 autopilot 监控应答。
 import fs from 'node:fs';
 import path from 'node:path';
-import { getModel, detectModel } from './models.mjs';
+import { getModel, detectModel, resolveBin, trustAgyWorkspace } from './models.mjs';
 import {
   ensureProfile, spawnInstance, instancePids, waitForNewInstance, resolveSpawnedInstance,
   resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow,
@@ -111,7 +111,17 @@ export function writeLaunchScript(book, model, instruction, cfg) {
   assertCliModel(m, model);
   // 安全网：把任何换行折叠成空格 —— 多行 prompt 会被 agent 当多行草稿、等人工回车，无法自动开跑。
   const seed = m.seedArgs(instruction, cfg).map(a => String(a).replace(/[\r\n]+/g, ' '));
+  // ⚠️【别再给 agy 写死"走直连"】两天里同一台机器上翻了个个儿：
+  //   09-13：直连能回答；挂代理 → FAILED_PRECONDITION: User location is not supported
+  //   09-15：直连 → Eligibility check failed: Get ".../oauth2/v2/userinfo": EOF（连不上）；挂代理 → 正常
+  // 原因是代理是【节点轮换】的（proxyNode: 'auto'）：换到不支持的地区就被 Google 按 IP 拒，
+  // 换回来又好了。所以"agy 永远不要代理"这条是对着某一刻的网络状态过拟合，
+  // 我 09-13 写死它，结果 09-15 这本书的窗口每一轮都失败、白跑了几个小时。
+  // 现在跟其它模型一样【听 cfg.enableProxy 的】；地区被拒那种失败由 CLI_FAIL_PATTERNS 认出来报给作者。
   const proxy = cfg.enableProxy ? proxyUrl() : '';
+  // 顺手把本书目录写进 agy 的 trustedWorkspaces：这样窗口起来就不会弹"是否信任此项目"，
+  // 少一个要 autopilot 去认的弹窗（认弹窗是这套编排里最脆的一环，能绕开就绕开）。
+  if (m.id === 'agy') { try { trustAgyWorkspace(book.dir); } catch {} }
   const dir = path.join(book.dir, '.studio');
   fs.mkdirSync(dir, { recursive: true });
 
@@ -129,10 +139,16 @@ export function writeLaunchScript(book, model, instruction, cfg) {
         `Write-Host "[proxy] 本会话已启用 ${proxy}" -ForegroundColor DarkGray`,
       );
     }
+    // 用 resolveBin 而不是 m.bin：agy 这类"装了但不在 PATH"的 CLI，直接写命令名开出来的窗口
+    // 只会打印 "'agy' 不是内部或外部命令" 然后停在 shell 提示符——窗口是开了，agent 从没起来。
+    // 路径可能带空格，单引号包起来（PowerShell 里 '' 转义单引号）。
+    const exe = resolveBin(model);
+    const isPath = exe.indexOf(' ') >= 0 || exe.indexOf('/') >= 0 || exe.indexOf(String.fromCharCode(92)) >= 0;
+    const exeQ = isPath ? `& '${exe.replace(/'/g, "''")}'` : `& ${exe}`;
     lines.push(
       `Write-Host "[agent] 启动 ${m.bin} ，初始指令已注入…" -ForegroundColor DarkGray`,
       `$seed = ${psArr}`,
-      `& ${m.bin} @seed`,
+      `${exeQ} @seed`,
     );
     const p = path.join(dir, 'launch.ps1');
     fs.writeFileSync(p, '﻿' + lines.join('\r\n') + '\r\n', 'utf8'); // BOM 保证中文
@@ -150,7 +166,7 @@ export function writeLaunchScript(book, model, instruction, cfg) {
     lines.push(`echo "[proxy] 本会话已启用 ${proxy}"`);
   }
   lines.push(`echo "[agent] 启动 ${m.bin} ，初始指令已注入…"`,
-    `${m.bin} ${seed.map(q).join(' ')}`);
+    `${q(resolveBin(model))} ${seed.map(q).join(' ')}`);
   const p = path.join(dir, 'launch.sh');
   fs.writeFileSync(p, lines.join('\n') + '\n', 'utf8');
   try { fs.chmodSync(p, 0o755); } catch {}
@@ -384,6 +400,9 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
         msg: `⏸ 本批已写完（已到第 ${chapters} 章），待你审核：批准继续 / 按要求继续 / 停止` });
       return '本批已写完。请【暂停】：先不要写下一批，也不要改大纲，等用户审核当前内容并下达下一步要求后再继续。';
     };
+    // 上一批结束时的最高章号——用来算"这一批新写了哪几章"，交给排版矫正闸。
+    // 初值取当前值：重挂/刚开窗时先记下水位，第一批写完才有区间可矫正。
+    let batchLowWater = bookStats(getBook(slug) || book)?.maxChapter || 0;
     autopilot = new Autopilot(mcp, paneId, {
       ...cfg.autopilot,
       // 每批的续写指令后面接上本书范本原文（见 continueWithVoice 的说明）
@@ -399,7 +418,21 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       reviewEvery: () => getReviewEvery(slug),   // 0=全自动；N=每 N 批审核（实时热切换）
       onBatchReview,
       // 写完一批后：给"写够章却没卷名"的卷自动起名写回 bible（后台、best-effort，不阻塞）
-      onBatchDone: async () => { try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(getBook(slug) || book, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {} },
+      onBatchDone: async () => {
+        const b = getBook(slug) || book;
+        // ① 排版矫正闸：原来只挂在 cowrite / statelessWriter 上，【长驻窗口这条主路径一次都没跑过】，
+        //    《走进修仙》因此一路攒出 85 章「……」超标，直到发布前才被复检发现、只能事后扫 103 章。
+        //    闸的意义是"写完立刻矫正"，事后补扫是下策。批次范围 = 上次记下的最高章号+1 → 现在的最高章号。
+        // ② 顺带查一遍重复章号（《大宋第一女帝》两个 001 那类）。
+        try {
+          const { afterBatch } = await import('./afterbatch.mjs');
+          const now = bookStats(b)?.maxChapter || 0;
+          const prev = batchLowWater;
+          batchLowWater = now;
+          afterBatch(b, { from: prev > 0 ? prev + 1 : 0, to: now, onLog });
+        } catch {}
+        try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(b, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {}
+      },
       takeReviewResume: () => takeResume(slug),
       // 省 token：上下文快满就重开新会话（靠 continuity_ledger 重建）
       contextSize: () => currentContextSize((getBook(slug) || book).dir, model),

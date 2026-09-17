@@ -123,6 +123,11 @@ fn kill_stale_engine() {
     }
 }
 
+// 取用户主目录（不引 dirs crate，省依赖）：Windows 用 USERPROFILE，其它用 HOME。
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)
+}
+
 fn start_engine(resource_dir: Option<PathBuf>) -> Option<Child> {
     kill_stale_engine();   // 先清残留旧引擎，确保新引擎能绑上 8787（加载最新代码）
     let engine = engine_path(resource_dir);
@@ -148,7 +153,42 @@ fn main() {
         .invoke_handler(tauri::generate_handler![pick_folder])
         .setup(|app| {
             let resource_dir = app.path().resource_dir().ok();
-            app.manage(Sidecar(Mutex::new(start_engine(resource_dir))));
+            app.manage(Sidecar(Mutex::new(start_engine(resource_dir.clone()))));
+            // 【引擎死了要自己爬起来】2026-09-15 一天里引擎无声无息地没了两次：
+            // 一次把 277 章的重发停在半路没人知道，一次把大纲修订的会话记录抹了。
+            // 表现都只是"HTTP 000"，窗口还在、界面还开着，作者完全看不出发生了什么。
+            // 这里守着子进程：非正常退出就重启，并把事件写进 ~/.novel-studio/engine-restart.log 留痕。
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let need_restart = {
+                    match handle.try_state::<Sidecar>() {
+                        None => false,
+                        Some(sc) => {
+                            let mut guard = sc.0.lock().unwrap();
+                            match guard.as_mut() {
+                                None => false,
+                                Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+                            }
+                        }
+                    }
+                };
+                if !need_restart { continue; }
+                let when = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                if let Some(home) = dirs_home() {
+                    let dir = home.join(".novel-studio");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(dir.join("engine-restart.log"))
+                        .map(|mut f| { use std::io::Write; let _ = writeln!(f, "{} 引擎进程已退出 → 自动重启", when); });
+                }
+                eprintln!("[novel-studio] engine exited unexpectedly -> restarting");
+                if let Some(sc) = handle.try_state::<Sidecar>() {
+                    let mut guard = sc.0.lock().unwrap();
+                    *guard = start_engine(resource_dir.clone());
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {

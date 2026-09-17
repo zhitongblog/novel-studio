@@ -186,11 +186,57 @@ class UnzooClient {
       if (/超时/.test(e.message || '')) {
         const dismissed = await dismissDialog(this.tabId);
         if (dismissed) this.addLog('检测到阻塞弹窗并已关闭，重试…', 'warn');
-        const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
-        return result?.result;
+        try {
+          const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
+          return result?.result;
+        } catch (e2) {
+          if (!/超时/.test(e2.message || '')) throw e2;
+          // 弹窗不是原因——是【整个标签页卡死了】。实测（2026-09-14）：277 章那批重发在第54章把 tab 卡住，
+          // 之后连只读的 location.href 都 45s 超时；批次当场暂停，干等了 14 小时才被发现，
+          // 第二天原样续发 4 分钟内又栽在同一个卡死的 tab 上（0/225）。
+          // 一个标签页卡死不该报废整批 → 关掉重建、回到原页面、再试一次。
+          this.addLog('标签页整个卡死（连只读 evaluate 都超时）→ 关掉重建后重试…', 'warn');
+          await this.recoverTab(this.lastUrl);
+          const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
+          return result?.result;
+        }
       }
       throw e;
     }
+  }
+
+  // 标签页卡死后的恢复：关掉 → 优先复用本账号其它标签页 → 都没有才新建 → 回到原页面。
+  // ⚠️【新建必须验证归属】选中账号时绝不能把稿子发到别的 profile 去（navigate 里那条安全规则同理）：
+  // 万一新标签页落在别的账号下，立刻关掉并中止，宁可这批停下，也不能发错号。
+  // _call 默认就是 unzooCallTool；留这个口子只为可测——测试注入它就能测到【真方法】，
+  // 而不是在测试里抄一份逻辑（抄一份只会测出"我抄得对不对"）。
+  get _call() { return this.__call || unzooCallTool; }
+  set _call(fn) { this.__call = fn; }
+  async recoverTab(url) {
+    const old = this.tabId;
+    try { await this._call('tab_close', { tab_id: old }); } catch {}
+    await this.sleep(1200);
+    this.tabId = null;
+    try { await this.getActiveTab(); } catch {}
+    if (!this.tabId) {
+      const created = await this._call('tab_create', { url: url || 'https://fanqienovel.com/main/writer/book-manage' });
+      const id = created?.tab_id ? String(created.tab_id) : null;
+      if (!id) throw new Error('标签页卡死后重建失败（tab_create 没返回 tab_id）');
+      if (this.selectedProfilePath) {
+        const norm = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase();
+        const list = await this._call('tab_list', { scope: 'all' }).catch(() => null);
+        const row = (list?.tabs || []).find(t => String(t.tab_id) === id);
+        if (!row || norm(row.profile_path) !== norm(this.selectedProfilePath)) {
+          try { await this._call('tab_close', { tab_id: id }); } catch {}
+          throw new Error('标签页卡死后重建到了别的账号下，已关掉并中止（绝不发错号）');
+        }
+      }
+      this.tabId = id;
+    }
+    if (url) { try { await this._call('browser_navigate', { tab_id: this.tabId, url }); } catch {} }
+    await this.sleep(2500);
+    this.addLog(`标签页已重建（${old} → ${this.tabId}）`, 'warn');
+    return this.tabId;
   }
 
   // 真实鼠标点击（CDP，isTrusted=true）—— 选择器版
@@ -532,6 +578,7 @@ class UnzooClient {
         if (href && sameFanqiePage(href, url)) return;   // 已在同一目标页 → 跳过
       } catch {}
       await unzooCallTool('browser_navigate', { tab_id: this.tabId, url });
+      this.lastUrl = url;   // 记住落脚页：标签页卡死重建后要回到这里（见 recoverTab）
     } else {
       // 安全第一：选中了账号却没找到其标签页 → 绝不在"当前/其他 profile"乱建标签页(可能发错号)，直接报错。
       if (this.selectedProfilePath) {
@@ -541,7 +588,7 @@ class UnzooClient {
       const profileData = await unzooCallTool('profile_get_current', {});
       const profileId = profileData?.profile_id || 'default';
       const newTab = await unzooCallTool('tab_create', { profile_id: profileId, url: url });
-      if (newTab?.tab_id) this.tabId = String(newTab.tab_id);
+      if (newTab?.tab_id) { this.tabId = String(newTab.tab_id); this.lastUrl = url; }
     }
     // 导航后等待页面加载（不再事后重选标签页——保持锁定，避免来回切）
     await this.sleep(1500);
@@ -852,6 +899,8 @@ class FanqiePublisher {
         if (result.success) {
           this.currentIndex++;
           consecutiveFailures = 0;
+          this._consecutiveSkips = 0;   // 成功一章就清零：零散缺号不该攒够 5 次误停
+          this._chapterTries = 0;
           this.log(`✅ 第 ${websiteChapterNum} 章编辑成功`);
 
           // 间隔等待
@@ -864,16 +913,30 @@ class FanqiePublisher {
           this.pause(result.reason, result.message);
           return;
         } else if (result.notFound) {
-          consecutiveFailures++;
-          if (consecutiveFailures >= maxConsecutiveFailures) {
-            this.log(`⚠️ 连续 ${maxConsecutiveFailures} 次找不到章节，停止编辑`);
-            this.pause('unknown_error', `网站第 ${websiteChapterNum} 章不存在`);
-            return;
+          // 【一个章号缺失不该毁掉整批】本地有、番茄没有的章号是常态：
+          // 《天皇》本地把 129《金流暗涌》改号成 089，而番茄上那一章还挂在第129章 → 番茄根本没有"第89章"。
+          // 原来这里同一章刷新重试 3 次就 pause 整批，230 章的活在第 36 章上停住（2026-09-14 实录）。
+          // 改成：同一章重试 2 次仍找不到 → 记下来、跳过、继续下一章。
+          // 但"系统性找不到"必须照旧拦住——连着 5 个【不同的】章都找不到，多半是卷选错/页面不对，
+          // 那时继续跑只会一路空转，直接停下让人来看。
+          this._chapterTries = (this._chapterTries || 0) + 1;
+          if (this._chapterTries < 2) {
+            this.log(`⚠️ 未找到第 ${websiteChapterNum} 章，刷新页面重试…`);
+            await this.client.evaluate(`location.reload()`);
+            await this.client.sleep(3000);
+          } else {
+            this._chapterTries = 0;
+            this.skipped = this.skipped || [];
+            this.skipped.push(websiteChapterNum);
+            this._consecutiveSkips = (this._consecutiveSkips || 0) + 1;
+            this.log(`⏭ 番茄上没有第 ${websiteChapterNum} 章（本地有、线上无）→ 跳过，继续下一章`);
+            if (this._consecutiveSkips >= 5) {
+              this.log(`⚠️ 连着 5 个章都找不到，多半是卷选错或页面不对，停下来等人看`);
+              this.pause('unknown_error', `连续 5 章在番茄上都找不到（最后一个是第 ${websiteChapterNum} 章），疑似卷/页面不对`);
+              return;
+            }
+            this.currentIndex++;
           }
-          this.log(`⚠️ 未找到第 ${websiteChapterNum} 章，尝试刷新页面重试...`);
-          // 刷新页面重试
-          await this.client.evaluate(`location.reload()`);
-          await this.client.sleep(3000);
         } else {
           consecutiveFailures++;
           this.log(`编辑失败: ${result.message}，重试中...`);
@@ -892,7 +955,9 @@ class FanqiePublisher {
 
     if (this.currentIndex >= this.chapters.length) {
       this.status = 'completed';
-      this.log(`🎉 编辑完成！共编辑 ${this.chapters.length} 章`);
+      const sk = (this.skipped || []);
+      this.log(`🎉 编辑完成！共编辑 ${this.chapters.length - sk.length}/${this.chapters.length} 章`
+        + (sk.length ? `；${sk.length} 章番茄上没有、已跳过：${sk.join('、')}` : ''));
     }
 
     this.emitProgress();
@@ -1195,6 +1260,10 @@ class FanqiePublisher {
     if (this.config?.matchVolumes && chapter.volumeText) {
       const sw = await this.switchToVolume(chapter.volumeText);
       if (!sw.ok) {
+        // notReady = 页面/模态没渲染出来，不是真缺卷 → 软失败，让上层刷新重试（3 次才暂停）
+        if (sw.notReady) {
+          return { success: false, message: `发布页还没就绪，读不到分卷（目标卷「${chapter.volumeText}」），刷新重试` };
+        }
         return {
           success: false, needsIntervention: true, reason: 'volume_missing',
           message: sw.found === false
@@ -1965,23 +2034,60 @@ class FanqiePublisher {
     return true;
   }
 
-  // 读当前发布页头部的卷名
+  // 读当前发布页头部的卷名。元素还没挂载 → 返回 null（"页面没好"和"卷名是空字符串"必须分开）。
   async readCurrentVolume() {
-    const r = await this.client.evaluate(`(function(){return {t:(document.querySelector('.publish-header-volume-name')||{}).textContent||''};})()`);
-    return (r?.t || '').trim();
+    const r = await this.client.evaluate(`(function(){var e=document.querySelector('.publish-header-volume-name');return {has:!!e,t:e?(e.textContent||''):''};})()`);
+    if (!r || !r.has) return null;
+    return (r.t || '').trim();
   }
 
-  // 切换到指定卷（仅在发布页）。返回 {ok, current, found}。
+  // 等卷名元素挂载出来。clickNewChapter 里只 sleep(3000)，慢的时候根本不够。
+  async waitVolumeHeader(maxMs = this.config?.volumeWaitMs ?? 15000) {
+    const deadline = Date.now() + maxMs;
+    for (;;) {
+      const v = await this.readCurrentVolume();
+      if (v !== null) return v;
+      if (Date.now() >= deadline) return null;
+      await this.client.sleep(400);
+    }
+  }
+
+  // 切换到指定卷（仅在发布页）。返回 {ok, current, found, notReady}。
   // 找不到目标卷 → ok:false（番茄建卷不可逆，绝不乱建，交由上层暂停并提示人工建卷）。
+  // ⚠️【"番茄没有这个卷"必须拿得出证据】——《重生东京》2026-09-13 栽过：
+  // 发完第311章后重新导航到发布页，卷名元素还没挂载 → 点它等于没点 → 模态没开 →
+  // 分卷列表读到 0 项 → 判成"番茄该书没有卷第七卷"当场暂停；
+  // 而同一分钟接口明明列着「第七卷：王座无冕」31 章。和"章节表没渲染完就判没这一章"是同一个病。
+  // 现在的判据：列表没渲染出来 = 页面没好(notReady，交给上层软重试)；
+  // 只有列表真渲染了、里面确实没有目标卷，才算 volume_missing。
   async switchToVolume(targetVolumeText) {
     if (!targetVolumeText) return { ok: true, skipped: true };
-    const current = await this.readCurrentVolume();
+    const current = await this.waitVolumeHeader();
+    if (current === null) {
+      this.log('⚠️ 发布页的卷名元素一直没出来（页面没加载好）——不当成"番茄没有这个卷"', 'warn');
+      return { ok: false, notReady: true, current: null, found: null };
+    }
     if (current === targetVolumeText) { this.log(`卷已正确：${current}`); return { ok: true, current, alreadyThere: true }; }
     this.log(`切换卷：${current || '(未知)'} → ${targetVolumeText}`);
-    // 打开分卷模态
-    await this.client.clickByLocator(`return document.querySelector('.publish-header-volume-name');`);
-    await this.client.sleep(500);
-    // 选目标卷（精确匹配卷名 span）
+
+    // 打开分卷模态，并等列表真的渲染出来（byte/Arco 模态异步挂载）。最多开 3 次。
+    const readNames = `(function(){var xs=document.querySelectorAll('.editor-volume-list-item-normal');var o=[];for(var i=0;i<xs.length;i++){var sp=xs[i].querySelector('span');o.push((((sp&&sp.textContent)||xs[i].textContent||'')+'').trim());}return JSON.stringify(o);})()`;
+    let names = [];
+    for (let attempt = 0; attempt < 3 && !names.length; attempt++) {
+      await this.client.clickByLocator(`return document.querySelector('.publish-header-volume-name');`);
+      const deadline = Date.now() + (this.config?.volumeListWaitMs ?? 8000);
+      for (;;) {
+        const r = await this.client.evaluate(readNames);
+        try { names = JSON.parse(typeof r === 'string' ? r : '[]'); } catch { names = []; }
+        if (names.length || Date.now() >= deadline) break;
+        await this.client.sleep(400);
+      }
+    }
+    if (!names.length) {
+      this.log('⚠️ 分卷列表一直没渲染出来（模态没打开）——不当成"番茄没有这个卷"', 'warn');
+      return { ok: false, notReady: true, current, found: null };
+    }
+
     const found = await this.client.clickByLocator(`
       const targetText = ${JSON.stringify(targetVolumeText)};
       const items = document.querySelectorAll('.editor-volume-list-item-normal');
@@ -1992,9 +2098,14 @@ class FanqiePublisher {
       return null;
     `);
     if (!found) {
-      // 关掉模态，报"未找到该卷"
+      // 关掉模态再报。另外拿接口卷列表交叉验证：接口有、界面没有 → 是界面的问题，不是真缺卷。
       try { await this.client.clickByLocator(`const b=document.querySelectorAll('.byte-modal-footer button');for(const x of b){if((x.textContent||'').includes('取消'))return x;}return null;`); } catch {}
-      this.log(`⚠️ 番茄该书没有卷「${targetVolumeText}」`, 'error');
+      const apiVols = Array.isArray(this.config?.fanqieVolumes) ? this.config.fanqieVolumes : [];
+      if (apiVols.includes(targetVolumeText)) {
+        this.log(`⚠️ 分卷列表里没有「${targetVolumeText}」，但接口卷列表里有它 → 按界面没刷新处理，重试（界面读到：${names.join(' / ')}）`, 'warn');
+        return { ok: false, notReady: true, current, found: null };
+      }
+      this.log(`⚠️ 番茄该书没有卷「${targetVolumeText}」——后台实际只有：${names.join(' / ')}`, 'error');
       return { ok: false, current, found: false };
     }
     await this.client.sleep(400);
@@ -2213,11 +2324,12 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
 // 用于去重对齐：读已发布 + 待发布定时章里「第N章」的最大值。
 // 导航到章节管理页，逐页（尽力）遍历读取所有「第N章」，抽最大 N。
 // 读不到返回 {maxChapter:0}。分页拿不准时标 approx:true。
-export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
+export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: injectedClient, volSwitchWaitMs = 12000 } = {}) {
   const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
   if (!bookId) return { maxChapter: 0, error: '缺少 bookId' };
 
-  const client = new UnzooClient(profilePath || null, onLog || null);
+  // client 可注入：只为可测（test/publish-volume-scan.test.mjs），线上仍是真 UnzooClient。
+  const client = injectedClient || new UnzooClient(profilePath || null, onLog || null);
   try {
     // type=1 章节管理页（已发布 + 待发布定时章均在章节表中）
     await client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}?type=1`);
@@ -2362,18 +2474,47 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
       }
       return [];
     };
-    // 选某卷（精确匹配卷名）。返回是否点中。
+    // 下拉当前显示的卷名
+    const curVolName = async () => {
+      const r = await client.evaluate(`(function(){
+        const sel = (function(){ ${VOL_DROPDOWN} })();
+        if (!sel) return null;
+        const vv = sel.querySelector('.byte-select-view-value') || sel;
+        return (vv.textContent || '').trim();
+      })()`);
+      return typeof r === 'string' ? r.trim() : (r == null ? null : String(r).trim());
+    };
+
+    // 选某卷。返回 {ok, already, switched}。
+    // ⚠️【点完不等于切过去了】——原来点完只 sleep(1600) 就读表，番茄换卷的数据要几百毫秒到几秒才回来，
+    // 这段窗口里【上一卷的行还在 DOM】→ 读到的是上一卷的章号，却记在这一卷名下。
+    // 《重生东京》的日志就是这么自相矛盾的：同一本书先后报「第七卷=310」「第六卷=311」「第六卷=280」。
+    // 后果是 maxChapter 时高时低；靠高水位兜底才没重复发布。
+    // 现在要求：下拉显示值换成目标卷，【且】章节行签名真的变了（或明确是空卷），才算 switched。
     const selectVolume = async (name) => {
+      const cur = await curVolName();
+      if (cur === name) return { ok: true, already: true, switched: true };
+      const before = await client.evaluate(readPage);
+      const beforeSig = (before && before.sig) || '';
       await client.clickByLocator(VOL_DROPDOWN);
       await client.sleep(600);
-      const ok = await client.clickByLocator(`
+      const clicked = await client.clickByLocator(`
         const want = ${JSON.stringify(name)};
         const opts = document.querySelectorAll('.byte-select-option, .arco-select-option, [class*="select-option"]');
         for (const o of opts) { if (((o.textContent || '').trim()) === want) return o; }
         return null;
       `);
-      await client.sleep(1600);
-      return ok;
+      if (!clicked) return { ok: false, switched: false };
+      const deadline = Date.now() + volSwitchWaitMs;
+      let shown = false;
+      while (Date.now() < deadline) {
+        await client.sleep(400);
+        if (!shown) shown = (await curVolName()) === name;
+        if (!shown) continue;
+        const r = await client.evaluate(readPage);
+        if (r && (r.emptyState || ((r.sig || '') && (r.sig || '') !== beforeSig))) return { ok: true, switched: true };
+      }
+      return { ok: true, switched: false };
     };
 
     // 番茄章节表【按卷显示、无"全部"选项】，但章号是【全局连续】的。
@@ -2399,10 +2540,13 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog } = {}) {
       const scanned = [];
       for (const v of sorted) {
         const sel = await selectVolume(v.name);
-        if (!sel) { approx = true; continue; }
+        if (!sel.ok) { approx = true; scanned.push(`${v.name}=没点中`); continue; }
+        // 切卷没验证成功就【不读】——读到的很可能是上一卷残留的行（见 selectVolume 注释）
+        if (!sel.switched) { approx = true; scanned.push(`${v.name}=未切到(跳过)`); continue; }
         const r = await readCurVolMax();
         scanned.push(`${v.name}=${r.max}`);
-        if (r.max > 0) { maxChapter = r.max; latestDate = r.latestDate; approx = r.approx; break; }
+        // approx 只能往上叠：前面有卷没切过去/没点中，后面这一卷读成功了也不能把近似标记抹掉
+        if (r.max > 0) { maxChapter = r.max; latestDate = r.latestDate; approx = approx || r.approx; break; }
       }
       log(`🔎 多卷扫描（从最新卷起、命中非空即止）：${scanned.join('、') || '(全空)'}`, 'info');
       // 🛡️安全网：多卷却一章都没扫到 → 必是卷切换/读取异常（多卷书不可能全空还在发布）。

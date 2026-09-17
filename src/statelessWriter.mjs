@@ -10,7 +10,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { getModel, detectModel } from './models.mjs';
+import { getModel, detectModel, resolveBin } from './models.mjs';
+import { planCliInvocation } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { buildBatchPack } from './contextpack.mjs';
 import { bookStats, getBook, participationOf } from './books.mjs';
@@ -22,11 +23,7 @@ import { pacingGate } from './pacing.mjs';   // 写后节奏闸：治章长超�
 import { inspect as inspectLedger, needsSeed, ensureStructure, seedInstruction, snapshotGate } from './ledgersnap.mjs';   // 台账当前态快照：治「每批喂的是开篇旧账」
 
 // 各模型"无头 + 自动批准文件读写"的参数。
-function writeArgs(model) {
-  if (model === 'codex') return ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
-  if (model === 'claude') return ['-p', '--dangerously-skip-permissions'];
-  return ['-p', '--yolo'];   // gemini：-y/--yolo 自动批准工具调用
-}
+// 参数摆法统一走 planner.planCliInvocation（三条无头路径共用一份，别各写各的）。
 
 // 异步跑一次无头模型（不阻塞事件循环）。prompt 走 stdin，cwd = 书目录（模型据此读写本书文件）。
 function runHeadless(model, prompt, { cwd, cfg, timeoutMs = 900000, onChunk }) {
@@ -36,9 +33,12 @@ function runHeadless(model, prompt, { cwd, cfg, timeoutMs = 900000, onChunk }) {
   if (cfg?.enableProxy) { const px = proxyUrl(); if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; } }
   return new Promise((resolve) => {
     let out = '', err = '', killed = false;
-    const child = spawn(m.bin, writeArgs(model), { cwd, env, shell: true, windowsHide: true });
+    const bin = resolveBin(model) || m.bin;
+    const { args, viaStdin, useShell } = planCliInvocation(model, prompt, bin);
+    const child = spawn(bin, args, { cwd, env, shell: useShell, windowsHide: true });
     const timer = setTimeout(() => { killed = true; try { child.kill('SIGTERM'); } catch {} }, timeoutMs);
-    try { child.stdin.write(prompt); child.stdin.end(); } catch {}
+    if (viaStdin) { try { child.stdin.write(prompt); child.stdin.end(); } catch {} }
+    else { try { child.stdin.end(); } catch {} }
     child.stdout.on('data', d => { const s = d.toString(); out += s; if (onChunk) try { onChunk(s); } catch {} });
     child.stderr.on('data', d => { err += d.toString(); });
     child.on('error', e => { clearTimeout(timer); resolve({ ok: false, out, err: err + '\n' + e.message, killed }); });

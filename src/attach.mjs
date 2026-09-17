@@ -121,6 +121,9 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestar
   { const b = getBook(slug); setReviewEvery(slug, b?.writeMode === 'review' ? (b.reviewEvery || 1) : 0); }
   // 共享门处理器：大纲审稿门/修订门/收尾/完本门/逐批审核——重挂会话也必须带上，否则跨卷卡在审稿门不动。
   const gates = buildGateHandlers({ slug, book: getBook(slug), model: sess.model, cfg, onLog });
+  // 上一批结束时的最高章号——用来算"这一批新写了哪几章"，交给排版矫正闸。
+  // 初值取当前值：重挂/刚开窗时先记下水位，第一批写完才有区间可矫正。
+  let batchLowWater = bookStats(getBook(slug))?.maxChapter || 0;
   const ap = new Autopilot(mcp, pane, {
     ...cfg.autopilot,
     continueText: continueWithVoice(getBook(slug), cfg.autopilot?.continueText),
@@ -138,7 +141,21 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestar
     reviewEvery: () => getReviewEvery(slug),
     onBatchReview: gates.onBatchReview,
     // 写完一批：给"写够章却没卷名"的卷自动起名写回 bible（后台、best-effort）
-    onBatchDone: async () => { try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(getBook(slug), { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {} },
+    onBatchDone: async () => {
+      const b = getBook(slug);
+      // ① 排版矫正闸：原来只挂在 cowrite / statelessWriter 上，长驻窗口这条主路径一次都没跑过，
+      //    《走进修仙》因此攒出 85 章「……」超标。批次范围取"上一次记下的最高章号+1 → 现在的最高章号"。
+      // ② 顺带查一遍重复章号（两个 001 那类）。
+      try {
+        const { afterBatch } = await import('./afterbatch.mjs');
+        const { bookStats } = await import('./books.mjs');
+        const now = bookStats(b)?.maxChapter || 0;
+        const prev = batchLowWater;
+        batchLowWater = now;
+        afterBatch(b, { from: prev > 0 ? prev + 1 : 0, to: now, onLog });
+      } catch {}
+      try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(b, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {}
+    },
     takeReviewResume: () => takeResume(slug),
     contextSize: () => { const b = getBook(slug); return b ? currentContextSize(b.dir, sess.model) : 0; },
     freshContextLimit: cfg.autopilot?.freshContextLimit || 0,
