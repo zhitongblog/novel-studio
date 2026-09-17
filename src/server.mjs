@@ -28,6 +28,7 @@ import { localHealth, probeText, probeImage } from './localai.mjs';
 import { brainstorm, writeChapterInWindow, writeChapterFromIntent, writeChaptersFromPlot, rewriteChapter, reflowChapter, isCowriteModel, isCowriteWindowModel, COWRITE_MODELS, STYLE_SLANTS } from './cowrite.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
+import { chapterProgressLine, isFirstSight } from './progress.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
@@ -148,6 +149,7 @@ export function runServer(port = 8787) {
     setTimeout(reattachLiveSessions, 1500);
     setTimeout(() => { resumeStatelessRuns().catch(e => console.error('[engine] resumeStatelessRuns:', e?.message || e)); }, 2500);
     startOrphanWatchdog();
+    startChapterProgressWatchdog();
   });
   return server;
 }
@@ -234,6 +236,31 @@ function startOrphanWatchdog() {
     }
   }, 60000);
   globalThis.__nsOrphanWatchdog.unref?.();
+}
+
+// 【落章播报】每 20 秒对在册的窗口会话点一次章数，涨了就播一行（缘由见 progress.mjs）。
+// 只管【在册的 Unterm 会话】=窗口模式；无状态那条自己每批都报，不重复播。
+const _chapHigh = new Map();   // slug -> 上次播报时的最高章号
+function startChapterProgressWatchdog() {
+  if (globalThis.__nsChapterWatchdog) return;
+  globalThis.__nsChapterWatchdog = setInterval(() => {
+    let live;
+    try { live = listSessions(); } catch { return; }
+    const alive = new Set();
+    for (const s of live) {
+      const slug = s.slug; alive.add(slug);
+      const book = getBook(slug); if (!book) continue;
+      let st; try { st = bookStats(book); } catch { continue; }
+      const prev = _chapHigh.get(slug);
+      if (isFirstSight(prev)) { _chapHigh.set(slug, st?.maxChapter || 0); continue; }
+      const line = chapterProgressLine(prev, st);
+      if (!line) continue;
+      _chapHigh.set(slug, st.maxChapter);
+      pushLog(slug, { level: 'act', source: 'progress', msg: line });
+    }
+    for (const slug of _chapHigh.keys()) if (!alive.has(slug)) _chapHigh.delete(slug);   // 会话没了就别占着
+  }, 20000);
+  globalThis.__nsChapterWatchdog.unref?.();
 }
 
 // 启动一次无状态写作（后台跑、日志推 SSE、登记 rt + 落盘 stateless-active 供崩溃后自愈）。
@@ -1764,8 +1791,9 @@ async function api(p, req, res, u) {
         if (!canRunHeadless(model)) {
           const mm = getModel(model);
           if (mm && mm.kind !== 'web' && mm.kind !== 'api') {
-            pushLog(slug, { level: 'act', msg: `「${mm.name}」没法无头跑（凭据不落盘，每次都要人贴授权码）→ 自动改用【窗口模式】开写` });
-            return await doWrite({ ...body, model }, cfg, res);
+            // 缘由交给 doWrite 去发：它开头会清空日志，在这儿 pushLog 等于白发（见 doWrite 上的注释）
+            return await doWrite({ ...body, model }, cfg, res,
+              { note: `「${mm.name}」没法无头跑（凭据不落盘，每次都要人贴授权码）→ 自动改用【窗口模式】开写` });
           }
           return json(res, 400, { error: `「${mm ? mm.name : model}」不是本地 CLI，用不了无状态模式。网页版请点写作台的 ▶（走网页版引擎），API 模型请用 API 写作。` });
         }
@@ -1946,7 +1974,13 @@ async function resumeWriting(slug, cfg, extraTask = '', model = null) {
   return session;
 }
 
-async function doWrite(body, cfg, res) {
+// opts.note：调用方想让作者看见的【开写缘由】（例：从无状态自动改道到窗口模式）。
+// 【必须从这儿走，不能在调用前 pushLog】血泪（2026-09-17 王莽）：无状态入口先 pushLog 了
+// 「Antigravity 没法无头跑 → 自动改用窗口模式」，转头 doWrite 开头一句 rtOf(slug).logs = []
+// 把它连同一切当场抹掉——作者点完写作，日志里第一条是「确保 profile」，
+// 没有任何一个字解释为什么模式变了，看起来就是"点了没反应"。
+// 缘由得在【清空之后】补，不能在之前发。
+async function doWrite(body, cfg, res, opts = {}) {
   const book = getBook(body.book);
   if (!book) return json(res, 400, { error: '找不到书：' + body.book });
   // 长驻续写：此刻 autopilot 还没起来，writingBusy 认不出"自己"，但认得出共创/无状态/后台写作在跑。
@@ -1989,6 +2023,8 @@ async function doWrite(body, cfg, res) {
         + `全程严格遵守本目录 AGENTS.md 的 longform-webnovel-writer 规范。`
       : `请阅读 AGENTS.md 写作规范与 novel_bible.md，从第 001 章开始写第一批 ${batchN} 章并自检。`));
   const slug = book.slug;
+  // 开写缘由：只要发得出去就发（下面清空日志的那条路径会在清空之后再补一次）
+  const sayNote = () => { if (opts.note) pushLog(slug, { level: 'act', msg: opts.note }); };
   // 已有活窗口 → 不再开第二个：直接把指令插进去并确保监控（点“写作”=继续处理）
   if (sessionLive(slug)) {
     const liveModel = getSession(slug)?.model || null;
@@ -2001,6 +2037,7 @@ async function doWrite(body, cfg, res) {
     } else {
       try {
         const r = await injectToBook(slug, instruction, cfg);
+        sayNote();
         pushLog(slug, { level: 'act', msg: '窗口已在运行 → 直接续写指令已送达' });
         await ensureAutopilot(slug, cfg);
         return json(res, 200, { ...r, mode: 'inserted' });
@@ -2008,6 +2045,7 @@ async function doWrite(body, cfg, res) {
     }
   }
   rtOf(slug).logs = [];
+  sayNote();   // ← 必须在清空之后：清空之前发的任何解释都会被上面这一行吃掉
   try {
     const session = await startWriting({
       book, model, instruction, cfg,
@@ -2015,6 +2053,9 @@ async function doWrite(body, cfg, res) {
       onFreshRestart: mkFresh(slug, cfg),
     });
     rtOf(slug).session = session;
+    // 把落章播报的水位定在【点写作这一刻】，而不是等看门狗 20 秒后自己去认：
+    // 否则这中间落的章会被当成"开写前就有的"，第一章永远播不出来。
+    _chapHigh.set(slug, already?.maxChapter || 0);
     return json(res, 200, { ok: true, instance: session.instance.id, pane: session.paneId });
   } catch (e) {
     pushLog(slug, { level: 'error', msg: e.message });
