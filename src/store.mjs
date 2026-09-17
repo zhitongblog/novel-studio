@@ -19,10 +19,25 @@ export function getBook(id) {
   return loadBooks().find(b => b.id === id || b.slug === id || b.title === id);
 }
 
+// 【整条替换，不是合并】曾经这里是 books[i] = { ...books[i], ...book }。
+// 展开合并有个隐蔽后果：调用方 delete 掉的字段【删不掉】——旧记录里那个键在展开时又活过来，
+// 于是 books.mjs 里三处 delete 全是对着内存做无用功，落盘的还是旧值：
+//   · setBookStatus  改回「连载中」→ completedAt 还挂着（2026-09-17 实证：大乾女帝撤回完本后，
+//     状态是连载中，completedAt 却仍停在 9/4）
+//   · setBookWriteMode  review → auto，reviewEvery 留在盘上
+//   · setParticipation  盯着写 → 放手写，reviewEvery=1 留在盘上
+// 后两条尤其阴：作者明明切成了「放手写」，重启后 writer 从 book.reviewEvery 播种运行时开关，
+// 又按每批停下等审核——表现成"说好放手写，它还是停下来等我"，而配置界面上显示的是全自动。
+//
+// 改成整条替换是安全的：全部 16 个调用点传的都是完整的书对象
+// （13 处来自 getBook()，另外 3 处是 createBook/importBook/clearFlatImport 自己构造的完整对象）。
+// ⚠️ 以后要往这里传【局部 patch】，必须改成显式的 patch 接口，别把合并语义悄悄加回来——
+// 加回来，上面那三处 delete 就又静默失效了。
 export function upsertBook(book) {
+  if (!book || !book.id) throw new Error('upsertBook 需要完整的书对象（含 id）');
   const books = loadBooks();
   const i = books.findIndex(b => b.id === book.id);
-  if (i >= 0) books[i] = { ...books[i], ...book };
+  if (i >= 0) books[i] = { ...book };
   else books.push(book);
   saveBooks(books);
   return book;
