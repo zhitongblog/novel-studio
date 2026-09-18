@@ -108,3 +108,47 @@ test('番茄页面上那两个坑要堵住：引导弹窗 + 认准阅读标签',
 });
 
 console.log('\n全部通过 ✅  分类在立项就定，男女频各认各的，错配当场拦下');
+
+// —— 2026-09-18：作者实撞「没找到历史脑洞」后现场复现，揪出的三个真因 ——
+
+test('开标签弹窗必须用页面自己的合成事件，不能用 CDP 可信点击', () => {
+  const fq = fs.readFileSync(new URL('../src/fanqie.mjs', import.meta.url), 'utf8');
+  const i = fq.indexOf('选择主分类');
+  // 【必须从 i 之后再找终点】'立即创建' 在文件前面的注释里就出现过（第 265 行），
+  // 直接 indexOf 会拿到那个位置 → 切片为空 → 测试空跑着假装通过/假装失败。
+  const seg = fq.slice(i, fq.indexOf('立即创建', i));
+  assert.ok(/__fire\(sv\)/.test(seg),
+    '对 .select-view 用 cdpClick 实测【纹丝不动】，派发 pointerdown/…/click 一次就开');
+  // 查的是【真的调用】client.cdpClick(...)，不是这个词——注释里要讲清楚为什么弃用它，
+  // 断言按词匹配的话，会把解释踩坑经过的注释也判成违规（第一版就是这么误报的）。
+  assert.ok(!/client\.cdpClick\(/.test(seg),
+    '这一段不该再调 cdpClick——之前以为它有效，是因为先用合成事件开了弹窗再点它，验证方式本身错了');
+});
+
+test('每一步都要验证：开没开、选没选上、确认后弹窗关没关', () => {
+  const fq = fs.readFileSync(new URL('../src/fanqie.mjs', import.meta.url), 'utf8');
+  const i = fq.indexOf('选择主分类');
+  // 【必须从 i 之后再找终点】'立即创建' 在文件前面的注释里就出现过（第 265 行），
+  // 直接 indexOf 会拿到那个位置 → 切片为空 → 测试空跑着假装通过/假装失败。
+  const seg = fq.slice(i, fq.indexOf('立即创建', i));
+  assert.ok(/dialogOpen/.test(seg), '开弹窗要验证+重试——同样的代码有时开有时不开');
+  assert.ok(/classList\.contains\('active'\)/.test(seg), '要验证卡片真的选上了');
+  assert.ok(/点了「确认」但标签弹窗没关/.test(seg), '确认后弹窗该关，没关就是没存进去');
+});
+
+test('判断 active 不许用单词边界正则——模板字符串里那个转义是退格符', () => {
+  const fq = fs.readFileSync(new URL('../src/fanqie.mjs', import.meta.url), 'utf8');
+  // 这一条是实打实踩过的：在模板字符串里写了单词边界的 active 正则，
+  // 发到浏览器时那个转义被 JS 当成【退格符】，正则成了 /<BS>active<BS>/，永远匹配不上
+  // → 明明选中了却报"没被选中"，真因藏在转义里，查了半天。
+  // 这里查的是【源码里有没有那两个字符】，所以用 String.raw 写字面量，自己别再踩一遍。
+  assert.ok(!fq.includes(String.raw`\bactive\b`),
+    'fanqie.mjs 里不该出现单词边界的 active 正则：那段在模板字符串里，转义会变成退格符。改用 classList.contains');
+});
+
+test('找不到分类时要报出【该栏真实有什么】，不许去猜"频道不对"', () => {
+  const fq = fs.readFileSync(new URL('../src/fanqie.mjs', import.meta.url), 'utf8');
+  assert.ok(/该栏当前有/.test(fq),
+    '原来的文案是「男频的主分类不含这一项」——而历史脑洞明明是男频第 10 项，弹窗根本没打开。' +
+    '报错不能替真因编故事，把现场原样端出来。');
+});

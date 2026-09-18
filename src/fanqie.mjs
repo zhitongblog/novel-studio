@@ -3379,32 +3379,52 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
     return n;
   })()`);
   await client.sleep(1200);
+  // 【这一段全部改用「页面自己的合成事件」，不用 CDP 可信点击】
+  // 2026-09-18 实测（作者撞上"没找到历史脑洞"后现场复现）：对「阅读标签」这个 .select-view
+  // 用 cdpClick 打过去，弹窗【纹丝不动】；换成往元素上派发 pointerdown/mousedown/…/click，
+  // 一次就开。分类卡也一样：合成点击后类名从 category-choose-item 变成
+  // category-choose-item active，「确认」按钮当场可点。
+  //
+  // 之前我以为 cdpClick 有效，是因为验证方式本身错了：先用合成事件开了弹窗，
+  // 再用 cdpClick 点一次，看到弹窗开着就当成 cdpClick 成功——它其实一次都没生效过。
+  //
+  // 【每一步都要验证，不能 fire-and-forget】这一下点击本身就不稳（同样的代码，
+  // 有时第一次开、有时不开）。不验证的话，失败会一路飘到"没找到主分类"，
+  // 报出来的原因跟真因差着十万八千里——作者看到的就是「男频的主分类不含历史脑洞」，
+  // 而历史脑洞明明是男频第 10 项。
+  const FIRE = `function __fire(el){['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});}`;
+  const dialogOpen = async () => (await client.evaluate(`(function(){var m=[].slice.call(document.querySelectorAll('.arco-modal')).filter(function(e){return /主分类/.test(e.textContent||'')&&e.getBoundingClientRect().width>300;});return m.length?'1':'0';})()`)) === '1';
+
   // 【必须认准「阅读标签」那一个】页面上有两个"请选择作品标签"：阅读标签(主分类在这里) 和 内容标签。
   // 原来按 /请选择作品标签/ 取第一个匹配，纯靠 DOM 顺序碰运气——番茄一调整顺序就点到内容标签去了。
-  // 现在按 .cate-wrap 里的 label 文字定位，点卡片正中（原来点 x+30 会蹭到边框）。
-  const selCoord = await client.evaluate(`(function(){
-    var wrap=[].slice.call(document.querySelectorAll('.cate-wrap')).find(function(e){return (e.textContent||'').indexOf('阅读标签')>=0;});
-    if(!wrap){ wrap=[].slice.call(document.querySelectorAll('*')).find(function(e){return /请选择作品标签/.test(e.textContent||'')&&e.querySelector&&e.querySelector('.select-view');}); }
-    if(!wrap) return '';
-    var sv=wrap.querySelector('.select-view')||wrap.querySelector('.select-row');
-    if(!sv) return '';
-    var r=sv.getBoundingClientRect();
-    return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);
-  })()`);
-  if (!selCoord) return { ok: false, error: '未找到「阅读标签」选择框（番茄改版？）' };
-  { const [x, y] = selCoord.split(',').map(Number); await client.cdpClick(x, y); }
-  await client.sleep(1600);
-  // 主分类卡片：番茄弹窗里每张分类卡为 .category-choose-item（含标题+描述）。优先按此类名匹配，兜底取含分类名的最小元素。
-  // 【必须限定在「主分类」那一栏里找，且必须全名相等】
-  // 弹窗里有四栏：主分类 / 主题 / 角色 / 情节，四栏用的都是 .category-choose-item。
-  // 原来在整个弹窗里按 indexOf 找，两个隐患：
-  //   ① 可能点到「主题」栏的同名词上——主分类没选中，"确认"要么灰着要么存了个错的；
-  //   ② indexOf 是子串匹配：要「悬疑」会先撞上「悬疑脑洞」「悬疑恋爱」（实测这几个都在 DOM 里）。
+  let opened = await dialogOpen();
+  for (let i = 0; i < 5 && !opened; i++) {
+    const r = await client.evaluate(`(function(){${FIRE}
+      var wrap=[].slice.call(document.querySelectorAll('.cate-wrap')).find(function(e){return (e.textContent||'').indexOf('阅读标签')>=0;});
+      if(!wrap) return 'no-wrap';
+      var sv=wrap.querySelector('.select-view')||wrap.querySelector('.select-row');
+      if(!sv) return 'no-sv';
+      __fire(sv);
+      return 'fired';
+    })()`);
+    if (r === 'no-wrap' || r === 'no-sv') return { ok: false, error: '未找到「阅读标签」选择框（番茄改版？）' };
+    await client.sleep(1800);
+    opened = await dialogOpen();
+    if (!opened) log(`标签弹窗没打开，重试第 ${i + 1} 次…`, 'warn');
+  }
+  if (!opened) return { ok: false, error: '「阅读标签」弹窗点了 5 次都没打开（页面没加载完 / 有东西挡着 / 番茄改版）' };
+
+  // 主分类卡片：弹窗里有四栏（主分类 / 主题 / 角色 / 情节），四栏用的都是 .category-choose-item
+  // （整个弹窗实测 154 张，主分类栏只有 19 张）。所以：
+  //   ① 必须限定在「主分类」那一栏里找——点到「主题」栏的同名词上，主分类就是没选中；
+  //   ② 必须【全名相等】——原来的 indexOf 子串匹配下，要「悬疑」会先撞上「悬疑脑洞」「悬疑恋爱」。
   // 主分类【签约后不可改】，这里不能靠"多半能撞对"。
-  const cardCoord = await client.evaluate(`(function(){
+  // 找不到时【把该栏真实有的分类名一并报出来】，别再拿"频道不对"去猜原因。
+  const pick = await client.evaluate(`(function(){${FIRE}
     var name=${JSON.stringify(cat)};
-    var modal=[].slice.call(document.querySelectorAll('.arco-modal')).filter(function(e){return /主分类/.test(e.textContent||'')&&e.getBoundingClientRect().width>300;}).pop();
-    if(!modal) return '';
+    var mods=[].slice.call(document.querySelectorAll('.arco-modal')).filter(function(e){return /主分类/.test(e.textContent||'')&&e.getBoundingClientRect().width>300;});
+    if(!mods.length) return 'ERR|弹窗不见了';
+    var modal=mods[mods.length-1];
     // 主分类区 = 含"主分类"三字、且内部有分类卡的【最小】容器
     var host=null, best=1e9;
     [].slice.call(modal.querySelectorAll('*')).forEach(function(e){
@@ -3414,20 +3434,52 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
       if(t.length<best){best=t.length;host=e;}
     });
     var scope=host||modal;
-    var hit=[].slice.call(scope.querySelectorAll('.category-choose-item')).find(function(e){
-      var ti=e.querySelector('.category-choose-item-title');
-      return ((ti?ti.textContent:e.textContent)||'').trim()===name;   // 全名相等，不是包含
-    });
-    if(!hit) return '';
-    var r=hit.getBoundingClientRect();
-    return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);
+    var items=[].slice.call(scope.querySelectorAll('.category-choose-item'));
+    var nameOf=function(e){var ti=e.querySelector('.category-choose-item-title');return ((ti?ti.textContent:e.textContent)||'').trim();};
+    var hit=items.filter(function(e){return nameOf(e)===name;})[0];
+    if(!hit) return 'MISS|'+items.map(nameOf).join('、');
+    __fire(hit);
+    return 'HIT';
   })()`);
-  if (!cardCoord) return { ok: false, error: `「阅读标签」弹窗的主分类栏里没有「${cat}」——${channel}的主分类不含这一项（男/女频分类不同）` };
-  { const [x, y] = cardCoord.split(',').map(Number); await client.cdpClick(x, y); }
-  await client.sleep(900);
-  const okCoord = await client.evaluate("(function(){var b=[].slice.call(document.querySelectorAll('button')).find(function(e){return (e.textContent||'').trim()==='确认';});if(!b)return '';var r=b.getBoundingClientRect();return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);})()");
-  if (okCoord) { const [x, y] = okCoord.split(',').map(Number); await client.cdpClick(x, y); }
+  if (String(pick).startsWith('ERR|')) return { ok: false, error: String(pick).slice(4) };
+  if (String(pick).startsWith('MISS|')) {
+    return { ok: false, error: `「阅读标签」弹窗的主分类栏里没有「${cat}」。该栏当前有：${String(pick).slice(5)}` };
+  }
+  // 【点了不等于选上了】选中的卡片会被加上 active 类。没加就是没选上——
+  // 这时候继续点「确认」，要么灰着点不动、要么存了个空分类，而错误会一路飘到后面才炸。
+  //
+  // 两个坑，都踩过：
+  // ① 类名是 React 异步加上的，点完【立刻】查会查到"没选中"（实测点后约 1.2s 内还没加上，
+  //    过一会儿再看就有了）。所以要轮询，不能查一次就下结论。
+  // ② 判断【绝不能用单词边界正则】去匹配 active：这段代码在模板字符串里，那个转义会被 JS
+  //    当成【退格符】，发到浏览器的正则里 active 两侧成了退格字符，永远匹配不上——
+  //    于是明明选中了却报"没被选中"，真因藏在转义里，查半天。用 classList.contains 从根上避开。
+  let active = false;
+  for (let i = 0; i < 8 && !active; i++) {
+    await client.sleep(500);
+    const r = await client.evaluate(`(function(){
+      var name=${JSON.stringify(cat)};
+      var hit=[].slice.call(document.querySelectorAll('.category-choose-item')).filter(function(e){var ti=e.querySelector('.category-choose-item-title');return ((ti?ti.textContent:e.textContent)||'').trim()===name;})[0];
+      if(!hit) return 'gone';
+      return hit.classList.contains('active')?'1':'0';
+    })()`);
+    active = r === '1';
+  }
+  if (!active) return { ok: false, error: `点了「${cat}」但它一直没被选中（等了 4 秒，卡片没加上 active）——番茄改版或点击被拦截` };
+  log(`主分类「${cat}」已选中`);
+
+  const okRes = await client.evaluate(`(function(){${FIRE}
+    var b=[].slice.call(document.querySelectorAll('button')).filter(function(e){return (e.textContent||'').trim()==='确认';}).pop();
+    if(!b) return 'no-btn';
+    if(b.disabled) return 'disabled';
+    __fire(b);
+    return 'ok';
+  })()`);
+  if (okRes === 'no-btn') return { ok: false, error: '标签弹窗里没找到「确认」按钮' };
+  if (okRes === 'disabled') return { ok: false, error: `「确认」按钮是灰的——${cat} 可能没真正选上，或番茄还要求选主题/角色/情节` };
   await client.sleep(1400);
+  // 确认之后弹窗该关了；没关说明它不认这次确认
+  if (await dialogOpen()) return { ok: false, error: '点了「确认」但标签弹窗没关——分类没存进去，先别创建' };
 
   if (!autoSubmit) {
     return { ok: true, semiManual: true, msg: `已在番茄填好《${title}》创建表单（${channel}·${cat}·简介${intro.length}字）。请到该浏览器核对后点「立即创建」。` };
