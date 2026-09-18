@@ -209,4 +209,55 @@ test('抽屉开合要记住，但记不住不能崩', () => {
     'localStorage 在隐私模式/禁用站点数据时会抛错——记不住不是错，崩了才是');
 });
 
+
+// —— 重设计·三：书架卡片 ——
+// 原来卡上是三个孤立数字：「523 章」「4245 KB」「tokens 15.7M」，其中 tokens 是运维信息，
+// 作者在书架上根本用不着。而真正要紧的「这本书在等我做什么」一个字都没有。
+
+test('书架不再显示 KB 和 tokens——那是运维信息，不是作者要的', () => {
+  const app = fs.readFileSync(new URL('../ui/app.js', import.meta.url), 'utf8');
+  const i = app.indexOf('function renderShelf');
+  const seg = app.slice(i, app.indexOf('async function paintShelfStatus', i));
+  assert.ok(!/KB</.test(seg), '书架卡上不该再有 KB');
+  assert.ok(!/tokens \$\{fmtTok/.test(seg), '书架卡上不该再有 tokens');
+  assert.ok(/写到第 \$\{ch\} 章/.test(seg), '要把章数说成人话');
+});
+
+test('KB→字数必须按 3 字节/字折算', () => {
+  // 第一版按 2 折算，东京那本就从 117.9 万变成 177 万，比看板多出六十万字。
+  // 数字对不上比没有数字更糟：它会让人不再信这块面板。
+  const app = fs.readFileSync(new URL('../ui/app.js', import.meta.url), 'utf8');
+  assert.ok(/\* 1024\) \/ 3 \/ 10000/.test(app),
+    '中文在 UTF-8 下是 3 字节/字；实测按 3 折算与看板实算偏差 0%');
+});
+
+test('书架状态分两步加载——卡片先出来，状态随后补', () => {
+  const app = fs.readFileSync(new URL('../ui/app.js', import.meta.url), 'utf8');
+  assert.ok(/async function paintShelfStatus/.test(app));
+  assert.ok(/shelf-status/.test(app), '走单独端点，别塞进 bootstrap 让开屏等最慢的那本书');
+  const seg = app.slice(app.indexOf('async function paintShelfStatus'));
+  assert.ok(/catch \{ return; \}/.test(seg.slice(0, 500)),
+    '取不到状态就保持原样——宁可少一块，也不要把卡片改成错的');
+});
+
+test('一张卡只有一个主按钮，其余退成图标', () => {
+  const app = fs.readFileSync(new URL('../ui/app.js', import.meta.url), 'utf8');
+  const i = app.indexOf('function renderShelf');
+  const seg = app.slice(i, app.indexOf('async function paintShelfStatus', i));
+  assert.ok(/card-btn primary" data-act="write"/.test(seg), '主行动要突出');
+  assert.equal((seg.match(/card-btn icon/g) || []).length, 3,
+    '阅读/复检/书名实验退成图标——11 本书 44 个同样醒目的按钮，等于没有推荐动作');
+  // 功能一个都不能少
+  for (const act of ['write', 'read', 'review', 'nameexp', 'del']) {
+    assert.ok(seg.includes(`data-act="${act}"`), `${act} 入口没了——这一批只搬家，不许删功能`);
+  }
+});
+
+test('主按钮说的是这本书现在该干什么，不是一律「写作」', () => {
+  const app = fs.readFileSync(new URL('../ui/app.js', import.meta.url), 'utf8');
+  const seg = app.slice(app.indexOf('async function paintShelfStatus'));
+  assert.ok(/r\.nextLabel/.test(seg.slice(0, 900)),
+    '后端已经算出了 next/nextLabel，书架也该用它——正在写的书按钮就该是「正在写」而不是「写作」');
+});
+
 console.log('\n全部通过 ✅  软件知道的事，终于会主动说出口了');

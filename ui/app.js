@@ -90,6 +90,13 @@ function renderShelf() {
     const coverImg = b.stats?.cover
       ? `<img class="card-cover" src="${API}/api/book/cover?book=${encodeURIComponent(b.slug)}&t=${b.stats.coverMtime || 0}" alt="封面">`
       : `<div class="card-cover none">无<br>封面</div>`;
+    // 进度合成一句人话。原来是三个 pill：「523 章」「4245 KB」「tokens 15.7M」——
+    // 三个孤立数字，其中 tokens 是运维信息，作者在书架上根本用不着（要看在「此刻」卡里有）。
+    const ch = b.stats?.chapters || 0;
+    // KB→字数：中文在 UTF-8 下是【3 字节/字】。第一版按 2 折算，东京那本就从 117.9 万
+    // 变成了 177 万——比看板多出六十万字。数字对不上比没有数字更糟：它会让人不再信这块面板。
+    const wan = ((b.stats?.kb || 0) * 1024) / 3 / 10000;
+    const progress = ch ? `写到第 ${ch} 章${wan >= 1 ? ' · 约 ' + wan.toFixed(0) + ' 万字' : ''}` : '还没开写';
     card.innerHTML = `
       ${running.has(b.slug) ? '<div class="running-tag"><span class="dot live"></span>写作中</div>' : ''}
       <button class="card-del" data-act="del" title="删除这本书">🗑</button>
@@ -100,34 +107,63 @@ function renderShelf() {
           <div class="genre">${esc(b.genre || '—')}</div>
         </div>
       </div>
+      <div class="card-progress">${esc(progress)}</div>
       <div class="meta">
         <span class="pill model">${esc(modelName(b.model))}</span>
         ${b.status === '已完本' ? '<span class="pill done">✅ 已完本</span>' : b.status === '收尾中' ? '<span class="pill finale">🏁 收尾中</span>' : ''}
         ${b.fanqie?.status ? `<span class="pill ${b.fanqie.status === '已完结' ? 'done' : (b.status === '已完本' && b.fanqie.status !== '已完结' ? 'warn' : '')}" title="番茄平台状态">番茄·${esc(b.fanqie.status)}</span>` : ''}
-        <span class="pill">${b.stats?.chapters || 0} 章</span>
-        <span class="pill">${b.stats?.kb || 0} KB</span>
-        <span class="pill">tokens ${fmtTok(b.tokens || 0)}</span>
         ${PUBLISHING.has(b.slug) ? '<span class="pill publishing" data-act="pubbadge" title="正在发布到番茄，点我看进度">📤 发布中</span>' : ''}
+        <span class="pill issues hidden" data-act="issues" title="点开看这本书要处理什么"></span>
       </div>
       <div class="card-actions">
-        <button class="card-btn" data-act="write">✍️ 写作</button>
-        <button class="card-btn" data-act="read">📖 阅读</button>
-        <button class="card-btn" data-act="review">🔍 复检</button>
-        <button class="card-btn" data-act="nameexp">🧪 书名实验</button>
+        <button class="card-btn primary" data-act="write">✍️ 写作</button>
+        <span class="card-more">
+          <button class="card-btn icon" data-act="read" title="阅读已写章节">📖</button>
+          <button class="card-btn icon" data-act="review" title="复检已写内容">🔍</button>
+          <button class="card-btn icon" data-act="nameexp" title="书名实验">🧪</button>
+        </span>
       </div>`;
     card.querySelector('[data-act="write"]').addEventListener('click', (e) => { e.stopPropagation(); openWrite(b); });
     card.querySelector('[data-act="read"]').addEventListener('click', (e) => { e.stopPropagation(); openReader(b); });
     card.querySelector('[data-act="review"]').addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openReview(); });
     card.querySelector('[data-act="nameexp"]').addEventListener('click', (e) => { e.stopPropagation(); openNameExp(b); });
     card.querySelector('[data-act="del"]').addEventListener('click', (e) => { e.stopPropagation(); openDelete(b); });
+    card.querySelector('[data-act="issues"]').addEventListener('click', (e) => { e.stopPropagation(); openWrite(b); });
     const pubBadge = card.querySelector('[data-act="pubbadge"]');
     if (pubBadge) pubBadge.addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openPublish(b); });
     card.addEventListener('click', () => openWrite(b));
+    card.dataset.slug = b.slug;
     shelf.appendChild(card);
   }
   const add = el('div', 'book-card new', '＋ 新建书');
   add.addEventListener('click', openModal);
   shelf.appendChild(add);
+  paintShelfStatus();   // 卡片先出来，状态随后补——别让开屏等最慢的那本书
+}
+
+// 把「在等你做什么」和异常计数补到已经画好的卡片上。
+// 分两步加载是故意的：封面和书名一出来人就能动手，这一步 10 本书约 360ms，
+// 塞进 bootstrap 会让整个开屏都等它。失败就【保持原样】，不要把卡片改成错的。
+async function paintShelfStatus() {
+  let rows;
+  try { rows = (await api('/api/shelf-status')).books || []; } catch { return; }
+  for (const r of rows) {
+    const card = document.querySelector(`.book-card[data-slug="${CSS.escape(r.slug)}"]`);
+    if (!card) continue;
+    const btn = card.querySelector('[data-act="write"]');
+    // 主按钮说的是【这本书现在该干什么】，不是一律"写作"
+    if (btn && r.nextLabel) btn.textContent = ({ write: '✍️ ', watch: '👀 ', review: '⏸ ', outline: '🧭 ', finale: '🏁 ', publish: '📤 ' }[r.next] || '') + r.nextLabel;
+    const bad = r.bad || 0, warn = r.warn || 0;
+    const pill = card.querySelector('[data-act="issues"]');
+    if (!pill) continue;
+    if (bad + warn > 0) {
+      pill.textContent = bad ? `🔴 ${bad} 件要处理` : `🟡 ${warn} 件要知道`;
+      pill.classList.toggle('bad', bad > 0);
+      pill.classList.remove('hidden');
+    } else {
+      pill.classList.add('hidden');
+    }
+  }
 }
 function modelName(id) { return (STATE.models.find(m => m.id === id) || {}).name || id; }
 

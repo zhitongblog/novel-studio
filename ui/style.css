@@ -467,3 +467,25 @@ textarea { resize: vertical; line-height: 1.5; }
 .dz-note { font-size: 11.5px; line-height: 1.6; color: var(--muted); }
 .btn.danger-out { border-color: rgba(233,90,109,.42); color: #f0a0ab; }
 .btn.danger-out:hover { border-color: #e95a6d; background: rgba(233,90,109,.12); color: #ffd9de; }
+
+/* ── 书架卡片 ────────────────────────────────────────────
+   原来卡上是「523 章」「4245 KB」「tokens 15.7M」三个 pill——三个孤立数字，
+   其中 tokens 是运维信息，作者在书架上根本用不着。而真正要紧的
+   「这本书在等我做什么」一个字都没有。
+   现在：一句话进度 + 要处理几件 + 一个说人话的主按钮。 */
+.card-progress { font-size: 12.5px; color: var(--fg); opacity: .9; margin: 2px 0 0; }
+
+/* 异常徽章：书架上一眼扫过去就知道哪本书在等你 */
+.pill.issues { cursor: pointer; border-color: rgba(228,179,86,.4); color: #e4b356; }
+.pill.issues:hover { border-color: #e4b356; background: rgba(228,179,86,.1); }
+.pill.issues.bad { border-color: rgba(233,90,109,.45); color: #f0a0ab; }
+.pill.issues.bad:hover { border-color: #e95a6d; background: rgba(233,90,109,.12); }
+
+/* 主按钮一个、次动作退成图标：一张卡上四个等宽按钮＝四个都不重要。
+   11 本书就是 44 个同样醒目的按钮，等于没有推荐动作。 */
+.card-actions { display: flex; align-items: center; gap: 8px; }
+.card-btn.primary { flex: 1; background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+.card-btn.primary:hover { filter: brightness(1.08); }
+.card-more { display: flex; gap: 4px; flex: none; }
+.card-btn.icon { padding: 5px 8px; min-width: 0; font-size: 13px; opacity: .72; }
+.card-btn.icon:hover { opacity: 1; }

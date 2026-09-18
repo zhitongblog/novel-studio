@@ -32,6 +32,7 @@ import { chapterProgressLine, isFirstSight } from './progress.mjs';
 import { FANQIE_CATEGORIES, isValidCategory } from './categories.mjs';
 import { finaleArtifacts, finaleSummary } from './finaledone.mjs';
 import { checkupBook } from './checkup.mjs';
+import { loadBooks } from './store.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
@@ -403,6 +404,32 @@ async function api(p, req, res, u) {
         const book = getBook(u.searchParams.get('book') || ''); if (!book) return json(res, 400, { error: '找不到书' });
         return json(res, 200, readBookFile(book, u.searchParams.get('rel') || ''));
       } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/shelf-status') {
+      // 书架用：每本书【在等你做什么】+ 异常计数。
+      //
+      // 为什么单开一个端点而不是塞进 /api/books：书架要先把卡片画出来（封面/书名一出来
+      // 人就能动手），状态随后补。塞进 bootstrap 会让整个开屏等最慢的那本书。
+      // 也不进轮询——书架是按需刷新的，没必要一直算。
+      try {
+        const out = [];
+        for (const b of loadBooks()) {
+          let next = 'write', nextLabel = '继续往下写', counts = { bad: 0, warn: 0, info: 0 };
+          try {
+            const st = bookStats(b);
+            const pend = getPending(b.slug);
+            const live = sessionLive(b.slug) || !!(rt.get(b.slug)?.statelessRun && !rt.get(b.slug).statelessRun.stopped);
+            const planned = plannedTotalChapters(b) || 0;
+            if (b.status === '已完本') { next = 'publish'; nextLabel = '去发行'; }
+            else if (pend) { next = 'review'; nextLabel = '等你拍板'; }
+            else if (live) { next = 'watch'; nextLabel = '正在写'; }
+            else if (planned > 0 && st.chapters >= planned) { next = 'finale'; nextLabel = '可以收尾了'; }
+            counts = checkupBook(b).counts;
+          } catch {}
+          out.push({ slug: b.slug, next, nextLabel, ...counts });
+        }
+        return json(res, 200, { ok: true, books: out });
+      } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/checkup') {
       // 体检：把软件已经知道、但从来没说出口的异常摆出来（缺章/漏发/状态与事实不符/模型能力…）。
