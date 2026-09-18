@@ -7,6 +7,7 @@ import { getModel, detectAll, resolveBin } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { STYLES, getStyle } from './styles.mjs';
 import { FANQIE_CATEGORIES, categoriesOf, isValidCategory, normalizeChannel } from './categories.mjs';
+import { READ_TAGS, CONTENT_TAGS, TAG_LIMITS } from './fanqietags.mjs';
 
 // runModelOnce 能非交互驱动的本地 CLI（一次性喂 prompt 走 stdin 取文本）。trae 用法不同(run 子命令)，不在此列。
 //
@@ -341,6 +342,75 @@ export async function recommendCategory({ theme, title = '', model }, cfg) {
     return { channel, mainCategory: '', reason: '', undecided: true };
   }
   return { channel, mainCategory, reason: reason.slice(0, 80), undecided: false };
+}
+
+// 据题材挑【番茄的全部标签】：阅读标签(主题/角色/情节) + 内容标签(情节/情感/人设/世界观)。
+// 主分类由 recommendCategory 单独负责（它是必选项、签约后不可改，值得单独一次判断）。
+//
+// 为什么也要提前选：这些标签决定番茄怎么把书分发给读者，而它们原来【一个都没选】——
+// 建书时那两个「请选择作品标签」框是空的，作者事后才发现要一个个手点。
+// 题材那句话在立项时就有了，没道理等到发书那天再补。
+//
+// 只挑【有把握的】：模型拿不准就少选甚至不选，绝不为了凑满上限硬塞。
+// 错的标签比没标签更糟——它会把书推给不对的读者，然后数据难看。
+export async function recommendFanqieTags({ theme, title = '', channel = '男频', mainCategory = '', model }, cfg) {
+  const ch = normalizeChannel(channel);
+  const read = READ_TAGS[ch] || {};
+  const lim = TAG_LIMITS;
+  const list = (a) => (a || []).join('、');
+  const prompt =
+    `你是番茄小说的资深编辑，要给一本书选分发标签。\n` +
+    `书名：${title || '（未定）'}\n题材：${theme}\n频道：${ch}${mainCategory ? `\n主分类：${mainCategory}（已定，不用再选）` : ''}\n\n` +
+    `【阅读标签】\n主题（最多${lim.阅读标签.主题}个）：${list(read.主题)}\n` +
+    `角色（最多${lim.阅读标签.角色}个）：${list(read.角色)}\n` +
+    `情节（最多${lim.阅读标签.情节}个）：${list(read.情节)}\n\n` +
+    `【内容标签】\n情节（最多${lim.内容标签.情节}个）：${list(CONTENT_TAGS.情节)}\n` +
+    `情感（最多${lim.内容标签.情感}个）：${list(CONTENT_TAGS.情感)}\n` +
+    `人设（最多${lim.内容标签.人设}个）：${list(CONTENT_TAGS.人设)}\n` +
+    `世界观（最多${lim.内容标签.世界观}个）：${list(CONTENT_TAGS.世界观)}\n\n` +
+    `规则：①每一项【必须】是上面对应列表里的原词，一个字都不能改、不能自造、不能跨栏拿；` +
+    `②【没把握就少选或留空】——错的标签会把书推给不对的读者，比没标签更糟，不要为了凑满上限硬塞；` +
+    `③只选真正贴合这本书的。\n` +
+    `只输出严格 JSON：{"阅读标签":{"主题":[],"角色":[],"情节":[]},"内容标签":{"情节":[],"情感":[],"人设":[],"世界观":[]}}`;
+  const out = runModelOnce(model, prompt, cfg, 180000);
+  const j = (() => { try { const m = out.match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : null; } catch { return null; } })();
+  // 【"没解析出来"和"真的一个都没选"必须分开】实测 gemini / qwen 对这个 prompt 返回的东西
+  // 解析不出 JSON，而如果照样返回一份全空的结果，调用方完全看不出发生过什么——
+  // 表现成"AI 选了，但一个标签都没有"，作者只会以为这本书就是没标签可选。
+  if (!j) return { parseFailed: true, raw: String(out || '').slice(-300), 阅读标签: { 主题: [], 角色: [], 情节: [] }, 内容标签: { 情节: [], 情感: [], 人设: [], 世界观: [] }, dropped: [] };
+  // 【必须逐项过滤】模型自造词是常态：不在清单里的直接丢掉，超上限的截断。
+  // 不过滤的话，这些词会一路飘到浏览器里，表现成"找不到这张卡"——而真因是它压根不存在。
+  const pick = (want, pool, max) => {
+    const p = new Set(pool || []);
+    const seen = new Set();
+    return (Array.isArray(want) ? want : [])
+      .map(x => String(x || '').trim())
+      .filter(x => p.has(x) && !seen.has(x) && seen.add(x))
+      .slice(0, max);
+  };
+  const dropped = [];
+  const keep = (want, pool, max, where) => {
+    const got = pick(want, pool, max);
+    for (const x of (Array.isArray(want) ? want : [])) {
+      const s = String(x || '').trim();
+      if (s && !got.includes(s)) dropped.push(`${where}「${s}」`);
+    }
+    return got;
+  };
+  return {
+    阅读标签: {
+      主题: keep(j?.阅读标签?.主题, read.主题, lim.阅读标签.主题, '阅读标签·主题'),
+      角色: keep(j?.阅读标签?.角色, read.角色, lim.阅读标签.角色, '阅读标签·角色'),
+      情节: keep(j?.阅读标签?.情节, read.情节, lim.阅读标签.情节, '阅读标签·情节'),
+    },
+    内容标签: {
+      情节: keep(j?.内容标签?.情节, CONTENT_TAGS.情节, lim.内容标签.情节, '内容标签·情节'),
+      情感: keep(j?.内容标签?.情感, CONTENT_TAGS.情感, lim.内容标签.情感, '内容标签·情感'),
+      人设: keep(j?.内容标签?.人设, CONTENT_TAGS.人设, lim.内容标签.人设, '内容标签·人设'),
+      世界观: keep(j?.内容标签?.世界观, CONTENT_TAGS.世界观, lim.内容标签.世界观, '内容标签·世界观'),
+    },
+    dropped,   // 被丢掉的（模型自造/跨栏/超上限）——记进日志，别闷声吃掉
+  };
 }
 
 // 对标书风格学习：给一段对标作品的正文样本，让强模型分析出一份「照着这个腔写」的文风指南。

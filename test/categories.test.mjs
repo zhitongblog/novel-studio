@@ -131,9 +131,9 @@ test('每一步都要验证：开没开、选没选上、确认后弹窗关没�
   // 【必须从 i 之后再找终点】'立即创建' 在文件前面的注释里就出现过（第 265 行），
   // 直接 indexOf 会拿到那个位置 → 切片为空 → 测试空跑着假装通过/假装失败。
   const seg = fq.slice(i, fq.indexOf('立即创建', i));
-  assert.ok(/dialogOpen/.test(seg), '开弹窗要验证+重试——同样的代码有时开有时不开');
+  assert.ok(/重试第 \$\{i \+ 1\} 次/.test(seg), '开弹窗要验证+重试——同样的代码有时开有时不开');
   assert.ok(/classList\.contains\('active'\)/.test(seg), '要验证卡片真的选上了');
-  assert.ok(/点了「确认」但标签弹窗没关/.test(seg), '确认后弹窗该关，没关就是没存进去');
+  assert.ok(/弹窗没关/.test(seg), '确认后弹窗该关，没关就是没存进去');
 });
 
 test('判断 active 不许用单词边界正则——模板字符串里那个转义是退格符', () => {

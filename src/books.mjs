@@ -8,6 +8,7 @@ import { getSession, removeSession } from './sessions.mjs';
 import { getStyle } from './styles.mjs';
 import { resolveRomance, DEFAULT_ROMANCE } from './romance.mjs';
 import { isValidCategory } from './categories.mjs';
+import { READ_TAGS, CONTENT_TAGS, TAG_LIMITS } from './fanqietags.mjs';
 
 // 删除一本书：停会话、删 profile、移出书架；可选连磁盘文件夹一起删（危险）
 export function deleteBook(slugOrId, { deleteFiles = false } = {}) {
@@ -263,6 +264,42 @@ export function setBookCategory(slugOrId, { channel, mainCategory, by = 'user', 
   const cat = String(mainCategory || '').trim();
   if (!isValidCategory(ch, cat)) throw new Error(`「${cat}」不是${ch}的主分类（番茄按频道渲染分类卡，拿另一个频道的名字去找必然找不到）`);
   b.category = { channel: ch, mainCategory: cat, by, reason: String(reason || '').slice(0, 80), at: new Date().toISOString() };
+  upsertBook(b);
+  return b;
+}
+
+// 存这本书的【番茄标签】：阅读标签(主题/角色/情节) + 内容标签(情节/情感/人设/世界观)。
+// 主分类另存在 book.category（它是必选项、签约后不可改，见 setBookCategory）。
+//
+// 为什么要存：这些标签决定番茄怎么把书分发给读者，而原来建书时那两个框是【空的】——
+// 作者事后才发现要一个个手点。现在立项时 AI 就按题材选好，建书时直接套上去。
+// 落盘前逐项校验必须是清单里的原词：自造的词一路飘到浏览器里，只会表现成"找不到这张卡"。
+export function setBookTags(slugOrId, tags, { channel, by = 'user' } = {}) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  const ch = channel || b.category?.channel || '男频';
+  const read = READ_TAGS[ch === '女频' ? '女频' : '男频'] || {};
+  const clean = (want, pool, max) => {
+    const p = new Set(pool || []); const seen = new Set();
+    return (Array.isArray(want) ? want : []).map(x => String(x || '').trim())
+      .filter(x => p.has(x) && !seen.has(x) && seen.add(x)).slice(0, max);
+  };
+  const L = TAG_LIMITS;
+  b.tags = {
+    channel: ch,
+    阅读标签: {
+      主题: clean(tags?.阅读标签?.主题, read.主题, L.阅读标签.主题),
+      角色: clean(tags?.阅读标签?.角色, read.角色, L.阅读标签.角色),
+      情节: clean(tags?.阅读标签?.情节, read.情节, L.阅读标签.情节),
+    },
+    内容标签: {
+      情节: clean(tags?.内容标签?.情节, CONTENT_TAGS.情节, L.内容标签.情节),
+      情感: clean(tags?.内容标签?.情感, CONTENT_TAGS.情感, L.内容标签.情感),
+      人设: clean(tags?.内容标签?.人设, CONTENT_TAGS.人设, L.内容标签.人设),
+      世界观: clean(tags?.内容标签?.世界观, CONTENT_TAGS.世界观, L.内容标签.世界观),
+    },
+    by, at: new Date().toISOString(),
+  };
   upsertBook(b);
   return b;
 }

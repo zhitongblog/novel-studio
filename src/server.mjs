@@ -13,9 +13,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance, setBookCategory} from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance, setBookCategory, setBookTags} from './books.mjs';
 import { STYLES } from './styles.mjs';
-import { recommendStyle, recommendCategory } from './planner.mjs';
+import { recommendStyle, recommendCategory, recommendFanqieTags } from './planner.mjs';
 import { detectAll, getModel, canRunHeadless } from './models.mjs';
 import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
 import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
@@ -766,6 +766,11 @@ async function api(p, req, res, u) {
         const synopsis = String(body.synopsis || book.synopsis || '').trim();
         const mainCategory = String(body.mainCategory || '').trim();
         const channel = body.channel === '女频' ? '女频' : '男频';
+        const signMode = body.signMode === '完本模式' ? '完本模式' : '连载模式';
+        // 标签优先用请求里带的；没带就用书上存的（立项时 AI 选好的）——作者不用每次重挑
+        const savedTags = (book.tags && book.tags.channel === channel) ? book.tags : null;
+        const readTags = body.readTags || savedTags?.阅读标签 || null;
+        const contentTags = body.contentTags || savedTags?.内容标签 || null;
         const hero = String(body.hero || '').trim();
         const hero2 = String(body.hero2 || '').trim();
         // 有本地封面就一并传（番茄建书默认自动生成封面，我们换成 cover.png）；没有则番茄用自动封面。可用 uploadCover:false 关掉。
@@ -787,7 +792,7 @@ async function api(p, req, res, u) {
         if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
         fanqieCreateJobs.set(slug, { status: 'running', msg: '开始…' });
         const onLog = (e) => { const j = fanqieCreateJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'fanqie' }); };
-        createFanqieBook({ profilePath, title, channel, mainCategory, hero, hero2, synopsis, coverPath, autoSubmit, onLog })
+        createFanqieBook({ profilePath, title, channel, signMode, mainCategory, readTags, contentTags, hero, hero2, synopsis, coverPath, autoSubmit, onLog })
           .then((r) => {
             if (r.ok && r.bookId) {
               try { setBookPublish(slug, { profilePath, bookId: r.bookId, bookName: title }); } catch {}
@@ -981,6 +986,19 @@ async function api(p, req, res, u) {
           }
           setBookCategory(book.slug, { channel: c.channel, mainCategory: c.mainCategory, by: 'ai', reason: c.reason });
           pushLog(book.slug, { level: 'act', source: 'category', msg: `🏷️ 番茄分类建议：${c.channel} · ${c.mainCategory}${c.reason ? '（' + c.reason + '）' : ''} —— 发书时自动带入，可改` });
+          // 分类定了，接着把【阅读标签/内容标签】也选好——它们决定番茄怎么分发这本书，
+          // 而原来建书时那两个框是空的，作者事后才发现要一个个手点。
+          try {
+            const t = await recommendFanqieTags({ theme: body.theme || body.genre, title: body.title, channel: c.channel, mainCategory: c.mainCategory, model: body.model || cfg.defaultModel }, cfg);
+            if (t.parseFailed) {
+              pushLog(book.slug, { level: 'warn', source: 'category', msg: `番茄标签没选成（模型输出解析不了）→ 建书时可在发布弹窗里自己挑，或事后在番茄补` });
+            } else {
+              setBookTags(book.slug, t, { channel: c.channel, by: 'ai' });
+              const flat = [...Object.values(t.阅读标签).flat(), ...Object.values(t.内容标签).flat()];
+              pushLog(book.slug, { level: 'act', source: 'category', msg: `🏷️ 番茄标签已选 ${flat.length} 个：${flat.join('、') || '（一个都没选中——题材太特别时会这样，可自己补）'}` });
+              if (t.dropped.length) pushLog(book.slug, { level: 'warn', source: 'category', msg: `以下是模型自造/跨栏的，已丢弃：${t.dropped.join('、')}` });
+            }
+          } catch (e) { pushLog(book.slug, { level: 'warn', source: 'category', msg: '番茄标签推断失败：' + e.message + '（不影响写作）' }); }
         } catch (e) { pushLog(book.slug, { level: 'warn', source: 'category', msg: '番茄分类推断失败：' + e.message + '（发书时自己挑即可）' }); }
       })();
       // 立项时选择参与度；startWriting 会据 book.writeMode/reviewEvery 播种运行时审核开关

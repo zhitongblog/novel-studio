@@ -3319,7 +3319,11 @@ export async function changeFanqieCover({ bookId, coverPath, profilePath, autoSu
 //         CDP 可信点击 打开作品标签弹窗、选主分类卡片、确认 → 点「立即创建」→ 跳转后抓回 bookId。
 // autoSubmit=false 则填好停在表单，返回 semiManual（人工核对后自己点「立即创建」）。
 // 坑：Arco 受控输入要用原生 value setter；弹窗卡片/确认/立即创建 合成点击不触发，必须 CDP 可信点击。
-export async function createFanqieBook({ profilePath, title, channel = '男频', mainCategory, hero = '', hero2 = '', synopsis, coverPath = '', autoSubmit = true, onLog } = {}) {
+// signMode：番茄 2026-09 新增的【必填】项，默认两个都不选，不设就过不了校验。
+// 默认「连载模式」——作者确认过「我们一般都选连载模式」，也跟本工具的工作方式一致：
+// 边写边发（每天 N 章、断点续发、重发修正、完结收口全是增量流程）。
+// 完本模式要求整书一次性上传、完本且满 15 万/30 万字才可签约，跟这条流水线冲突。
+export async function createFanqieBook({ profilePath, title, channel = '男频', signMode = '连载模式', mainCategory, readTags = null, contentTags = null, hero = '', hero2 = '', synopsis, coverPath = '', autoSubmit = true, onLog } = {}) {
   const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
   title = String(title || '').trim();
   const intro = String(synopsis || '').trim();
@@ -3330,6 +3334,7 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
   if (intro.length < 50) return { ok: false, error: `简介仅 ${intro.length} 字，番茄要求 50–500 字` };
   if (intro.length > 500) return { ok: false, error: `简介 ${intro.length} 字，超过番茄上限(500字)` };
   if (channel !== '男频' && channel !== '女频') channel = '男频';
+  if (signMode !== '连载模式' && signMode !== '完本模式') signMode = '连载模式';
 
   const client = new UnzooClient(profilePath, onLog, 'fanqienovel.com', '番茄');
   await client.ensureTabId();
@@ -3351,9 +3356,46 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
   log(`填书名《${title}》…`);
   await client.evaluate(`(function(){${SETTER} var el=document.querySelector('input[placeholder*=作品名称]');if(el){el.focus();__sv(el,${JSON.stringify(title)});}return 1;})()`);
   await client.sleep(400);
-  // 2. 男频/女频
-  await client.evaluate(`(function(){var m=[].slice.call(document.querySelectorAll('.arco-radio,label')).find(function(e){return (e.textContent||'').trim()===${JSON.stringify(channel)};});if(m){['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){m.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});}return 1;})()`);
-  await client.sleep(400);
+
+  // 【单选组一律按"表单项标签"限定范围，并且设完要验】
+  // 页面现在有两组单选：签约模式(连载/完本) 和 目标读者(男频/女频)，而且【两组默认都不选】。
+  // 原来那句是全页面找 textContent==='男频' 的元素直接点——只有一组时侥幸没出事，
+  // 多一组就成了定时炸弹。而且点完从不检查，设没设上全凭运气。
+  const setRadio = async (groupLabel, value) => {
+    const r = await client.evaluate(`(function(){
+      function fire(el){['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});}
+      var it=[].slice.call(document.querySelectorAll('.arco-form-item')).find(function(e){var l=e.querySelector('.arco-form-label-item,label');return l&&(l.textContent||'').indexOf(${JSON.stringify(groupLabel)})>=0;});
+      if(!it) return 'no-group';
+      var rd=[].slice.call(it.querySelectorAll('.arco-radio')).find(function(x){return (x.textContent||'').trim()===${JSON.stringify(value)};});
+      if(!rd) return 'no-option';
+      fire(rd);
+      return 'fired';
+    })()`);
+    if (r === 'no-group') return { ok: false, why: `页面上没有「${groupLabel}」这一项（番茄改版？）` };
+    if (r === 'no-option') return { ok: false, why: `「${groupLabel}」里没有「${value}」这个选项` };
+    for (let i = 0; i < 6; i++) {
+      await client.sleep(400);
+      const on = await client.evaluate(`(function(){
+        var it=[].slice.call(document.querySelectorAll('.arco-form-item')).find(function(e){var l=e.querySelector('.arco-form-label-item,label');return l&&(l.textContent||'').indexOf(${JSON.stringify(groupLabel)})>=0;});
+        if(!it) return '';
+        var rd=[].slice.call(it.querySelectorAll('.arco-radio')).filter(function(x){return x.classList.contains('arco-radio-checked');})[0];
+        return rd?(rd.textContent||'').trim():'';
+      })()`);
+      if (on === value) return { ok: true };
+    }
+    return { ok: false, why: `点了「${groupLabel}→${value}」但它没被选中` };
+  };
+
+  // 2. 签约模式（番茄新增的【必填】项，默认两个都不选）
+  // 连载模式：满2万字可发起签约，满8万字后可主动发起推荐流程，按单章审核，签约后可持续更新、灵活调整方向
+  // 完本模式：完本且满15万/30万字后才可发起签约，整书一次性上传、按整书审核
+  // 本工具是【边写边发】的（每天N章、断点续发、重发修正、完结收口全是增量流程），
+  // 所以默认连载模式；完本模式要求整书传完才签约，跟这条流水线是冲突的。
+  log(`签约模式：${signMode}`);
+  { const r = await setRadio('签约模式', signMode); if (!r.ok) return { ok: false, error: '签约模式没设上：' + r.why }; }
+
+  // 3. 目标读者（男频/女频）——同样默认不选，同样要验
+  { const r = await setRadio('目标读者', channel); if (!r.ok) return { ok: false, error: '目标读者（男/女频）没设上：' + r.why }; }
   // 3. 主角名
   if (hero) { await client.evaluate(`(function(){${SETTER} var el=document.querySelector('input[placeholder*=主角名1]');if(el){el.focus();__sv(el,${JSON.stringify(String(hero).slice(0, 5))});}return 1;})()`); await client.sleep(300); }
   if (hero2) { await client.evaluate(`(function(){${SETTER} var el=document.querySelector('input[placeholder*=主角名2]');if(el){el.focus();__sv(el,${JSON.stringify(String(hero2).slice(0, 5))});}return 1;})()`); await client.sleep(300); }
@@ -3390,96 +3432,149 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
   //
   // 【每一步都要验证，不能 fire-and-forget】这一下点击本身就不稳（同样的代码，
   // 有时第一次开、有时不开）。不验证的话，失败会一路飘到"没找到主分类"，
-  // 报出来的原因跟真因差着十万八千里——作者看到的就是「男频的主分类不含历史脑洞」，
-  // 而历史脑洞明明是男频第 10 项。
+  // 报出来的原因跟真因差着十万八千里。
   const FIRE = `function __fire(el){['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});}`;
-  const dialogOpen = async () => (await client.evaluate(`(function(){var m=[].slice.call(document.querySelectorAll('.arco-modal')).filter(function(e){return /主分类/.test(e.textContent||'')&&e.getBoundingClientRect().width>300;});return m.length?'1':'0';})()`)) === '1';
 
-  // 【必须认准「阅读标签」那一个】页面上有两个"请选择作品标签"：阅读标签(主分类在这里) 和 内容标签。
-  // 原来按 /请选择作品标签/ 取第一个匹配，纯靠 DOM 顺序碰运气——番茄一调整顺序就点到内容标签去了。
-  let opened = await dialogOpen();
-  for (let i = 0; i < 5 && !opened; i++) {
-    const r = await client.evaluate(`(function(){${FIRE}
-      var wrap=[].slice.call(document.querySelectorAll('.cate-wrap')).find(function(e){return (e.textContent||'').indexOf('阅读标签')>=0;});
-      if(!wrap) return 'no-wrap';
-      var sv=wrap.querySelector('.select-view')||wrap.querySelector('.select-row');
-      if(!sv) return 'no-sv';
-      __fire(sv);
-      return 'fired';
-    })()`);
-    if (r === 'no-wrap' || r === 'no-sv') return { ok: false, error: '未找到「阅读标签」选择框（番茄改版？）' };
-    await client.sleep(1800);
-    opened = await dialogOpen();
-    if (!opened) log(`标签弹窗没打开，重试第 ${i + 1} 次…`, 'warn');
-  }
-  if (!opened) return { ok: false, error: '「阅读标签」弹窗点了 5 次都没打开（页面没加载完 / 有东西挡着 / 番茄改版）' };
-
-  // 主分类卡片：弹窗里有四栏（主分类 / 主题 / 角色 / 情节），四栏用的都是 .category-choose-item
-  // （整个弹窗实测 154 张，主分类栏只有 19 张）。所以：
-  //   ① 必须限定在「主分类」那一栏里找——点到「主题」栏的同名词上，主分类就是没选中；
-  //   ② 必须【全名相等】——原来的 indexOf 子串匹配下，要「悬疑」会先撞上「悬疑脑洞」「悬疑恋爱」。
+  // 弹窗里有四个分栏，四栏共用同一个类名 .category-choose-item（阅读标签整窗 154 张，
+  // 主分类栏只有 19 张）。所以【必须限定在分栏内找，且全名相等】：
+  //   · 不限定 → 可能点到别栏的同名词上，这一栏其实没选中；
+  //   · 用 indexOf 子串匹配 → 要「悬疑」会先撞上「悬疑脑洞」「悬疑恋爱」。
   // 主分类【签约后不可改】，这里不能靠"多半能撞对"。
-  // 找不到时【把该栏真实有的分类名一并报出来】，别再拿"频道不对"去猜原因。
-  const pick = await client.evaluate(`(function(){${FIRE}
-    var name=${JSON.stringify(cat)};
-    var mods=[].slice.call(document.querySelectorAll('.arco-modal')).filter(function(e){return /主分类/.test(e.textContent||'')&&e.getBoundingClientRect().width>300;});
-    if(!mods.length) return 'ERR|弹窗不见了';
-    var modal=mods[mods.length-1];
-    // 主分类区 = 含"主分类"三字、且内部有分类卡的【最小】容器
-    var host=null, best=1e9;
-    [].slice.call(modal.querySelectorAll('*')).forEach(function(e){
-      var t=e.textContent||'';
-      if(t.indexOf('主分类')<0) return;
-      if(!e.querySelectorAll('.category-choose-item').length) return;
-      if(t.length<best){best=t.length;host=e;}
-    });
-    var scope=host||modal;
-    var items=[].slice.call(scope.querySelectorAll('.category-choose-item'));
-    var nameOf=function(e){var ti=e.querySelector('.category-choose-item-title');return ((ti?ti.textContent:e.textContent)||'').trim();};
-    var hit=items.filter(function(e){return nameOf(e)===name;})[0];
-    if(!hit) return 'MISS|'+items.map(nameOf).join('、');
-    __fire(hit);
-    return 'HIT';
-  })()`);
-  if (String(pick).startsWith('ERR|')) return { ok: false, error: String(pick).slice(4) };
-  if (String(pick).startsWith('MISS|')) {
-    return { ok: false, error: `「阅读标签」弹窗的主分类栏里没有「${cat}」。该栏当前有：${String(pick).slice(5)}` };
-  }
-  // 【点了不等于选上了】选中的卡片会被加上 active 类。没加就是没选上——
-  // 这时候继续点「确认」，要么灰着点不动、要么存了个空分类，而错误会一路飘到后面才炸。
-  //
-  // 两个坑，都踩过：
-  // ① 类名是 React 异步加上的，点完【立刻】查会查到"没选中"（实测点后约 1.2s 内还没加上，
-  //    过一会儿再看就有了）。所以要轮询，不能查一次就下结论。
-  // ② 判断【绝不能用单词边界正则】去匹配 active：这段代码在模板字符串里，那个转义会被 JS
-  //    当成【退格符】，发到浏览器的正则里 active 两侧成了退格字符，永远匹配不上——
-  //    于是明明选中了却报"没被选中"，真因藏在转义里，查半天。用 classList.contains 从根上避开。
-  let active = false;
-  for (let i = 0; i < 8 && !active; i++) {
-    await client.sleep(500);
-    const r = await client.evaluate(`(function(){
-      var name=${JSON.stringify(cat)};
-      var hit=[].slice.call(document.querySelectorAll('.category-choose-item')).filter(function(e){var ti=e.querySelector('.category-choose-item-title');return ((ti?ti.textContent:e.textContent)||'').trim()===name;})[0];
-      if(!hit) return 'gone';
-      return hit.classList.contains('active')?'1':'0';
-    })()`);
-    active = r === '1';
-  }
-  if (!active) return { ok: false, error: `点了「${cat}」但它一直没被选中（等了 4 秒，卡片没加上 active）——番茄改版或点击被拦截` };
-  log(`主分类「${cat}」已选中`);
+  const TAGJS = `
+    function __sectionHost(modal, name){
+      var host=null, best=1e9;
+      var all=modal.querySelectorAll('*');
+      for(var i=0;i<all.length;i++){
+        var e=all[i], t=e.textContent||'';
+        if(t.indexOf(name)<0) continue;
+        if(!e.querySelectorAll('.category-choose-item').length) continue;
+        if(t.length<best){best=t.length;host=e;}
+      }
+      return host;
+    }
+    function __cardName(e){ var ti=e.querySelector('.category-choose-item-title'); return ((ti?ti.textContent:e.textContent)||'').trim(); }
+    function __bigModal(){
+      var m=[].slice.call(document.querySelectorAll('.arco-modal')).filter(function(e){return e.getBoundingClientRect().width>300;});
+      return m.length?m[m.length-1]:null;
+    }`;
 
-  const okRes = await client.evaluate(`(function(){${FIRE}
-    var b=[].slice.call(document.querySelectorAll('button')).filter(function(e){return (e.textContent||'').trim()==='确认';}).pop();
-    if(!b) return 'no-btn';
-    if(b.disabled) return 'disabled';
-    __fire(b);
-    return 'ok';
-  })()`);
-  if (okRes === 'no-btn') return { ok: false, error: '标签弹窗里没找到「确认」按钮' };
-  if (okRes === 'disabled') return { ok: false, error: `「确认」按钮是灰的——${cat} 可能没真正选上，或番茄还要求选主题/角色/情节` };
-  await client.sleep(1400);
-  // 确认之后弹窗该关了；没关说明它不认这次确认
-  if (await dialogOpen()) return { ok: false, error: '点了「确认」但标签弹窗没关——分类没存进去，先别创建' };
+  // 打开某个标签选择框（阅读标签 / 内容标签），验证 + 重试。
+  const openTagDialog = async (which) => {
+    const isOpen = async () => (await client.evaluate(`(function(){${TAGJS} var m=__bigModal(); return m?'1':'0';})()`)) === '1';
+    if (await isOpen()) return { ok: true };
+    for (let i = 0; i < 5; i++) {
+      const r = await client.evaluate(`(function(){${FIRE}
+        var wrap=[].slice.call(document.querySelectorAll('.cate-wrap')).find(function(e){return (e.textContent||'').indexOf(${JSON.stringify('WHICH')})>=0;});
+        if(!wrap) return 'no-wrap';
+        var sv=wrap.querySelector('.select-view')||wrap.querySelector('.select-row');
+        if(!sv) return 'no-sv';
+        __fire(sv);
+        return 'fired';
+      })()`.replace(JSON.stringify('WHICH'), JSON.stringify(which)));
+      if (r === 'no-wrap' || r === 'no-sv') return { ok: false, why: `未找到「${which}」选择框（番茄改版？）` };
+      await client.sleep(1800);
+      if (await isOpen()) return { ok: true };
+      log(`「${which}」弹窗没打开，重试第 ${i + 1} 次…`, 'warn');
+    }
+    return { ok: false, why: `「${which}」弹窗点了 5 次都没打开（页面没加载完 / 有东西挡着 / 番茄改版）` };
+  };
+
+  // 在已打开的弹窗里，按分栏勾选若干标签。
+  // wanted = { 分栏名: [标签名…] }。返回 {ok, picked:[], missed:[]}。
+  // 【点了不等于选上了】选中的卡片会加 active 类，而且是 React 异步加的——
+  // 点完立刻查会查到"没选中"（实测 1.2 秒内还没加上）。所以逐个轮询确认。
+  const selectTags = async (wanted) => {
+    const picked = [], missed = [];
+    for (const [section, names] of Object.entries(wanted)) {
+      for (const name of (names || [])) {
+        const r = await client.evaluate(`(function(){${FIRE}${TAGJS}
+          var m=__bigModal(); if(!m) return 'no-modal';
+          var host=__sectionHost(m, ${JSON.stringify(section)}); if(!host) return 'no-section';
+          var items=[].slice.call(host.querySelectorAll('.category-choose-item'));
+          var hit=items.filter(function(e){return __cardName(e)===${JSON.stringify(name)};})[0];
+          if(!hit) return 'MISS|'+items.map(__cardName).join('、');
+          if(hit.classList.contains('active')) return 'ALREADY';
+          __fire(hit);
+          return 'FIRED';
+        })()`);
+        if (r === 'no-modal') return { ok: false, why: '弹窗不见了' };
+        if (r === 'no-section') { missed.push(`${section}·${name}（这个弹窗里没有「${section}」这一栏）`); continue; }
+        if (String(r).startsWith('MISS|')) { missed.push(`${section}·${name}（该栏没有这一项）`); continue; }
+        if (r === 'ALREADY') { picked.push(`${section}·${name}`); continue; }
+        let on = false;
+        for (let i = 0; i < 8 && !on; i++) {
+          await client.sleep(400);
+          on = (await client.evaluate(`(function(){${TAGJS}
+            var m=__bigModal(); if(!m) return '0';
+            var host=__sectionHost(m, ${JSON.stringify(section)}); if(!host) return '0';
+            var hit=[].slice.call(host.querySelectorAll('.category-choose-item')).filter(function(e){return __cardName(e)===${JSON.stringify(name)};})[0];
+            return (hit&&hit.classList.contains('active'))?'1':'0';
+          })()`)) === '1';
+        }
+        if (on) picked.push(`${section}·${name}`);
+        else missed.push(`${section}·${name}（点了但没选上，可能超了该栏上限）`);
+      }
+    }
+    return { ok: true, picked, missed };
+  };
+
+  // 点「确认」关掉弹窗。灰着/没关 都要报出来——那意味着没存进去。
+  const confirmTagDialog = async (which) => {
+    const r = await client.evaluate(`(function(){${FIRE}
+      var b=[].slice.call(document.querySelectorAll('button')).filter(function(e){return (e.textContent||'').trim()==='确认';}).pop();
+      if(!b) return 'no-btn';
+      if(b.disabled) return 'disabled';
+      __fire(b);
+      return 'ok';
+    })()`);
+    if (r === 'no-btn') return { ok: false, why: `「${which}」弹窗里没找到「确认」按钮` };
+    if (r === 'disabled') return { ok: false, why: `「${which}」的「确认」按钮是灰的——必选项可能还没选` };
+    await client.sleep(1400);
+    const still = (await client.evaluate(`(function(){${TAGJS} return __bigModal()?'1':'0';})()`)) === '1';
+    if (still) return { ok: false, why: `点了「确认」但「${which}」弹窗没关——没存进去，先别创建` };
+    return { ok: true };
+  };
+
+  // —— 阅读标签：主分类(必选1) + 主题/角色/情节(各≤2) ——
+  log(`选择阅读标签（主分类「${cat}」${Object.values(readTags || {}).flat().length ? ' + ' + Object.values(readTags).flat().join('、') : ''}）…`);
+  { const r = await openTagDialog('阅读标签'); if (!r.ok) return { ok: false, error: r.why }; }
+  {
+    const r = await selectTags({ 主分类: [cat] });
+    if (!r.ok) return { ok: false, error: r.why };
+    if (!r.picked.length) {
+      // 找不到主分类时【把该栏真实有的列出来】，别拿"频道不对"去猜原因——
+      // 作者撞过一次：报"男频不含历史脑洞"，而历史脑洞就是男频第 10 项，真因是弹窗没打开。
+      const have = await client.evaluate(`(function(){${TAGJS}
+        var m=__bigModal(); if(!m) return '';
+        var host=__sectionHost(m,'主分类'); if(!host) return '';
+        return [].slice.call(host.querySelectorAll('.category-choose-item')).map(__cardName).join('、');
+      })()`);
+      return { ok: false, error: `「阅读标签」的主分类栏里没有「${cat}」。该栏当前有：${have || '(读不到)'}` };
+    }
+    log(`主分类「${cat}」已选中`);
+    if (readTags && Object.keys(readTags).length) {
+      const r2 = await selectTags(readTags);
+      if (r2.picked.length) log(`阅读标签已选：${r2.picked.join('、')}`);
+      if (r2.missed.length) log(`阅读标签没选上：${r2.missed.join('；')}`, 'warn');
+    }
+  }
+  { const r = await confirmTagDialog('阅读标签'); if (!r.ok) return { ok: false, error: r.why }; }
+
+  // —— 内容标签：情节≤4 / 情感≤2 / 人设≤4 / 世界观≤1。全可选，选不上不拦着建书 ——
+  // 作者要求「内容标签也需要提前选好」。但它不是必填，所以这里失败只警告不中断：
+  // 为了几个分发标签把整本书的创建卡住，得不偿失（主分类那种必选项才值得拦）。
+  if (contentTags && Object.values(contentTags).flat().length) {
+    log(`选择内容标签（${Object.values(contentTags).flat().join('、')}）…`);
+    const op = await openTagDialog('内容标签');
+    if (!op.ok) log(`内容标签没能打开：${op.why}（不影响创建，可事后在番茄补）`, 'warn');
+    else {
+      const r = await selectTags(contentTags);
+      if (r.picked.length) log(`内容标签已选：${r.picked.join('、')}`);
+      if (r.missed.length) log(`内容标签没选上：${r.missed.join('；')}`, 'warn');
+      const cf = await confirmTagDialog('内容标签');
+      if (!cf.ok) log(`内容标签没存上：${cf.why}（不影响创建，可事后在番茄补）`, 'warn');
+    }
+  }
 
   if (!autoSubmit) {
     return { ok: true, semiManual: true, msg: `已在番茄填好《${title}》创建表单（${channel}·${cat}·简介${intro.length}字）。请到该浏览器核对后点「立即创建」。` };
