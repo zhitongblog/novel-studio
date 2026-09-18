@@ -155,4 +155,58 @@ test('体检是只读的——不许动书目录里的任何东西', () => {
   } finally { rm(b); }
 });
 
+
+// —— 重设计·二：抽屉重排的守则 ——
+// 这一批只搬家、不动功能。最大的风险就是【搬丢一个 id】——丢一个就断一个功能，
+// 而断了未必当场看得出来（按钮还在，点了没反应）。所以拿测试钉住。
+
+test('五个抽屉都在，且只有「接着写」默认展开', () => {
+  const html = fs.readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
+  for (const id of ['dwWrite', 'dwCheck', 'dwLook', 'dwShip', 'dwSettings']) {
+    assert.ok(html.includes(`id="${id}"`), `抽屉 ${id} 不见了`);
+  }
+  // 只有 dwWrite 带 open：一进门只展开日常主路径，其余收起
+  const openOnes = [...html.matchAll(/<details class="drawer[^"]*" id="(\w+)" open>/g)].map(m => m[1]);
+  assert.deepEqual(openOnes, ['dwWrite'], 'HTML 里只该有「接着写」默认展开');
+});
+
+test('每个控件都落在它该在的抽屉里', () => {
+  const html = fs.readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
+  const bodyOf = (id) => {
+    const i = html.indexOf(`id="${id}"`);
+    const next = html.indexOf('<details', i + 10);
+    return html.slice(i, next < 0 ? html.length : next);
+  };
+  const want = {
+    dwWrite: ['btnCowrite', 'btnStart', 'btnStop', 'btnVolPlan', 'btnStudio', 'writeTask', 'btnSend'],
+    dwCheck: ['btnRead', 'btnReview', 'btnOutline', 'btnRebuildOutline'],
+    dwLook: ['btnVoice', 'btnStyle', 'btnRefStyle', 'btnCover', 'synText'],
+    dwShip: ['btnPublish', 'btnFinale', 'btnRewrite'],
+    dwSettings: ['writeModel', 'writeMode', 'statelessMode', 'wbTarget'],
+  };
+  for (const [drawer, ids] of Object.entries(want)) {
+    const seg = bodyOf(drawer);
+    for (const id of ids) assert.ok(seg.includes(`id="${id}"`), `${id} 不在 ${drawer} 里`);
+  }
+});
+
+test('不可逆的三件事必须在危险区里，不能跟「阅读」平级', () => {
+  const html = fs.readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
+  assert.ok(/class="drawer danger-zone" id="dwShip"/.test(html), '拿出去那一栏要有 danger-zone');
+  for (const id of ['btnPublish', 'btnFinale', 'btnRewrite']) {
+    const m = html.match(new RegExp(`<button class="([^"]*)" id="${id}"`));
+    assert.ok(m && /danger-out/.test(m[1]),
+      `${id} 要带 danger-out：发到番茄读者立刻可见、重写会覆盖已写正文、完本会触发签约流程——` +
+      '这三件事以前跟「阅读」长一个样，同样大小同样颜色');
+  }
+});
+
+test('抽屉开合要记住，但记不住不能崩', () => {
+  const app = fs.readFileSync(new URL('../ui/app.js', import.meta.url), 'utf8');
+  const seg = app.slice(app.indexOf('function initDrawers'));
+  assert.ok(/localStorage/.test(seg.slice(0, 1200)), '每次进来都要重新展开一遍，等于把收纳的好处还回去了');
+  assert.ok((seg.slice(0, 1200).match(/catch/g) || []).length >= 2,
+    'localStorage 在隐私模式/禁用站点数据时会抛错——记不住不是错，崩了才是');
+});
+
 console.log('\n全部通过 ✅  软件知道的事，终于会主动说出口了');

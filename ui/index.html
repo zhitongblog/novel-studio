@@ -70,73 +70,10 @@
         </header>
         <div class="workbench">
           <div class="wb-left">
+            <!-- 「此刻」：处境 + 该处理的异常 + 一个主行动 -->
             <div class="board" id="wbBoard"></div>
-            <label class="field">
-              <span>模型</span>
-              <select id="writeModel"></select>
-            </label>
-            <label class="field">
-              <span>写作指令</span>
-              <textarea id="writeTask" rows="5" placeholder="例如：续写下一批 3 章，写完自检"></textarea>
-            </label>
-            <label class="field">
-              <span>参与度（随时可切）</span>
-              <select id="writeMode">
-                <option value="auto">🤖 放手写 · 全自动，我回来验收</option>
-                <option value="volume">🧭 卷口把关 · 平时自动，开新卷时停下让我定大纲（推荐）</option>
-                <option value="chapter">✍️ 盯着写 · 每批写完我先过</option>
-              </select>
-            </label>
-            <label class="field stateless-toggle" title="【默认·推荐】每章用全新无头进程写作、写完即弃会话，靠精准上下文包重喂前文。对长篇可省一个数量级 token、更快、不漂移。无窗口镜像，进度看下方日志。关掉才回到长驻会话模式（越写越贵，不推荐）。">
-              <span>♻️ 无状态省钱模式 <span style="color:#58c1a6;font-size:11px">（默认·长篇必开）</span></span>
-              <span class="sl-controls">
-                <input type="checkbox" id="statelessMode" checked />
-                <span class="sl-batch" id="slBatchWrap">批数 <input id="statelessBatches" type="number" min="1" value="3" style="width:54px" /></span>
-              </span>
-            </label>
-            <label class="field hidden" id="webProfileWrap" title="网页版写作需驱动一个已登录该聊天站点（千问/豆包/ChatGPT/Claude）的 Unzoo 账号窗口。选一个已登录的账号，引擎会把上下文包送进它的聊天框、抓正文落盘。">
-              <span>🌐 网页账号（Unzoo）</span>
-              <select id="webProfile"><option value="">（加载账号列表…）</option></select>
-            </label>
-            <div class="write-modes">
-              <button class="btn primary big" id="btnCowrite" title="你出主意→AI 只写一章→你读→满意再写下一章。你定每章走向，AI 不自作主张，从根上治“越写越漂”。推荐。需 claude 或 codex。">🤝 我来主笔 · 共创<span class="tag-rec">推荐</span><small>你定每章走向 · AI 执笔 · 你逐章把关</small></button>
-              <div class="write-alt">
-                <button class="btn" id="btnStart" title="autopilot 全自动连续写。省事，但容易越写越跑偏——务必配合上方健康体检 / 复检。">🤖 放手让它写（全自动）</button>
-                <button class="btn danger" id="btnStop" disabled>■ 停止</button>
-                <button class="btn" id="btnVolPlan" title="写一卷之前，先跟 AI 共创这一卷的章级大纲，改定了再写。全书只有粗罗盘，每卷你把关，故事不跑偏。新书和已建的书都能用。">🧭 本卷大纲</button>
-                <button class="btn" id="btnStudio" title="用大白话让 AI 改角色/设定或某卷大纲——AI 只改对应文件、不写新正文、不动已写章节，你不用碰 md。">✍️ 改设定/大纲</button>
-              </div>
-              <div class="write-tip">⚠️ 完全交给 AI 容易跑偏（看上方健康体检的硬伤数）。要质量就用<b>【共创】</b>：你当导演定走向，AI 执笔，你逐章把关。</div>
-            </div>
-            <div class="btn-row">
-              <button class="btn" id="btnRead" title="阅读全书已写章节：左边选章、右边舒适阅读。共创/写作后可随时在这里读当前创作的章节。">📖 阅读</button>
-              <button class="btn" id="btnReview">🔍 复检</button>
-              <button class="btn" id="btnRebuildOutline" title="据已写正文逆向重建 设定圣经 + 各卷分章大纲（不写新正文）。导入的番茄书/半成品书第一次用它补齐规划。">🧭 重建设定+大纲</button>
-              <button class="btn" id="btnOutline">📋 大纲审稿</button>
-              <button class="btn" id="btnFinale">🏁 完本</button>
-              <button class="btn" id="btnVoice" title="本书文风的唯一来源：挂范本、看手法卡">🖋️ 文风范本</button>
-              <button class="btn" id="btnRewrite">♻️ 重写</button>
-              <button class="btn" id="btnStyle">🎨 文风</button>
-              <button class="btn" id="btnRefStyle" title="对标书风格学习：贴一段对标作品正文，AI 分析出文风指南，保存后写作自动照这个腔写。只学腔、不抄内容。">📚 对标风格</button>
-              <button class="btn" id="btnCover">🖼️ 封面</button>
-              <button class="btn" id="btnPublish">📤 发布番茄</button>
-            </div>
-            <div class="synopsis-box">
-              <div class="syn-head">
-                <span>📄 简介（约150字，可改）</span>
-                <span class="syn-actions">
-                  <button class="btn tiny" id="btnGenSyn">✍️ 生成</button>
-                  <button class="btn tiny" id="btnCopySyn">📋 复制</button>
-                </span>
-              </div>
-              <textarea id="synText" rows="4" placeholder="点&quot;生成&quot;让 AI 写一段约150字简介；可手动编辑，失焦自动保存，方便复制发布…"></textarea>
-            </div>
-            <label class="field"><span>目标章节数（0=不限；写到就自动停）</span>
-              <input id="wbTarget" type="number" min="0" placeholder="0" /></label>
-            <div class="send-box">
-              <input id="sendInput" placeholder="穿插一条指令到正在写作的窗口…" />
-              <button class="btn" id="btnSend">穿插</button>
-            </div>
+
+            <!-- 待你拍板的事：它是被动冒出来的，属于"此刻"，所以紧跟看板、不进抽屉 -->
             <div class="review-bar hidden" id="reviewBar">
               <div class="rb-head">⏸ <b id="rbTitle">审稿意见待确认</b><span class="rb-file" id="rbFile"></span></div>
               <div class="rb-items hidden" id="rbItems"></div>
@@ -152,6 +89,113 @@
                 <button class="btn ghost danger" id="rbStop">■ 停止</button>
               </div>
             </div>
+
+            <!-- ① 接着写：日常主路径，默认展开 -->
+            <details class="drawer" id="dwWrite" open>
+              <summary><span class="dw-t">✍️ 接着写</span></summary>
+              <div class="drawer-body">
+                <div class="write-modes">
+                  <button class="btn primary big" id="btnCowrite" title="你出主意→AI 只写一章→你读→满意再写下一章。你定每章走向，AI 不自作主张，从根上治“越写越漂”。推荐。需 claude 或 codex。">🤝 我来主笔 · 共创<span class="tag-rec">推荐</span><small>你定每章走向 · AI 执笔 · 你逐章把关</small></button>
+                  <div class="write-alt">
+                    <button class="btn" id="btnStart" title="autopilot 全自动连续写。省事，但容易越写越跑偏——务必配合上方体检和「查一查」里的复检。">🤖 放手让它写（全自动）</button>
+                    <button class="btn danger" id="btnStop" disabled>■ 停止</button>
+                    <button class="btn" id="btnVolPlan" title="写一卷之前，先跟 AI 共创这一卷的章级大纲，改定了再写。全书只有粗罗盘，每卷你把关，故事不跑偏。新书和已建的书都能用。">🧭 本卷大纲</button>
+                    <button class="btn" id="btnStudio" title="用大白话让 AI 改角色/设定或某卷大纲——AI 只改对应文件、不写新正文、不动已写章节，你不用碰 md。">✍️ 改设定/大纲</button>
+                  </div>
+                  <div class="write-tip">⚠️ 完全交给 AI 容易跑偏（看上方体检）。要质量就用<b>【共创】</b>：你当导演定走向，AI 执笔，你逐章把关。</div>
+                </div>
+                <label class="field">
+                  <span>这一批想让它怎么写（留空＝按规范续写）</span>
+                  <textarea id="writeTask" rows="4" placeholder="例如：续写下一批 3 章，写完自检"></textarea>
+                </label>
+                <div class="send-box">
+                  <input id="sendInput" placeholder="正在写的时候，插一句话给它…" />
+                  <button class="btn" id="btnSend">插一句</button>
+                </div>
+              </div>
+            </details>
+
+            <!-- ② 查一查：出了问题才来，收起 -->
+            <details class="drawer" id="dwCheck">
+              <summary><span class="dw-t">🔍 查一查</span></summary>
+              <div class="drawer-body">
+                <div class="btn-row">
+                  <button class="btn" id="btnRead" title="阅读全书已写章节：左边选章、右边舒适阅读。共创/写作后可随时在这里读当前创作的章节。">📖 阅读</button>
+                  <button class="btn" id="btnReview" title="让 AI 复核并修正已写内容：逻辑/设定矛盾就地改、文风就地润色、节奏给提速方案。">🔍 复检已写的内容</button>
+                  <button class="btn" id="btnOutline" title="换一个模型当主编，审这一卷的大纲，逐条挑要不要改。">📋 让主编看这卷大纲</button>
+                  <button class="btn" id="btnRebuildOutline" title="据已写正文逆向重建 设定圣经 + 各卷分章大纲（不写新正文）。导入的番茄书/半成品书第一次用它补齐规划。">🧭 从正文补回设定和大纲</button>
+                </div>
+              </div>
+            </details>
+
+            <!-- ③ 这本书的样子：定调的事，定完就很少再动，收起 -->
+            <details class="drawer" id="dwLook">
+              <summary><span class="dw-t">🎨 这本书的样子</span></summary>
+              <div class="drawer-body">
+                <div class="btn-row">
+                  <button class="btn" id="btnVoice" title="本书文风的唯一来源：挂范本、看手法卡">🖋️ 文风范本</button>
+                  <button class="btn" id="btnStyle">🎨 文风</button>
+                  <button class="btn" id="btnRefStyle" title="对标书风格学习：贴一段对标作品正文，AI 分析出文风指南，保存后写作自动照这个腔写。只学腔、不抄内容。">📚 对标别人的书</button>
+                  <button class="btn" id="btnCover">🖼️ 封面</button>
+                </div>
+                <div class="synopsis-box">
+                  <div class="syn-head">
+                    <span>📄 简介（约150字，番茄建作品要 50–500 字）</span>
+                    <span class="syn-actions">
+                      <button class="btn tiny" id="btnGenSyn">✍️ 生成</button>
+                      <button class="btn tiny" id="btnCopySyn">📋 复制</button>
+                    </span>
+                  </div>
+                  <textarea id="synText" rows="4" placeholder="点&quot;生成&quot;让 AI 写一段约150字简介；可手动编辑，失焦自动保存，方便复制发布…"></textarea>
+                </div>
+              </div>
+            </details>
+
+            <!-- ④ 拿出去：读者会看到 / 会覆盖已写的。这三件事和「阅读」不该长一个样。 -->
+            <details class="drawer danger-zone" id="dwShip">
+              <summary><span class="dw-t">⚠️ 拿出去</span><span class="dw-sub">读者会看到 · 不好撤回</span></summary>
+              <div class="drawer-body">
+                <div class="dz-note">下面每一件都会留下痕迹：发到番茄读者立刻能看见；重写会覆盖已写的正文；完本会触发签约流程。动手前先想清楚。</div>
+                <div class="btn-row">
+                  <button class="btn danger-out" id="btnPublish" title="把已写章节发到番茄。读者立刻可见，撤不回来。">📤 发布到番茄</button>
+                  <button class="btn danger-out" id="btnFinale" title="收尾完本。系统会逐项核对完本产物（尾声/完本感言、全书完标注、设定已完结），缺了会退回来让它补。">🏁 完本</button>
+                  <button class="btn danger-out" id="btnRewrite" title="推倒重写指定范围的章节——会覆盖已写正文（动手前自动 git 存档，可回退）。">♻️ 重写已写的章节</button>
+                </div>
+              </div>
+            </details>
+
+            <!-- ⑤ 这本书的设定：设置不该和动作并排。定一次，之后很少动。 -->
+            <details class="drawer" id="dwSettings">
+              <summary><span class="dw-t">⚙️ 这本书的设定</span></summary>
+              <div class="drawer-body">
+                <label class="field">
+                  <span>用哪个模型写</span>
+                  <select id="writeModel"></select>
+                </label>
+                <label class="field">
+                  <span>你想参与到什么程度（随时可切）</span>
+                  <select id="writeMode">
+                    <option value="auto">🤖 放手写 · 全自动，我回来验收</option>
+                    <option value="volume">🧭 卷口把关 · 平时自动，开新卷时停下让我定大纲（推荐）</option>
+                    <option value="chapter">✍️ 盯着写 · 每批写完我先过</option>
+                  </select>
+                </label>
+                <label class="field stateless-toggle" title="【默认·推荐】每章用全新无头进程写作、写完即弃会话，靠精准上下文包重喂前文。对长篇可省一个数量级 token、更快、不漂移。无窗口镜像，进度看下方日志。关掉才回到长驻会话模式（越写越贵，不推荐）。">
+                  <span>♻️ 省钱模式 <span style="color:#58c1a6;font-size:11px">（默认 · 长篇必开）</span></span>
+                  <span class="sl-controls">
+                    <input type="checkbox" id="statelessMode" checked />
+                    <span class="sl-batch" id="slBatchWrap">一次写几批 <input id="statelessBatches" type="number" min="1" value="3" style="width:54px" /></span>
+                  </span>
+                </label>
+                <label class="field hidden" id="webProfileWrap" title="网页版写作需驱动一个已登录该聊天站点（千问/豆包/ChatGPT/Claude）的 Unzoo 账号窗口。选一个已登录的账号，引擎会把上下文包送进它的聊天框、抓正文落盘。">
+                  <span>🌐 网页账号（Unzoo）</span>
+                  <select id="webProfile"><option value="">（加载账号列表…）</option></select>
+                </label>
+                <label class="field"><span>写到多少章就停（0＝不限）</span>
+                  <input id="wbTarget" type="number" min="0" placeholder="0" /></label>
+              </div>
+            </details>
+
             <div class="log-feed" id="logFeed"></div>
           </div>
           <div class="wb-right">

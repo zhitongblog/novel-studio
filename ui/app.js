@@ -3378,3 +3378,22 @@ async function renderEnv() {
 
 boot();
 setInterval(() => { if (!$('#view-shelf').classList.contains('hidden')) refresh(); }, 5000);
+
+// ── 抽屉开合记忆 ─────────────────────────────────────────
+// 「接着写」默认展开（日常主路径），其余默认收起但【记住你上次的选择】——
+// 每次进来都要重新展开一遍，等于把收纳的好处又还回去了。
+// localStorage 可能被禁用/隐私模式抛错，一律兜住：记不住不是错，崩了才是。
+const DRAWER_DEFAULT_OPEN = { dwWrite: true, dwCheck: false, dwLook: false, dwShip: false, dwSettings: false };
+function initDrawers() {
+  for (const [id, defOpen] of Object.entries(DRAWER_DEFAULT_OPEN)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    let saved = null;
+    try { saved = localStorage.getItem('novelstudio:drawer:' + id); } catch {}
+    el.open = saved === null ? defOpen : saved === '1';
+    el.addEventListener('toggle', () => {
+      try { localStorage.setItem('novelstudio:drawer:' + id, el.open ? '1' : '0'); } catch {}
+    });
+  }
+}
+initDrawers();

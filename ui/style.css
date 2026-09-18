@@ -423,3 +423,47 @@ textarea { resize: vertical; line-height: 1.5; }
 /* 主行动：整张卡里唯一的实心按钮——一屏只有一个主行动，其余一律降级 */
 .now-next { flex: none; }
 .now-meta { color: var(--muted); font-size: 11.5px; }
+
+/* ── 抽屉 ──────────────────────────────────────────────
+   原来写作台左栏是一列到底：11 组控件、18 个按钮平铺，四类性质完全不同的东西
+   （设置 / 动作 / 补救 / 出版）同级并排。所有功能永远同时可用、同样醒目，
+   等于没有推荐路径——作者每次进来都要重新决定"我现在该点哪个"。
+   现在按【时机】分层：手边(接着写) / 抽屉(查一查·这本书的样子) / 保险柜(拿出去)。 */
+.drawer {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255,255,255,.02);
+  overflow: hidden;
+}
+.drawer > summary {
+  list-style: none; cursor: pointer;
+  padding: 9px 12px;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--fg);
+  user-select: none;
+}
+.drawer > summary::-webkit-details-marker { display: none; }
+/* 自绘箭头：默认收起指向右，展开转向下 */
+.drawer > summary::before {
+  content: '▸'; color: var(--muted); font-size: 11px;
+  transition: transform .15s ease; flex: none;
+}
+.drawer[open] > summary::before { transform: rotate(90deg); }
+.drawer > summary:hover { background: rgba(255,255,255,.03); }
+.drawer .dw-t { flex: 1; }
+.drawer .dw-sub { color: var(--muted); font-size: 11px; font-weight: 400; }
+.drawer-body {
+  padding: 2px 12px 12px;
+  display: flex; flex-direction: column; gap: 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* 危险区：发布/完本/重写 —— 读者会看到、会覆盖已写的。
+   这三件事以前跟「阅读」长一个样，同样大小同样颜色。现在物理隔开。 */
+.drawer.danger-zone { border-color: rgba(233,90,109,.32); background: rgba(233,90,109,.04); }
+.drawer.danger-zone > summary { color: #f0a0ab; }
+.drawer.danger-zone > summary:hover { background: rgba(233,90,109,.07); }
+.drawer.danger-zone .drawer-body { border-top-color: rgba(233,90,109,.24); }
+.dz-note { font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+.btn.danger-out { border-color: rgba(233,90,109,.42); color: #f0a0ab; }
+.btn.danger-out:hover { border-color: #e95a6d; background: rgba(233,90,109,.12); color: #ffd9de; }
