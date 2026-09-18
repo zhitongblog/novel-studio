@@ -394,3 +394,32 @@ textarea { resize: vertical; line-height: 1.5; }
 .nb-cand-mark { font-size: 12px; opacity: .7; white-space: nowrap; }
 .nb-cand.on .nb-cand-mark { opacity: 1; color: var(--accent, #6aa9ff); }
 .nb-cand-body { white-space: pre-wrap; font-size: 13px; line-height: 1.7; max-height: 190px; overflow: auto; opacity: .92; }
+
+/* ── 「此刻」卡 ─────────────────────────────────────────
+   替代原来的数字看板。原看板给的是 523章/4245KB/tokens 四个孤立数字，
+   不给结论；而结论软件其实都有（next/nextLabel 早就算出来了，前端一次没用过）。
+   这里的规矩：每条信息都带着它的动作，一屏只有一个主行动。 */
+.now-card { display: flex; flex-direction: column; gap: 10px; }
+.now-line { font-size: 13.5px; color: var(--fg); letter-spacing: .2px; }
+
+.now-issues { display: flex; flex-direction: column; gap: 6px; }
+.now-issue {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 9px; border-radius: 8px;
+  background: rgba(255,255,255,.03); border: 1px solid var(--border);
+  font-size: 12.5px; line-height: 1.5;
+}
+/* 颜色只用来分轻重，不用来装饰：红=该立刻处理，黄=该知道，灰=顺带一提 */
+.now-issue .ni-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--muted); }
+.now-issue.bad  { border-color: rgba(233,90,109,.38); background: rgba(233,90,109,.07); }
+.now-issue.bad  .ni-dot { background: #e95a6d; }
+.now-issue.warn { border-color: rgba(228,179,86,.34); background: rgba(228,179,86,.06); }
+.now-issue.warn .ni-dot { background: #e4b356; }
+.now-issue .ni-text { flex: 1; min-width: 0; color: var(--fg); }
+.now-issue .ni-act { flex: none; }
+.now-clean { font-size: 12.5px; color: var(--muted); padding: 2px 0; }
+
+.now-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
+/* 主行动：整张卡里唯一的实心按钮——一屏只有一个主行动，其余一律降级 */
+.now-next { flex: none; }
+.now-meta { color: var(--muted); font-size: 11.5px; }

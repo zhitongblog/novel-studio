@@ -155,35 +155,86 @@ function openWrite(book) {
   renderBoard(book.slug);   // 创作看板：我在哪 / 健康体检 / 下一步
   if (running) openStream(book.slug);
 }
-// 创作看板
+// 「此刻」卡：一本书的处境 + 该处理的异常 + 一个主行动。
+//
+// 替代原来的「创作看板」。原看板只给数字（523章 / 4245KB / tokens），不给结论——
+// 而结论所需要的材料软件全都有，只是没人把它们摆出来：
+//   · 后端 /api/book/dashboard 【早就算出了 next/nextLabel】（继续往下写 / 去发行 /
+//     待你定大纲 / 去处理…），而前端一次都没引用过。软件知道你该干什么，从来没说。
+//   · 缺章、漏发、标着完本却没写完、模型跑不了省钱模式——这些今天全靠人工翻查才发现。
+//
+// 设计原则：【每条信息都要带着它的动作】。不报"523 章"，报"写到 525 章、12 章没发 → 去发"。
+// 只报事实不给出口，等于把活儿又推回给作者。
+const NOW_NEXT_ACT = {
+  write: () => $('#btnCowrite')?.click(),
+  watch: () => $('#logFeed')?.scrollIntoView({ behavior: 'smooth', block: 'center' }),
+  outline: () => $('#btnVolPlan')?.click(),
+  review: () => $('#reviewBar')?.scrollIntoView({ behavior: 'smooth', block: 'center' }),
+  finale: () => $('#btnFinale')?.click(),
+  publish: () => $('#btnPublish')?.click(),
+};
+const NOW_ISSUE_ACT = {
+  cowrite: () => $('#btnCowrite')?.click(),
+  read: () => $('#btnRead')?.click(),
+  publish: () => $('#btnPublish')?.click(),
+  finale: () => $('#btnFinale')?.click(),
+  synopsis: () => $('#synText')?.focus(),
+  settings: () => $('#writeModel')?.focus(),
+};
+
 async function renderBoard(slug) {
   const box = $('#wbBoard'); if (!box) return;
-  box.innerHTML = '<div class="board-load">看板加载中…</div>';
-  try {
-    const d = await api('/api/book/dashboard?book=' + encodeURIComponent(slug));
-    const wan = (d.words / 10000);
-    const wanTxt = wan >= 1 ? wan.toFixed(1) + '万' : Math.round(d.words) + '字';
-    const volTxt = d.curVol ? '卷' + d.curVol + (d.plannedVolumes ? '/' + d.plannedVolumes : '') : '筹备中';
-    const h = d.health || {};
-    const healthRows = [];
-    healthRows.push(`<div class="bd-h"><span class="dot ${h.ledger ? 'ok' : 'bad'}"></span>连贯性台账${h.ledger ? '在盯着' : '缺失'}</div>`);
-    if (h.lastReview) {
-      const clean = (h.crit || 0) === 0 && (h.warn || 0) === 0;
-      healthRows.push(`<div class="bd-h"><span class="dot ${clean ? 'ok' : (h.crit ? 'bad' : 'warn')}"></span>最近自检：${h.crit ? '硬伤 ' + h.crit + ' 处' : ''}${h.warn ? (h.crit ? ' · ' : '') + '隐患 ' + h.warn + ' 处' : ''}${clean ? '未见硬伤/隐患' : ''}</div>`);
-    }
-    const pct = d.plannedChapters ? d.progress : null;
-    box.innerHTML =
-      `<div class="bd-head"><span class="bd-status">${esc(d.status || '连载中')}</span>${d.participation ? '<span class="bd-part">' + ({ auto: '🤖放手写', volume: '🧭卷口把关', chapter: '✍️盯着写' }[d.participation] || '') + '</span>' : ''}</div>` +
-      `<div class="bd-kpis">` +
-        `<div class="bd-kpi"><b>${esc(volTxt)}</b><span>进度</span></div>` +
-        `<div class="bd-kpi"><b>${d.chapters}</b><span>已写章</span></div>` +
-        `<div class="bd-kpi"><b>${esc(wanTxt)}</b><span>字数</span></div>` +
-        `<div class="bd-kpi"><b>${fmtTok(d.tokens || 0)}</b><span>tokens</span></div>` +
-      `</div>` +
+  box.innerHTML = '<div class="board-load">正在看这本书的情况…</div>';
+  // 两个请求一起发：处境（dashboard）和体检（checkup）。
+  // 任一失败都不能让整张卡消失——宁可少一块，也别让作者对着"暂不可用"发呆。
+  const [d, chk] = await Promise.all([
+    api('/api/book/dashboard?book=' + encodeURIComponent(slug)).catch(() => null),
+    api('/api/book/checkup?book=' + encodeURIComponent(slug)).catch(() => null),
+  ]);
+  if (!d) { box.innerHTML = '<div class="board-load">这本书的情况读不出来（引擎没响应？）</div>'; return; }
+
+  const wan = (d.words / 10000);
+  const wanTxt = wan >= 1 ? wan.toFixed(1) + '万字' : Math.round(d.words) + '字';
+  const volTxt = d.curVol ? '卷' + d.curVol + (d.plannedVolumes ? '/' + d.plannedVolumes : '') : '筹备中';
+  const pct = d.plannedChapters ? d.progress : null;
+
+  // 一句话说清处境——把状态、写到哪、多少字合成人话，而不是四个孤立的数字格子
+  const line = `${esc(d.status || '连载中')} · ${esc(volTxt)} · 写到第 ${d.chapters} 章 · ${esc(wanTxt)}`;
+
+  // 异常条：硬伤/提醒排在前，每条自带一个按钮
+  const items = (chk?.items || []);
+  const issuesHtml = items.length
+    ? `<div class="now-issues">` + items.map((it, i) =>
+        `<div class="now-issue ${esc(it.level)}">` +
+          `<span class="ni-dot"></span>` +
+          `<span class="ni-text">${esc(it.text)}</span>` +
+          (it.action ? `<button class="btn tiny ni-act" data-issue="${i}">${esc(it.action.label)}</button>` : '') +
+        `</div>`).join('') + `</div>`
+    : `<div class="now-clean">✓ 没发现问题</div>`;
+
+  box.innerHTML =
+    `<div class="now-card">` +
+      `<div class="now-line">${line}</div>` +
       (pct != null ? `<div class="bd-bar"><i style="width:${pct}%"></i></div><div class="bd-pct">${pct}% · 目标约 ${d.plannedChapters} 章</div>` : '') +
-      `<div class="bd-health">${healthRows.join('')}</div>`;
-  } catch (e) { box.innerHTML = '<div class="board-load">看板暂不可用</div>'; }
+      issuesHtml +
+      `<div class="now-foot">` +
+        `<button class="btn primary now-next" id="nowNext">${esc(d.nextLabel || '继续往下写')} ▸</button>` +
+        `<span class="now-meta">${d.participation ? ({ auto: '🤖 放手写', volume: '🧭 卷口把关', chapter: '✍️ 盯着写' }[d.participation] || '') : ''} · 用量 ${fmtTok(d.tokens || 0)}</span>` +
+      `</div>` +
+    `</div>`;
+
+  // 主行动：直接用后端算出来的 next——这就是"软件知道你该干什么"那一条，终于说出口了
+  const nn = $('#nowNext');
+  if (nn) nn.onclick = () => { (NOW_NEXT_ACT[d.next] || NOW_NEXT_ACT.write)(); };
+  box.querySelectorAll('.ni-act').forEach((b) => {
+    b.onclick = () => {
+      const it = items[Number(b.dataset.issue)];
+      const fn = it?.action && NOW_ISSUE_ACT[it.action.kind];
+      if (fn) fn();
+    };
+  });
 }
+
 function showWriteView() {
   document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
   $('#view-write').classList.remove('hidden');

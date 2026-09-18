@@ -31,6 +31,7 @@ import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessio
 import { chapterProgressLine, isFirstSight } from './progress.mjs';
 import { FANQIE_CATEGORIES, isValidCategory } from './categories.mjs';
 import { finaleArtifacts, finaleSummary } from './finaledone.mjs';
+import { checkupBook } from './checkup.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
@@ -402,6 +403,15 @@ async function api(p, req, res, u) {
         const book = getBook(u.searchParams.get('book') || ''); if (!book) return json(res, 400, { error: '找不到书' });
         return json(res, 200, readBookFile(book, u.searchParams.get('rel') || ''));
       } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/checkup') {
+      // 体检：把软件已经知道、但从来没说出口的异常摆出来（缺章/漏发/状态与事实不符/模型能力…）。
+      // 每条都带 action，指向界面上真实存在的入口——只报事实不给出口，等于把活儿推回给作者。
+      try {
+        const slug = u.searchParams.get('book');
+        const book = getBook(slug); if (!book) return json(res, 400, { error: '找不到书：' + slug });
+        return json(res, 200, { ok: true, ...checkupBook(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/dashboard') {   // 创作看板：我在哪 / 健康体检 / 下一步
       try {
