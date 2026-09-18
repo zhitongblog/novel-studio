@@ -30,6 +30,7 @@ import { maybeAutoPublish } from './autopublish.mjs';
 import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { chapterProgressLine, isFirstSight } from './progress.mjs';
 import { FANQIE_CATEGORIES, isValidCategory } from './categories.mjs';
+import { finaleArtifacts, finaleSummary } from './finaledone.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
@@ -904,6 +905,16 @@ async function api(p, req, res, u) {
     if (p === '/api/book/set-style') {
       try { const b = setBookStyle(body.book, body.style); return json(res, 200, { ok: true, style: b.style }); }
       catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/finale-check') {
+      // 这本书【真的写完了吗】——只看落盘产物，不问模型，也不看 status。
+      // 用处：已经被错标成「已完本」的书（如大乾女帝：标着完本、没有尾声、结尾是悬念），
+      // 在这里能一眼看出差什么；也给 UI 在标完本前做预检。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const art = finaleArtifacts(book);
+        return json(res, 200, { ok: true, status: book.status || '连载中', finished: art.ok, items: art.items, missing: art.missing, summary: finaleSummary(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/set-category') {
       // 作者自己改番茄频道/主分类。改过的标 by:'user'，之后 AI 不再覆盖。

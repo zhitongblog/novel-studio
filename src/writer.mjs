@@ -18,6 +18,7 @@ import { recordUsage, currentContextSize } from './usage.mjs';
 import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFolders, clearFlatImport, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { runFinaleClosure } from './finale.mjs';
+import { finaleArtifacts, buildFinaleFixInstruction, finaleSummary } from './finaledone.mjs';
 import { continueWithVoice } from './voiceprint.mjs';
 
 const IS_WIN = process.platform === 'win32';
@@ -361,9 +362,38 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       return buildFinaleInstruction(b, { first });
     };
     // 完本闸：作者输出「【完本待审】」→ 主编核对完本清单。过则标已完本+afterword+停；不过退回补写（上限保护）。
+    //
+    // 【"已完本"必须由落盘产物说了算，不能由模型说了算】
+    // 原来 done() 是先 setBookStatus('已完本')，再把收尾指令扔出去并 stop:true——
+    // 指令写没写、写成什么样，无人检查；而那条指令自己还写着"①可选写一章完本感言…"。
+    // 加上三条"放行"路（审稿关了 / 审稿抛异常 / 退回 2 次仍不过），标完本的门槛
+    // 实际上比写完低得多。《大乾女帝贴身神探》就这么挂着完本的牌子在往下铺新坑：
+    // 9/4 标完本（480 章），之后又写了 45 章到 525，没有尾声、结尾是纯悬念。
+    //
+    // 现在：审稿只决定【要不要继续补正文】，标不标完本另看一份【落盘可查的产物清单】
+    // （尾声/完本感言、chapter_index 的"全书完"、bible 的【已完结】）。
+    // 产物没齐 → 发"补齐"指令、stop:false，让它把活干完再回来；补不出来 → 停在「收尾中」，
+    // 把缺什么说清楚，【绝不标完本】。宁可让书停在收尾中，也不给没写完的书盖完本的章。
+    let finaleFixRounds = 0;
     const onFinaleReady = !finaleOn ? undefined : async () => {
       const b = getBook(slug) || book;
+      // 真正落地的"完本"：产物齐了才标，齐不了就别标
       const done = (text) => {
+        const art = finaleArtifacts(getBook(slug) || b);
+        if (!art.ok) {
+          finaleFixRounds++;
+          const cap = cfg.finale?.maxFinaleFixRounds ?? 3;
+          if (finaleFixRounds > cap) {
+            try { setBookStatus(slug, '收尾中'); } catch {}
+            onLog({ level: 'warn', source: 'finale',
+              msg: `⚠️ 催了 ${cap} 轮仍缺完本产物（${art.missing.join('、')}）→ 【不标完本】，书停在「收尾中」等你处理。错标成完本比没标严重得多：番茄那边会按完本走签约/推荐流程。` });
+            return { text: buildFinaleFixInstruction(b, art.missing), stop: true };
+          }
+          onLog({ level: 'warn', source: 'finale',
+            msg: `完本产物还差：${art.missing.join('、')} → 先补齐再标完本（第 ${finaleFixRounds}/${cap} 轮）` });
+          return { text: buildFinaleFixInstruction(b, art.missing), stop: false };
+        }
+        onLog({ level: 'act', source: 'finale', msg: `✅ 完本产物已齐（${art.items.map(i => i.label).join('、')}）→ 标记【已完本】` });
         try { setBookStatus(slug, '已完本'); } catch {}
         // 完结终发布闭环(C)：标已完本后，延迟自动"收口"——把收尾新增章(含尾声/完本感言)发齐到番茄并对账。
         // 延迟是为了等作者把"完本感言/尾声"那一章写完(autopilot 随后即停)。失败不影响完本，UI 也可手动重跑。
@@ -379,13 +409,13 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
         }
         return { text, stop: true };
       };
-      if (cfg.finale?.reviewEnding === false) { onLog({ level: 'act', msg: '已完本（未开完本审稿）', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
+      if (cfg.finale?.reviewEnding === false) { onLog({ level: 'act', msg: '未开完本审稿 → 直接进完本产物核对', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
       let rc;
       try { rc = await reviewEnding({ book: b, cfg, authorModel: model, onLog: (e) => onLog({ ...e, source: 'finale' }) }); }
-      catch (e) { onLog({ level: 'warn', msg: '完本审稿失败 → 放行标完本：' + e.message, source: 'finale' }); return done(buildAfterwordInstruction(b)); }
-      if (rc.pass) { onLog({ level: 'act', msg: '完本审稿通过 → 标记【已完本】', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
+      catch (e) { onLog({ level: 'warn', msg: '完本审稿跑不起来（' + e.message + '）→ 跳过审稿，但完本产物照查不误', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
+      if (rc.pass) { onLog({ level: 'act', msg: '完本审稿通过 → 核对完本产物', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
       const n = (renudgeF.get('完本') || 0) + 1; renudgeF.set('完本', n);
-      if (n > (cfg.finale?.maxRenudge ?? 2)) { onLog({ level: 'warn', msg: '完本审稿仍未过，已达上限 → 标完本（请人工把关结局）', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
+      if (n > (cfg.finale?.maxRenudge ?? 2)) { onLog({ level: 'warn', msg: '完本审稿仍未过、已达上限 → 不再纠结正文，转去核对完本产物（结局质量请你人工把关）', source: 'finale' }); return done(buildAfterwordInstruction(b)); }
       onLog({ level: 'warn', msg: `完本审稿未过 → 第 ${n} 次退回补写结局`, source: 'finale' });
       return { text: buildEndingRenudgeInstruction(b, rc.file), stop: false };
     };
