@@ -81,11 +81,25 @@ export async function openBookTab({ cwd, launchScript, profile, identifyAs }) {
     let mcp = null;
     try {
       mcp = await connectInstance(inst, { identifyAs });
-      let r = null;
+      const before = new Set((await mcp.sessionList()).map(p => String(p.id)));
+      // ⚠️【超时 ≠ 没开出来】2026-09-19 实测：引擎事件循环被别的同步活堵住时，create 的回包
+      // 排在队里超时了，tab 其实已经开好；当时"失败就再开一次"的写法于是开出两个 tab、
+      // 同一本书两个 agy 抢着改，autopilot 还往其中一个里灌了一串 y。
+      // 所以：超时给足；报错后先去 pane 列表里找本书目录的新 pane，确实没有才换参数再开。
+      const attempt = async (params) => {
+        try {
+          const r = await mcp.call('session.create', params, 60000);
+          const id = r?.id ?? r?.pane_id ?? r?.session_id;
+          if (id != null) return id;
+        } catch {}
+        await sleep(1500);
+        const want = normDir(cwd);
+        const fresh = (await mcp.sessionList()).filter(p => !before.has(String(p.id)) && !p.is_dead && normDir(p?.shell?.cwd) === want);
+        return fresh.length ? fresh[fresh.length - 1].id : null;
+      };
       // profile 是 Unterm 的身份 profile；不认识就退回不带 profile 再开一次，别因为它开不了 tab
-      try { r = await mcp.call('session.create', { cwd, argv: shellArgv, ...(profile ? { profile } : {}) }, 20000); }
-      catch { r = await mcp.call('session.create', { cwd, argv: shellArgv }, 20000); }
-      const paneId = r?.id ?? r?.pane_id ?? r?.session_id;
+      let paneId = await attempt({ cwd, argv: shellArgv, ...(profile ? { profile } : {}) });
+      if (paneId == null && profile) paneId = await attempt({ cwd, argv: shellArgv });
       if (paneId != null) return { instance: inst, mcp, paneId };
     } catch {}
     try { mcp?.close?.(); } catch {}

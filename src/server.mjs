@@ -432,7 +432,7 @@ async function api(p, req, res, u) {
             else if (pend) { next = 'review'; nextLabel = '等你拍板'; }
             else if (live) { next = 'watch'; nextLabel = '正在写'; }
             else if (planned > 0 && st.chapters >= planned) { next = 'finale'; nextLabel = '可以收尾了'; }
-            counts = checkupBook(b).counts;
+            counts = memo('chk:' + b.slug, 60000, () => checkupBook(b).counts);
           } catch {}
           out.push({ slug: b.slug, next, nextLabel, ...counts });
         }
@@ -2045,7 +2045,7 @@ async function api(p, req, res, u) {
 function bootstrap(cfg) {
   return {
     config: cfg,
-    models: detectAll(),
+    models: detectAllCached(),
     instances: listInstances().map(i => ({ id: i.id, version: i.version, mcp_port: i.mcp_port, cwd: i.cwd })),
     books: withUsage(listBooksWithStats()),
     sessions: sessionsInfo(),
@@ -2056,9 +2056,27 @@ function bootstrap(cfg) {
 // 都没有(如纯 gemini 书)才回退到屏幕抓取的粗估。返回值是"总处理token(含输入/缓存/推理/输出)"。
 function bookTokens(book) {
   if (!book) return 0;
-  const real = codexTokensForDir(book.dir) + claudeTokensForDir(book.dir);
-  return real || bookUsage(book.slug) || 0;
+  return memo('tokens:' + book.dir, 120000, () => {
+    const real = codexTokensForDir(book.dir) + claudeTokensForDir(book.dir);
+    return real || bookUsage(book.slug) || 0;
+  });
 }
+
+// 【短时缓存：别让书架轮询把事件循环堵死】
+// 2026-09-20 实测：书架页开着时界面每 5 秒拉一次 bootstrap，里面同步统计 12 本书的 token（翻 codex/claude
+// 全部会话日志，≈5s）+ 探测模型（≈1s），书架状态再跑一遍全书架体检（≈6s）——每 5 秒要干 12 秒的同步活，
+// 引擎永远追不上：连 /api/config 都要 10–20 秒才回。窗口模式下 MCP 回包全被延误，
+// 开 tab 的 create 超时后被当成失败重开 → 同一本书开出两个 tab、两个 agy 抢着改。
+// 这些数都不需要秒级新鲜：token 两分钟、模型一分钟、体检计数一分钟。
+const _memo = new Map();
+function memo(key, ttlMs, fn) {
+  const hit = _memo.get(key);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.v;
+  const v = fn();
+  _memo.set(key, { at: Date.now(), v });
+  return v;
+}
+const detectAllCached = () => memo('models', 60000, detectAll);
 function withUsage(books) { return books.map(b => ({ ...b, tokens: bookTokens(b) })); }
 function sessionsInfo() {
   const out = listSessions().map(s => ({ ...s, tokens: bookTokens(getBook(s.slug)), running: rt.has(s.slug) }));

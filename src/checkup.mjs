@@ -23,8 +23,7 @@ import path from 'node:path';
 import { bookStats } from './books.mjs';
 import { finaleArtifacts } from './finaledone.mjs';
 import { canRunHeadless, getModel } from './models.mjs';
-import { loadPublishChapters, bookVolNum } from './publish.mjs';
-import { existingVolName } from './volname.mjs';
+import { bookVolNum, cleanVolSub, outlineVolSubtitle, bibleVolSubtitle } from './publish.mjs';
 
 const chapNumOf = (name) => parseInt((String(name).match(/^(\d{1,4})/) || [])[1] || '0', 10);
 
@@ -151,8 +150,15 @@ export function checkupBook(book) {
 
   // ⑦ 卷没有名字 —— 番茄分卷必须有名字，缺了建卷那一步会卡住；作者要求每一卷都要有名字（2026-09-19）
   try {
-    const vols = [...new Set(loadPublishChapters(book).map(c => bookVolNum(c.vol)).filter(n => n >= 1))].sort((a, b) => a - b);
-    const nameless = vols.filter(v => !existingVolName(book, v));
+    // 只看目录名/大纲文件名/bible，不读章节正文——体检在书架轮询里跑，读正文会把引擎堵住
+    // 空的卷目录（还没写一章）不算卷，起名也没有依据
+    const hasTxt = (d) => { try { return fs.readdirSync(path.join(book.dir, 'chapters', d)).some(f => /\.txt$/i.test(f)); } catch { return false; } };
+    let dirs = []; try { dirs = fs.readdirSync(path.join(book.dir, 'chapters'), { withFileTypes: true }).filter(e => e.isDirectory() && hasTxt(e.name)).map(e => e.name); } catch {}
+    const byVol = new Map();
+    for (const d of dirs) { const n = bookVolNum(d); if (n >= 1) byVol.set(n, [...(byVol.get(n) || []), d]); }
+    const dirHasName = (ds) => ds.some(d => cleanVolSub(String(d).replace(/^卷\s*\d+/, '').replace(/^[_\-．.、:：\s]+/, '')));
+    const nameless = [...byVol.keys()].sort((x, y) => x - y)
+      .filter(v => !dirHasName(byVol.get(v)) && !outlineVolSubtitle(book, v) && !bibleVolSubtitle(book, v));
     if (nameless.length) {
       out.push(issue('warn', 'vol-unnamed',
         `第 ${nameless.join('、')} 卷还没有卷名——番茄分卷必须有名字，建卷时会卡住`,
