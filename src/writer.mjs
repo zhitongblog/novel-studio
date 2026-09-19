@@ -526,7 +526,7 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
     autopilot.start();   // 不 await，后台跑
   }
 
-  return { instance, mcp, autopilot, paneId, pid };
+  return { instance, mcp, autopilot, paneId, pid: instance.pid };
 }
 
 // 认出刚开的窗口里那个 pane。
