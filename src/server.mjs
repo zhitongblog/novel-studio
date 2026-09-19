@@ -1896,9 +1896,15 @@ async function api(p, req, res, u) {
           return json(res, 200, { ...r, mode: 'inserted', snapshot: hash });
         }
         rtOf(book.slug).logs = [];
-        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug) });
+        // 【重写开的窗口只应答、干完就收，不许自动"续写下一批"】
+        // 其他 6 个一次性任务端点（补大纲、完本感言、重建大纲…）开窗都带 autopilotConfirmOnly，
+        // 唯独这里漏了：重写一改完，autopilot 空闲时照常发 continueText「继续下一批…写下一批正文」，
+        // agent 就接着往后写新章——一个"改前 19 章"的任务变成"改完再多写 3 章"，
+        // 新写的还是用改稿前那套老毛病（2026-09-19 给王莽按签约诊断改稿时发现）。
+        // 整本重立项（reproject）是要从头写的，照旧走完整 autopilot。
+        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: !isRe });
         rtOf(book.slug).session = session;
-        pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 已开窗' + (hash ? '（已存档 ' + hash + '，可回退）' : '') });
+        pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 已开窗' + (hash ? '（已存档 ' + hash + '，可回退）' : '') + (isRe ? '' : '——改完这个范围就收窗，不会接着续写新章') });
         return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, snapshot: hash });
       } catch (e) { pushLog(slugOf(body.book), { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
     }

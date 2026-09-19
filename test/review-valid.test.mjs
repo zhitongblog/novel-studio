@@ -124,4 +124,15 @@ test('完本审稿也要走同一套校验——它原来一道都没有', () =>
     '拿不到有效审稿要明说拿不到，不能让调用方以为"审过了"');
 });
 
+
+test('重写开的窗口只应答、干完就收——不许自动续写新章', () => {
+  // 其他一次性任务端点开窗都带 autopilotConfirmOnly，唯独重写漏了：改完之后 autopilot 空闲时
+  // 照常发「继续下一批…写下一批正文」，一个"改前 19 章"的任务就变成"改完再多写 3 章"，
+  // 新写的还是改稿前那套老毛病。整本重立项是要从头写的，照旧走完整 autopilot。
+  const src = fs.readFileSync(new URL('../src/server.mjs', import.meta.url), 'utf8');
+  const i = src.indexOf("p === '/api/book/rewrite'");
+  const seg = src.slice(i, src.indexOf("p === '/api/book/apply-review'", i));
+  assert.ok(/autopilotConfirmOnly: !isRe/.test(seg), '重写要 confirmOnly；重立项（isRe）除外');
+});
+
 console.log('\n全部通过 ✅  垃圾不再被当成审稿收下，能干活的模型也终于等得起了');
