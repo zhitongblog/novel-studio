@@ -114,6 +114,27 @@ test('卷名从模型输出里取，取不到就退回卷号', () => {
   } finally { rm(b); }
 });
 
+test('重建时同一卷的旧大纲要挪走——不能并排留着，也不能删', () => {
+  // 吕布那本实况：新「卷01《一戟定关中》分章大纲.md」旁边还躺着旧的「卷01分章大纲.md」，
+  // outlineFilesFor 按 /卷0*1/ 两份都会匹配上，拼在一起互相打架。
+  const b = mkBook({ 卷01: ['001_a.txt'] });
+  try {
+    const od = path.join(b.dir, 'outlines');
+    fs.mkdirSync(od, { recursive: true });
+    fs.writeFileSync(path.join(od, '卷01分章大纲.md'), '作者手写的真内容，不能丢');
+    fs.writeFileSync(path.join(od, '卷02分章大纲.md'), '别的卷，不该被碰');
+    fs.writeFileSync(path.join(od, '卷10分章大纲.md'), '卷10 不是卷1，不该被碰');
+    saveVolumeOutline(b, '卷01', '# 卷01一戟定关中分章大纲\n\n新内容');
+    const top = fs.readdirSync(od).filter(f => f.endsWith('.md')).sort();
+    assert.deepEqual(top, ['卷01一戟定关中分章大纲.md', '卷02分章大纲.md', '卷10分章大纲.md'],
+      '顶层只该剩新的卷01 + 别的卷；卷10 不能被当成卷1 误伤');
+    const arch = fs.readdirSync(path.join(od, '_旧版'));
+    assert.equal(arch.length, 1);
+    assert.equal(fs.readFileSync(path.join(od, '_旧版', arch[0]), 'utf8'), '作者手写的真内容，不能丢',
+      '旧大纲可能是作者手写的，挪走而不是删除');
+  } finally { rm(b); }
+});
+
 test('摘要 prompt 要把章数说死，好核对', () => {
   const b = mkBook({ 卷01: ['001_a.txt', '002_b.txt'] });
   try {

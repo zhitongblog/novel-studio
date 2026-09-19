@@ -169,6 +169,26 @@ export function saveVolumeOutline(book, vol, text) {
   const m = String(text || '').match(/^#\s*(卷\s*\d+\s*[^\n]*?)分章大纲/m);
   const title = m ? m[1].replace(/\s+/g, '') : vol;
   const file = path.join(odir, `${title}分章大纲.md`);
+  // 【同一卷的旧大纲要挪走，不能并排留着】2026-09-19 吕布那本：新生成的
+  // 「卷01《一戟定关中》分章大纲.md」旁边还躺着旧的「卷01分章大纲.md」。
+  // outlineFilesFor 按 /卷0*1/ 匹配，两份都会被当成卷01大纲拼在一起喂给审稿和写作——
+  // 新大纲说的是 86 章的真实走向，旧的是一份空模板，拼起来互相打架。
+  // 但【不能删】：别的书的旧大纲可能是作者手写的真内容。所以挪进 outlines/_旧版/ 并加时间戳，
+  // 一个字都不丢；outlineFilesFor 只读 outlines/ 顶层，子目录天然不会被拼进来。
+  const num = (String(vol).match(/(\d+)/) || [])[1];
+  if (num) {
+    const same = new RegExp('^卷0*' + parseInt(num, 10) + '(?!\\d).*分章大纲\\.md$');
+    let olds = [];
+    try { olds = fs.readdirSync(odir).filter(f => same.test(f) && path.join(odir, f) !== file); } catch {}
+    if (olds.length) {
+      const arch = path.join(odir, '_旧版');
+      fs.mkdirSync(arch, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      for (const f of olds) {
+        try { fs.renameSync(path.join(odir, f), path.join(arch, `${stamp}_${f}`)); } catch {}
+      }
+    }
+  }
   fs.writeFileSync(file, String(text || '').trim() + '\n', 'utf8');
   return file;
 }
