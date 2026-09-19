@@ -111,7 +111,20 @@ export function writeLaunchScript(book, model, instruction, cfg) {
   if (!m) throw new Error('未知模型：' + model);
   assertCliModel(m, model);
   // 安全网：把任何换行折叠成空格 —— 多行 prompt 会被 agent 当多行草稿、等人工回车，无法自动开跑。
-  const seed = m.seedArgs(instruction, cfg).map(a => String(a).replace(/[\r\n]+/g, ' '));
+  // 【英文双引号在 Windows 上会把一句话切成好几个参数】
+  // 2026-09-19 实证：按签约诊断给王莽改稿，指令里写了 签约诊断里"1–3 章合成 2 章"……
+  // agy 一启动就报 Error: unexpected argument "章合成"——根本没跑起来。
+  // 原因：窗口里是 Windows PowerShell 5.1，`& agy @seed` 把参数传给外部程序时
+  // 不转义内嵌的双引号，Windows 的命令行解析再按引号重新切分，一整句 prompt 被切碎。
+  // 同类病 8022ee4e 修过一次（起书名"参数被 shell 拼碎"），那次修的是拼接方式，
+  // 这次是内容里的引号——作者在界面上随手打个 "…" 就会中招。
+  // 换成中文引号：模型读起来一样，命令行不会再拿它当分隔符。
+  const safeArg = (a) => {
+    let s = String(a).replace(/[\r\n]+/g, ' ');
+    if (IS_WIN) s = s.replace(/"([^"]*)"/g, '“$1”').replace(/"/g, '”');
+    return s;
+  };
+  const seed = m.seedArgs(instruction, cfg).map(safeArg);
   // ⚠️【别再给 agy 写死"走直连"】两天里同一台机器上翻了个个儿：
   //   09-13：直连能回答；挂代理 → FAILED_PRECONDITION: User location is not supported
   //   09-15：直连 → Eligibility check failed: Get ".../oauth2/v2/userinfo": EOF（连不上）；挂代理 → 正常

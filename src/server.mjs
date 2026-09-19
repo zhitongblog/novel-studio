@@ -174,7 +174,12 @@ function mkTerminalStop(slug) {
     try { removeSession(slug); } catch {}
     const st = rt.get(slug);
     try { st?.streamer?.stop(); } catch {}
-    rt.delete(slug);
+    // 【不能 rt.delete】原来这里整条删掉——日志跟着没了，刚写的那句"为什么停"当场被抹掉；
+    // 而且下面那句 broadcast 找的是 rt.get(slug)，删了之后连着的界面一个都收不到"已停止"。
+    // 2026-09-19 王莽改稿：agy 因参数被切碎没启动起来，作者界面上【一个字都没有】，
+    // 会话也消失了，只能去翻 Unterm 窗口才知道是 Error: unexpected argument。
+    // 同 9/17 修过的"开写缘由被 logs=[] 抹掉"是一个模式。只清会话相关的状态，日志和观众留着。
+    if (st) { st.session = null; st.streamer = null; }
     try { broadcast(slug, 'stopped', { reason: 'terminal', detail: reason }); } catch {}
   };
 }

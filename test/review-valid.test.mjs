@@ -135,4 +135,28 @@ test('重写开的窗口只应答、干完就收——不许自动续写新章',
   assert.ok(/autopilotConfirmOnly: !isRe/.test(seg), '重写要 confirmOnly；重立项（isRe）除外');
 });
 
+
+test('Windows 启动脚本里，prompt 的英文双引号要换掉——PowerShell 5.1 会把它吃掉/切碎', async () => {
+  // 2026-09-19 实证：指令里写了 "1–3 章合成 2 章"，agy 报 Error: unexpected argument "章合成"。
+  // 在带 BOM 的 ps1 里用 PS 5.1 实测：英文引号被吃掉（node 收到的是"签约诊断里1–3 章合成…"），
+  // agy 的解析器更进一步把它切成了多个参数。换成中文引号后原样送达。
+  const src = fs.readFileSync(new URL('../src/writer.mjs', import.meta.url), 'utf8');
+  const i = src.indexOf('const safeArg');
+  assert.ok(i > 0, 'writeLaunchScript 要有 safeArg');
+  assert.ok(/IS_WIN\) s = s\.replace\(\/"\(\[\^"\]\*\)"\/g/.test(src.slice(i, i + 300)), '英文双引号要成对换成中文引号');
+});
+
+test('终止收尾不能把"为什么停"连同日志一起删掉', () => {
+  const src = fs.readFileSync(new URL('../src/server.mjs', import.meta.url), 'utf8');
+  const i = src.indexOf('function mkTerminalStop');
+  const seg = src.slice(i, src.indexOf('\n}\n', i));
+  assert.ok(!/rt\.delete\(slug\)/.test(seg),
+    'rt.delete 会把刚写的原因当场抹掉，还让下面的 broadcast 找不到连着的界面——作者什么都看不到');
+});
+
+test('agent 起不来时，要把屏幕上的报错原文带出来', () => {
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  assert.ok(/屏幕最后几行/.test(src), '原来只有一句"请检查模型 CLI 是否可运行"，真正的原因在屏幕上');
+});
+
 console.log('\n全部通过 ✅  垃圾不再被当成审稿收下，能干活的模型也终于等得起了');

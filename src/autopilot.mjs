@@ -266,7 +266,15 @@ export class Autopilot {
       }
       this.noAgentPolls++;
       if (this.noAgentPolls >= (this.opt.startGracePolls || 12)) {
-        this.stop('agent 未能启动（窗口仍停在 shell 提示符，请检查模型 CLI 是否可运行）');
+        // 【把屏幕上的报错原文带出来】原来只有一句"请检查模型 CLI 是否可运行"，
+        // 而真正的原因就在屏幕上——2026-09-19 王莽改稿：屏幕写着
+        // `Error: unexpected argument "章合成"`，作者在界面上却只看到"未能启动"，
+        // 连这句都会被随后的收尾清掉（见 server.mkTerminalStop）。
+        // 取 shell 提示符之前最后几行非空内容，那通常就是 CLI 自己吐的错误。
+        const lines = String(tail || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+        const cut = lines.length && /^PS [A-Z]:\\|[$#>]\s*$/.test(lines[lines.length - 1]) ? lines.slice(0, -1) : lines;
+        const why = cut.slice(-3).join(' ｜ ').slice(0, 240);
+        this.stop('agent 未能启动（窗口仍停在 shell 提示符）' + (why ? '——屏幕最后几行：' + why : '，请检查模型 CLI 是否可运行'));
       }
       return;
     }
