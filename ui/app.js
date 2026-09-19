@@ -218,6 +218,19 @@ const NOW_ISSUE_ACT = {
   settings: () => $('#writeModel')?.focus(),
   // 签约诊断的结论在 reviews/签约诊断.md——有就直接打开看，没有就跑一次
   signdiag: () => { if (CUR) openReaderAt(CUR, 'reviews/签约诊断.md').catch(() => $('#btnSignDiag')?.click()); },
+  // 缺卷名：逐卷让模型按该卷正文/大纲起名（写回 bible 卷名清单），起完刷新此刻卡
+  volname: async (act) => {
+    if (!CUR) return;
+    const vols = act?.vols || [];
+    toast(`正在给第 ${vols.join('、')} 卷起名…`);
+    const got = [], bad = [];
+    for (const num of vols) {
+      const r = await api('/api/book/gen-vol-name', 'POST', { book: CUR.slug, num, force: false }).catch((e) => ({ ok: false, error: e.message }));
+      if (r?.ok) got.push(`第${num}卷《${r.name}》`); else bad.push(`第${num}卷：${r?.error || '失败'}`);
+    }
+    toast([got.length ? '已起名 ' + got.join('、') : '', bad.join('；')].filter(Boolean).join('　'));
+    renderBoard(CUR.slug);
+  },
 };
 
 async function renderBoard(slug) {
@@ -268,7 +281,7 @@ async function renderBoard(slug) {
     b.onclick = () => {
       const it = items[Number(b.dataset.issue)];
       const fn = it?.action && NOW_ISSUE_ACT[it.action.kind];
-      if (fn) fn();
+      if (fn) fn(it.action);
     };
   });
 }

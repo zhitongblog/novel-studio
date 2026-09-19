@@ -18,7 +18,7 @@ export function deleteBook(slugOrId, { deleteFiles = false } = {}) {
   try {
     const s = getSession(b.slug);
     if (s) {
-      closeWindow({ id: s.instanceId, mcp_port: s.mcp_port, auth_token: s.auth_token, pid: s.pid, pane: s.pane }).catch(() => {});
+      closeWindow({ id: s.instanceId, mcp_port: s.mcp_port, auth_token: s.auth_token, pid: s.pid, pane: s.pane, tab: !!s.tab }).catch(() => {});
       removeSession(b.slug);
     }
   } catch {}

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { getModel, detectModel, resolveBin, trustAgyWorkspace } from './models.mjs';
 import {
   ensureProfile, spawnInstance, instancePids, waitForNewInstance, resolveSpawnedInstance,
-  resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow,
+  resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow, killBookAgents, processAlive, winShell,
 } from './unterm.mjs';
 import { connectInstance } from './mcpclient.mjs';
 import { Autopilot } from './autopilot.mjs';
@@ -68,6 +68,29 @@ export async function closeBookOrphans(dir, selfSlug, onLog = () => {}) {
     finally { try { mcp?.close?.(); } catch {} }
   }
   return { panes, windows };
+}
+
+// 在【已经开着的】Unterm 里给这本书开一个 tab 跑 launch 脚本（session.create，0.71.8 实测回 { id }）。
+// 没有开着的 Unterm / 连不上 / create 失败 → 返回 null，由调用方起第一个窗口。
+export async function openBookTab({ cwd, launchScript, profile, identifyAs }) {
+  const shellArgv = IS_WIN
+    ? [winShell(), '-NoLogo', '-NoExit', '-File', launchScript]
+    : [process.env.SHELL || '/bin/zsh', '-l', '-c', `source '${String(launchScript).replace(/'/g, "'\\''")}'; exec "$SHELL" -i`];
+  const alive = listInstances().filter(i => i.mcp_port && (i.pid == null || processAlive(i.pid)));
+  for (const inst of alive) {
+    let mcp = null;
+    try {
+      mcp = await connectInstance(inst, { identifyAs });
+      let r = null;
+      // profile 是 Unterm 的身份 profile；不认识就退回不带 profile 再开一次，别因为它开不了 tab
+      try { r = await mcp.call('session.create', { cwd, argv: shellArgv, ...(profile ? { profile } : {}) }, 20000); }
+      catch { r = await mcp.call('session.create', { cwd, argv: shellArgv }, 20000); }
+      const paneId = r?.id ?? r?.pane_id ?? r?.session_id;
+      if (paneId != null) return { instance: inst, mcp, paneId };
+    } catch {}
+    try { mcp?.close?.(); } catch {}
+  }
+  return null;
 }
 
 // spawn 之前把当前【全局】pane id 拍个快照，用于之后认出"新出现的那个 pane"。
@@ -227,42 +250,49 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
     if (r.panes + r.windows > 0) await new Promise(r2 => setTimeout(r2, 1500));
   } catch {}
 
-  // spawn 新实例
-  const beforePids = instancePids();
-  // 认 pane 的第一判据：spawn 之后【新出现】的那个 pane（0.65 起 pane 编号是全机器共用的）
-  const beforePaneIds = await snapshotPaneIds();
-  onLog({ msg: `spawn 新 Unterm 实例（绑定 profile ${profileName}，cwd ${book.dir}）…` });
-  const pid = spawnInstance({ profile: profileName, cwd: book.dir, launchScript: launch });
-  onLog({ msg: `已启动 unterm 进程 pid=${pid}，等待实例注册…` });
+  // 【只开 tab，不开新窗口】作者要求（2026-09-19）：每本书在【已经开着的 Unterm】里开一个 tab，
+  // 而不是每次 `unterm-cli start` 甩出一个新窗口——书一多桌面上全是窗口。
+  // session.create 在现有窗口里开 tab、直接回 pane id（实测 0.71.8），连"认新 pane"都省了。
+  // 只有机器上一个 Unterm 都没开着时，才起第一个窗口（那时没有窗口可挂 tab）。
+  let instance = null, mcp = null, paneId = null;
+  const opened = await openBookTab({ cwd: book.dir, launchScript: launch, profile: profileName, identifyAs: cfg.untermAgentName });
+  if (opened) {
+    ({ instance, mcp, paneId } = opened);
+    onLog({ msg: `已在现有 Unterm（${instance.id}，v${instance.version}）里开 tab：pane ${paneId}` });
+  } else {
+    const beforePids = instancePids();
+    // 认 pane 的第一判据：spawn 之后【新出现】的那个 pane（0.65 起 pane 编号是全机器共用的）
+    const beforePaneIds = await snapshotPaneIds();
+    onLog({ msg: `没有开着的 Unterm → 启动第一个窗口（profile ${profileName}，cwd ${book.dir}）…` });
+    const pid = spawnInstance({ profile: profileName, cwd: book.dir, launchScript: launch });
+    onLog({ msg: `已启动 unterm 进程 pid=${pid}，等待实例注册…` });
 
-  const { instance, reused } = await resolveSpawnedInstance({ beforePids, pid, cwd: book.dir, timeoutMs: 30000 });
-  if (!instance) throw new Error('未能定位到 Unterm 实例（30s 超时）。请确认 Unterm 正常启动。');
-  onLog({ msg: reused
-    ? `复用实例：${instance.id}  mcp_port=${instance.mcp_port}  v${instance.version}（0.71 起新窗口不再注册独立实例，按 pane 认归属）`
-    : `新实例：${instance.id}  mcp_port=${instance.mcp_port}  v${instance.version}` });
+    const r = await resolveSpawnedInstance({ beforePids, pid, cwd: book.dir, timeoutMs: 30000 });
+    instance = r.instance;
+    if (!instance) throw new Error('未能定位到 Unterm 实例（30s 超时）。请确认 Unterm 正常启动。');
+    onLog({ msg: `实例：${instance.id}  mcp_port=${instance.mcp_port}  v${instance.version}` });
 
-  // 连 MCP（实例刚起，端口可能稍迟，做几次重试）
-  let mcp = null;
-  for (let i = 0; i < 12; i++) {
-    try { mcp = await connectInstance(instance, { identifyAs: cfg.untermAgentName }); break; }
-    catch { await sleep(800); }
+    // 连 MCP（实例刚起，端口可能稍迟，做几次重试）
+    for (let i = 0; i < 12; i++) {
+      try { mcp = await connectInstance(instance, { identifyAs: cfg.untermAgentName }); break; }
+      catch { await sleep(800); }
+    }
+    if (!mcp) throw new Error('连接实例 MCP 失败');
+    onLog({ msg: `已连接实例 MCP（auth ok）` });
+
+    paneId = await waitForPane(mcp, 20000, { beforePaneIds, cwd: book.dir });
+    if (paneId == null) throw new Error('未找到 agent pane');
   }
-  if (!mcp) throw new Error('连接实例 MCP 失败');
-  onLog({ msg: `已连接实例 MCP（auth ok）` });
 
   // 代理：仅靠 launch.ps1 注入的会话级环境变量，不改 unterm 全局配置
   if (cfg.enableProxy) onLog({ msg: `代理已为会话注入环境变量：${proxyUrl() || '(未配置)'}` });
-
-  // 找到 agent 所在 pane
-  const paneId = await waitForPane(mcp, 20000, { beforePaneIds, cwd: book.dir });
-  if (paneId == null) throw new Error('未找到 agent pane');
   onLog({ msg: `agent pane id=${paneId}` });
 
   // 登记为运行中会话，供 send / watch / stop（任意进程）连接
   saveSession({
     slug: book.slug, title: book.title, model,
     instanceId: instance.id, mcp_port: instance.mcp_port, auth_token: instance.auth_token,
-    pane: paneId, pid: instance.pid, startedAt: new Date().toISOString(),
+    pane: paneId, pid: instance.pid, tab: !!opened, startedAt: new Date().toISOString(),
   });
 
   // 启动 autopilot
@@ -281,9 +311,10 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
         try { onLog({ level: 'act', source: 'autopilot', msg: '✅ 本次任务完成，已收起窗口（要不要继续由你定）' }); } catch {}
         try { removeSession(book.slug); } catch {}
         // 先关 pane 再关窗口（0.65 下只杀窗口 pid 会留下还在跑的 agent），关完再断自己的连接
-        closeWindow({ id: instance.id, mcp_port: instance.mcp_port, auth_token: instance.auth_token, pid: instance.pid, pane: paneId })
+        closeWindow({ id: instance.id, mcp_port: instance.mcp_port, auth_token: instance.auth_token, pid: instance.pid, pane: paneId, tab: !!opened })
           .catch(() => {})
-          .finally(() => { try { mcp.close(); } catch {} });
+          // 再按书目录兜底杀 agent 外壳：pane 没关成时 agent 会接着往后写新章（见 killBookAgents）
+          .finally(() => { try { mcp.close(); } catch {} try { killBookAgents(book.dir); } catch {} });
       },
     });
     autopilot.start();

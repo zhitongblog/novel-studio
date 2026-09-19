@@ -754,7 +754,7 @@ export async function writeChaptersFromPlot({ book, model, plot, useLastEnding =
       const s = getSession(book.slug);
       // 先关 pane 再杀窗口进程：0.65 起 agent 不是窗口进程的子进程，只杀窗口会留下一个还在接着写的 agent
       if (s?.pid) {
-        const closed = await closeWindow({ id: s.instanceId, mcp_port: s.mcp_port, auth_token: s.auth_token, pid: s.pid, pane: s.pane });
+        const closed = await closeWindow({ id: s.instanceId, mcp_port: s.mcp_port, auth_token: s.auth_token, pid: s.pid, pane: s.pane, tab: !!s.tab });
         removeSession(book.slug);
         // 据实报告：收窗失败要说出来，别让作者以为窗口收干净了（假成功会让空窗口一直堆积）
         onLog(closed

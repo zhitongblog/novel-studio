@@ -18,9 +18,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { checkupBook } from '../src/checkup.mjs';
 
-function mkBook(chapterNames, extra = {}) {
+function mkBook(chapterNames, extra = {}, { volDir = '卷01_开篇' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nschk-'));
-  const cdir = path.join(dir, 'chapters', '卷01');
+  const cdir = path.join(dir, 'chapters', volDir);
   fs.mkdirSync(cdir, { recursive: true });
   for (const n of chapterNames) fs.writeFileSync(path.join(cdir, n), '正文若干。');
   return { title: '测试书', slug: '测试书', dir, ...extra };
@@ -120,7 +120,7 @@ test('每一条都必须带动作，且指向真实入口', () => {
   try {
     const r = checkupBook(b);
     assert.ok(r.items.length >= 3);
-    const kinds = new Set(['cowrite', 'read', 'publish', 'finale', 'synopsis', 'settings', 'signdiag']);
+    const kinds = new Set(['cowrite', 'read', 'publish', 'finale', 'synopsis', 'settings', 'signdiag', 'volname']);
     for (const i of r.items) {
       assert.ok(i.action && i.action.label, `「${i.text}」没带动作`);
       assert.ok(kinds.has(i.action.kind), `动作 kind「${i.action.kind}」不在已知入口里——指到不存在的地方等于没有`);
@@ -148,9 +148,9 @@ test('没问题时明确说没问题，而不是空着', () => {
 test('体检是只读的——不许动书目录里的任何东西', () => {
   const b = mkBook(seq(6), { status: '已完本', model: 'agy' });
   try {
-    const before = fs.readdirSync(path.join(b.dir, 'chapters', '卷01')).sort();
+    const before = fs.readdirSync(path.join(b.dir, 'chapters', '卷01_开篇')).sort();
     checkupBook(b);
-    const after = fs.readdirSync(path.join(b.dir, 'chapters', '卷01')).sort();
+    const after = fs.readdirSync(path.join(b.dir, 'chapters', '卷01_开篇')).sort();
     assert.deepEqual(after, before, '体检改了文件——它只该看，不该动');
   } finally { rm(b); }
 });
@@ -261,3 +261,15 @@ test('主按钮说的是这本书现在该干什么，不是一律「写作」',
 });
 
 console.log('\n全部通过 ✅  软件知道的事，终于会主动说出口了');
+
+test('卷没有名字要报出来，并给出「自动起名」', () => {
+  const b = mkBook(seq(5), { model: 'claude' }, { volDir: '卷01' });
+  try {
+    const it = keyOf(checkupBook(b), 'vol-unnamed');
+    assert.ok(it, '卷01 没有卷名却没报');
+    assert.equal(it.action.kind, 'volname');
+    assert.deepEqual(it.action.vols, [1]);
+  } finally { rm(b); }
+  const c = mkBook(seq(5), { model: 'claude' });   // 卷01_开篇：目录名自带卷名
+  try { assert.ok(!keyOf(checkupBook(c), 'vol-unnamed')); } finally { rm(c); }
+});

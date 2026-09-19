@@ -122,7 +122,7 @@ export function killProcess(pid, { tree = false } = {}) {
 // 烧 token 的 agent 进程；而 taskkill /T 又会连坐 core（见 killProcess）。所以顺序是：
 // 先 session.destroy 把 pane 关掉（agent 随之退出），再杀窗口进程（不带 /T）。
 // 传入 { id, mcp_port, auth_token, pid, pane }（会话记录/实例记录都能直接喂）。
-export async function closeWindow({ id, mcp_port, auth_token, pid, pane }) {
+export async function closeWindow({ id, mcp_port, auth_token, pid, pane, tab = false }) {
   // 【绝不能杀共用的 GUI 进程】0.71 起新窗口不再有自己的实例记录，一本书的会话记的 pid 很可能就是
   // 【作者自己那个 Unterm 的 GUI pid】。关掉一本书的窗口顺手把它杀了 = 全机器所有窗口一起没。
   // 所以：关掉自己的 pane 之后先数一数还有没有别的 pane 活着，还有就只关 pane、不碰进程。
@@ -143,6 +143,8 @@ export async function closeWindow({ id, mcp_port, auth_token, pid, pane }) {
     finally { try { mcp?.close?.(); } catch {} }
   }
   if (othersLeft) return true;   // pane 已关掉；进程是别人还在用的，留着
+  // tab 模式开的会话（openBookTab）：进程是作者自己的 Unterm，哪怕这是最后一个 tab 也绝不杀。
+  if (tab) return true;
   // 杀完【核实一遍】：窗口进程真的不在了才算收窗成功。
   // 不核实的代价见上：一次假成功就多留一个空窗口，而上层还以为收干净了。
   let killed = false;
@@ -156,6 +158,36 @@ export async function closeWindow({ id, mcp_port, auth_token, pid, pane }) {
     } else killed = true;
   }
   return killed;
+}
+
+// 【按书兜底杀 agent】关 pane 不等于 agent 死了。
+// 2026-09-19 实证：王莽 001-019 重写，强停回报 killed，窗口也没了，可 agy 本体还活着，
+// 又往后自己写了 085–088 四章（Unterm 0.71 下 session.destroy 不回包，pane 没关成，
+// 杀的窗口 pid 也不是 agent 的祖先）。
+// agent 的外壳进程是 `powershell -File <书目录>\.studio\launch.ps1`，这条命令行只属于这一本书，
+// 所以按它找、连子进程一起杀（/T）。它不是 unterm-core 的父进程，/T 不会连坐别的窗口。
+export function killBookAgents(dir) {
+  if (!dir) return 0;
+  const needle = path.join(dir, '.studio', 'launch.ps1');
+  let pids = [];
+  if (IS_WIN) {
+    try {
+      // 路径里有中文、逗号，走环境变量传进去，不拼进命令行
+      // 只认 powershell/pwsh 外壳：别的进程（比如作者自己在终端里 grep 这个路径）命令行里也可能出现它
+      const ps = "Get-CimInstance Win32_Process | ? { $_.Name -match '^(powershell|pwsh)\\.exe$' -and $_.CommandLine -and $_.CommandLine.Contains($env:NS_LAUNCH) } | % { $_.ProcessId }";
+      const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
+        { encoding: 'utf8', env: { ...process.env, NS_LAUNCH: needle }, timeout: 20000 });
+      pids = (r.stdout || '').split(/\s+/).filter(s => /^[0-9]+$/.test(s)).map(Number);
+    } catch {}
+  } else {
+    try {
+      const r = spawnSync('pgrep', ['-f', needle], { encoding: 'utf8' });
+      pids = (r.stdout || '').split(/\s+/).filter(s => /^[0-9]+$/.test(s)).map(Number);
+    } catch {}
+  }
+  let n = 0;
+  for (const pid of pids) if (pid !== process.pid && killProcess(pid, { tree: true })) n++;
+  return n;
 }
 
 // 进程还在不在（收窗核实用）。Windows 走 tasklist 过滤，POSIX 用 signal 0 探活。

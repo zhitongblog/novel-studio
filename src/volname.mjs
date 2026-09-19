@@ -97,8 +97,7 @@ export async function generateVolumeName(book, volNum, { cfg, force = false, onL
   const had = existingVolName(book, volNum);
   if (had && !force) return { ok: true, name: had, from: 'existing' };
 
-  const provider = pickProvider(cfg);
-  if (!provider) return { ok: false, error: '未配置任何 API 文本模型（智谱/DeepSeek/通义），无法生成卷名——请在「设置」里填一个 API Key。' };
+  const provider = pickProvider(cfg);   // 可能为空：没配 API 时下面退到本机 CLI
 
   const known = knownVolNames(book);
   const avoid = Object.entries(known).filter(([n]) => Number(n) !== volNum).map(([, v]) => v);
@@ -106,7 +105,7 @@ export async function generateVolumeName(book, volNum, { cfg, force = false, onL
   const outline = volOutline(book, volNum);
   if (!sample && !outline) return { ok: false, error: `第${volNum}卷还没有正文/大纲，无法据此起卷名（先写点内容或列大纲）` };
 
-  log(`用 ${provider} 为第${volNum}卷起卷名…`, 'act');
+  log(`用 ${provider || '本机 CLI'} 为第${volNum}卷起卷名…`, 'act');
   const sys = '你是网文资深主编，最擅长起有意境、有冲突张力的卷名。只输出卷名本身，不要引号、书名号、标点、解释。';
   const user =
     `为下面这本书的【第${volNum}卷】起一个卷名（副标题）。要求：\n` +
@@ -117,13 +116,31 @@ export async function generateVolumeName(book, volNum, { cfg, force = false, onL
     (outline ? `\n【本卷大纲要点】\n${outline}\n` : '') +
     (sample ? `\n【本卷正文片段】\n${sample}\n` : '');
 
-  let raw = '';
-  try {
-    // maxTokens 要给足：glm-4.5-flash 是【思考模型】，会先用掉一批 token 推理，给太少(如 60/256)会被推理吃光、
-    // content 返回空（踩过）。卷名虽短，也留 2048 的余量。
-    const r = await chatComplete({ provider, cfg, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.9, maxTokens: 2048, onLog });
-    raw = (r?.content || '').trim();
-  } catch (e) { return { ok: false, error: '模型出卷名失败：' + (e.message || e) }; }
+  let raw = '', apiErr = '';
+  if (provider) {
+    try {
+      // maxTokens 要给足：glm-4.5-flash 是【思考模型】，会先用掉一批 token 推理，给太少(如 60/256)会被推理吃光、
+      // content 返回空（踩过）。卷名虽短，也留 2048 的余量。
+      const r = await chatComplete({ provider, cfg, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.9, maxTokens: 2048, onLog });
+      raw = (r?.content || '').trim();
+    } catch (e) { apiErr = e.message || String(e); log(`API 起名失败（${apiErr.slice(0, 60)}），改用本机 CLI`, 'warn'); }
+  }
+  // 【API 不可用时退到本机 CLI】2026-09-19：配置里唯一的通义 Key 失效，三本书的卷1 全都起不了名，
+  // 可本机 claude/codex 明明能用。卷名这种一句话的活，不该因为某一个 API Key 过期就整条断掉。
+  if (!raw) {
+    try {
+      const { reviewerCandidates, runModelOnceAsync, stripNoise } = await import('./editor.mjs');
+      for (const m of reviewerCandidates(book.model, cfg)) {
+        try {
+          const out = stripNoise(await runModelOnceAsync(m, sys + '\n\n' + user + '\n只输出卷名本身，一行。', cfg, 180000));
+          // CLI 可能夹带寒暄/说明，取最后一行像卷名的短句
+          const line = out.split(/\r?\n/).map(l => l.trim()).filter(l => l && l.length <= 12).pop();
+          if (line) { raw = line; log(`由 ${m} 起名`); break; }
+        } catch {}
+      }
+    } catch {}
+  }
+  if (!raw) return { ok: false, error: '模型出卷名失败：' + (apiErr || (provider ? '返回为空' : '没有可用的 API 模型，本机 CLI 也没给出结果')) };
 
   // 清洗：去引号/书名号/前缀/标点，取纯汉字副标题，限 2–8 字
   let name = raw.replace(/["'“”‘’《》〈〉\[\]（）()]/g, '')

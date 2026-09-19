@@ -1,7 +1,7 @@
 // 连接一个运行中的写作会话，做：穿插指令(send) / 实时镜像(watch) / 停止(stop)。
 // 每次都按会话描述符新建一条 MCP 连接（任意进程皆可），与启动它的进程互不依赖。
 import { connectInstance } from './mcpclient.mjs';
-import { closeWindow } from './unterm.mjs';
+import { closeWindow, killBookAgents } from './unterm.mjs';
 import { getSession, removeSession, listSessions } from './sessions.mjs';
 import { Autopilot } from './autopilot.mjs';
 import { recordUsage, parseTokens, currentContextSize } from './usage.mjs';
@@ -192,7 +192,10 @@ export function stopBook(slug) {
   if (!sess) return { ok: false, reason: '无该会话' };
   // 先关 pane 再杀窗口进程（0.65 下 agent 不再是窗口进程的子进程，只杀窗口会留下还在跑的 agent）。
   // 不 await：保持原来的同步签名，收窗在后台完成。
-  closeWindow({ id: sess.instanceId, mcp_port: sess.mcp_port, auth_token: sess.auth_token, pid: sess.pid, pane: sess.pane }).catch(() => {});
+  // 关完再按书目录兜底杀一遍 agent 外壳：关 pane 在 0.71 下会静默失败，agent 活着就会继续往下写（见 killBookAgents）。
+  const dir = getBook(slug)?.dir;
+  closeWindow({ id: sess.instanceId, mcp_port: sess.mcp_port, auth_token: sess.auth_token, pid: sess.pid, pane: sess.pane, tab: !!sess.tab })
+    .catch(() => {}).finally(() => { try { killBookAgents(dir); } catch {} });
   removeSession(slug);
   return { ok: true, killed: sess.pid };
 }

@@ -23,6 +23,8 @@ import path from 'node:path';
 import { bookStats } from './books.mjs';
 import { finaleArtifacts } from './finaledone.mjs';
 import { canRunHeadless, getModel } from './models.mjs';
+import { loadPublishChapters, bookVolNum } from './publish.mjs';
+import { existingVolName } from './volname.mjs';
 
 const chapNumOf = (name) => parseInt((String(name).match(/^(\d{1,4})/) || [])[1] || '0', 10);
 
@@ -146,6 +148,17 @@ export function checkupBook(book) {
       syn ? `简介只有 ${syn.length} 字，番茄要求 50–500 字` : '还没写简介——番茄建作品要 50–500 字',
       { label: '去写简介', kind: 'synopsis' }));
   }
+
+  // ⑦ 卷没有名字 —— 番茄分卷必须有名字，缺了建卷那一步会卡住；作者要求每一卷都要有名字（2026-09-19）
+  try {
+    const vols = [...new Set(loadPublishChapters(book).map(c => bookVolNum(c.vol)).filter(n => n >= 1))].sort((a, b) => a - b);
+    const nameless = vols.filter(v => !existingVolName(book, v));
+    if (nameless.length) {
+      out.push(issue('warn', 'vol-unnamed',
+        `第 ${nameless.join('、')} 卷还没有卷名——番茄分卷必须有名字，建卷时会卡住`,
+        { label: '自动起名', kind: 'volname', vols: nameless }));
+    }
+  } catch {}
 
   const rank = { bad: 0, warn: 1, info: 2 };
   out.sort((a, b) => rank[a.level] - rank[b.level]);

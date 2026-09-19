@@ -63,14 +63,24 @@ export function outlineVolSubtitle(book, volNum) {
     .replace(/[_\-．.、:：]\s*/, '')
     .replace(/(分章)?大纲$/, '')
     .trim();
+  sub = cleanVolSub(sub);
   if (sub) return sub.slice(0, 16);   // 番茄副标题 maxlength 16
   // ② 文件名没有 → 读 H1：# 《书名》卷03 静海旧火 分章大纲 → "静海旧火"
   try {
     const first = fs.readFileSync(path.join(odir, hit), 'utf8').split(/\r?\n/)[0] || '';
     const m = first.match(new RegExp(`卷\\s*0*${volNum}\\s+(.+?)\\s*(分章)?大纲`));
-    if (m && m[1]) return m[1].trim().slice(0, 16);
+    const t = cleanVolSub(m && m[1]);
+    if (t) return t.slice(0, 16);
   } catch {}
   return '';
+}
+
+// 卷名清洗：去书名号、去"分章/大纲/细纲"字样；只剩这些字眼的不算卷名。
+// 实测踩过两次：H1「# 卷01 分章大纲」被惰性匹配成卷名"分章"（大乾/修仙/岛国卷1都顶着它），
+// 文件名「卷01《摇篮里的神明》分章大纲.md」抽出来带着《》，上番茄成了"第一卷：《摇篮里的神明》"。
+export function cleanVolSub(s) {
+  const t = String(s || '').replace(/[《》「」"“”]/g, '').replace(/(分章|章节)?(大纲|细纲)$/, '').replace(/分章$/, '').trim();
+  return /^(分章|章节|大纲|细纲|分卷|本卷)*$/.test(t) ? '' : t;
 }
 
 // 从 novel_bible.md 取某卷卷名。立项常把卷名写在 bible 的"节奏与格局承诺"里，格式如
@@ -80,13 +90,21 @@ export function bibleVolSubtitle(book, volNum) {
   let bible = ''; try { bible = fs.readFileSync(path.join(book.dir, 'novel_bible.md'), 'utf8'); } catch { return ''; }
   const cn = numToCn(volNum);   // 卷号中文形（4→四），兼容"第四卷：xxx"这种中文数字写法
   // 覆盖常见几种卷名写法：卷01《xxx》 / 第一卷《xxx》 / 卷01：xxx / 第四卷：xxx / ### 第N卷：xxx
+  // 冒号写法最容易抓到正文：立项常写「卷01：从「傀儡御门」→「坐进帅案」」——那是本卷弧线，不是卷名。
+  // 所以冒号后必须是【一个完整的短名】：不含「」→、，且紧跟标点/行尾（被截在半句里的不算）。
+  // 卷号后允许带章节范围「卷01（001–120）：」，名字允许 markdown 加粗「**天上十一根杆**」。
+  const range = `(?:\\s*[（(][^）)\\n]{0,20}[）)])?`;
+  const name = `\\**([^\\n，,。；：:#「」『』→、*]{2,16})\\**(?=\\s*(?:$|[\\n，,。；;：:（(]))`;
   const pats = [
     `卷\\s*0*${volNum}(?!\\d)\\s*《([^》]{1,16})》`,
     `第\\s*(?:${volNum}|${cn})\\s*卷\\s*《([^》]{1,16})》`,
-    `卷\\s*0*${volNum}(?!\\d)\\s*[:：]\\s*([^\\n，,。；：#]{1,16})`,
-    `第\\s*(?:${volNum}|${cn})\\s*卷\\s*[:：]\\s*([^\\n，,。；：#]{1,16})`,
+    `卷\\s*0*${volNum}(?!\\d)${range}\\s*[:：]\\s*${name}`,
+    `第\\s*(?:${volNum}|${cn})\\s*卷${range}\\s*[:：]\\s*${name}`,
   ];
-  for (const p of pats) { const m = bible.match(new RegExp(p)); if (m && m[1]) return m[1].trim().slice(0, 16); }
+  for (const p of pats) {
+    const re = new RegExp(p, 'gm');
+    for (const m of bible.matchAll(re)) { const t = cleanVolSub(m[1]); if (t) return t.slice(0, 16); }
+  }
   return '';
 }
 
