@@ -144,4 +144,34 @@ test('摘要 prompt 要把章数说死，好核对', () => {
   } finally { rm(b); }
 });
 
+
+// —— 2026-09-19 作者问「重写大纲的问题都修好了吗」，核实发现的洞 ——
+
+test('界面按钮必须走新管线——做好了不接上等于没做', () => {
+  // 新管线做完后，「从正文补回设定和大纲」按钮【仍然调老端点】rebuild-outline，
+  // 就是那条第一步写着"通读全书"的路。吕布那本是在命令行里跑的，作者在应用里点拿到的还是坏的。
+  const app = fs.readFileSync(new URL('../ui/app.js', import.meta.url), 'utf8');
+  const i = app.indexOf("$('#btnRebuildOutline').addEventListener");
+  // 不能用 indexOf('});') 找结尾：处理器内部 `{ book: CUR.slug });` 就会先撞上，切片被截短（第一版就这么误报）。
+  // 取到下一个顶层监听器之前为止。
+  const next = app.indexOf("\n$('#", i + 10);
+  const seg = app.slice(i, next > 0 ? next : i + 3000);
+  assert.ok(/rebuild-outline2/.test(seg), '按钮要调 rebuild-outline2');
+  assert.ok(!/'\/api\/book\/rebuild-outline'/.test(seg), '按钮不能再调老的 rebuild-outline');
+  assert.ok(/digest-progress/.test(app.slice(i, i + 2500)), '点之前要先看进度：正在跑就给"停下"，而不是再开一份');
+});
+
+test('重建指令第一步不能再要求"通读全书"', async () => {
+  const { buildRebuildOutlineInstruction } = await import('../src/planner.mjs');
+  const b = mkBook({ 卷01: ['001_a.txt'] });
+  try {
+    const noDigest = buildRebuildOutlineInstruction(b);
+    assert.ok(!noDigest.includes('通读 chapters/ 下所有'), '145 万字的书，这一步是做不到的');
+    assert.match(noDigest, /不许假装读完了全书/, '没有梗概时要老实说只读了一部分');
+    recordDigests(b, { 1: '梗概' });
+    const withDigest = buildRebuildOutlineInstruction(b);
+    assert.match(withDigest, /chapter-digest\.json/, '有梗概就读梗概——几百章也就几万字，装得下');
+  } finally { rm(b); }
+});
+
 console.log('\n全部通过 ✅  几百章的书，终于能靠分层归纳把大纲补回来了');

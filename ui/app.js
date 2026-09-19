@@ -1632,14 +1632,37 @@ $('#olLoadExisting')?.addEventListener('click', async () => {
   finally { btn.disabled = false; btn.textContent = old; }
 });
 $('#btnOutline').addEventListener('click', openOutline);
+// 「从正文补回设定和大纲」——走【分层归纳】新管线，不再走"通读全书"的老指令。
+// 病根（2026-09-19）：这个按钮原来调 /api/book/rebuild-outline，那条指令第一步写着
+// 「通读 chapters/ 下所有已写章节」——大乾女帝 523 章 145 万字，任何模型都装不下，
+// 只能读个开头往下编。落盘证据：那本书 523 章，outlines/ 里只有一个卷01。
+// 新管线（rebuild-outline2）逐章摘要 → 按卷据摘要生成分章大纲，可断点续、可增量。
+// 【之前新管线做好了却没接到这个按钮上】——吕布那本是在命令行里跑的，
+// 作者在应用里点，拿到的还是坏的那条路。这里补上。
 $('#btnRebuildOutline').addEventListener('click', async () => {
   if (!CUR) return;
-  if (!confirm('据已写正文逆向重建【设定圣经 + 各卷分章大纲】（不写新正文、不动已写章节）。\n导入的番茄书/半成品书建议先用它补齐规划。确定？')) return;
-  const btn = $('#btnRebuildOutline'); const old = btn.textContent; btn.disabled = true; btn.textContent = '发指令中…';
+  const btn = $('#btnRebuildOutline'); const old = btn.textContent;
+  let prog = null;
+  try { prog = await api('/api/book/digest-progress?book=' + encodeURIComponent(CUR.slug)); } catch {}
+  if (prog?.running) {
+    if (confirm(`这本书的大纲正在重建（梗概 ${prog.done}/${prog.total}）。要停下吗？已完成的部分会保留，下次接着跑。`)) {
+      try { await api('/api/book/rebuild-outline-stop', 'POST', { book: CUR.slug }); toast('已请求停止——当前这一批跑完就停'); } catch (e) { toast('停止失败：' + e.message); }
+    }
+    return;
+  }
+  const total = prog?.total || 0, done = prog?.done || 0, left = Math.max(0, total - done);
+  // 给一个真实的时间预期：实测约 10 秒/章（吕布 86 章 15 分钟）。长耗时动作不说要多久，作者只会以为卡死了。
+  const mins = Math.max(1, Math.round((left * 10 + 240) / 60));
+  const msg = total
+    ? `据已写正文重建【各卷分章大纲】（不写新正文、不动已写章节）。\n\n共 ${total} 章，已有梗概 ${done} 章，还差 ${left} 章。\n预计约 ${mins} 分钟，可随时停，已完成的会保留、下次接着跑。\n\n确定开始？`
+    : '据已写正文重建【各卷分章大纲】（不写新正文、不动已写章节）。确定开始？';
+  if (!confirm(msg)) return;
+  btn.disabled = true; btn.textContent = '启动中…';
   try {
-    const r = await api('/api/book/rebuild-outline', 'POST', { book: CUR.slug });
-    if (r.mode === 'opened') { setWriting(true); openStream(CUR.slug); }
-    toast(r.mode === 'inserted' ? '已穿插指令：重建设定+大纲（不写新正文）' : '已开窗：重建设定+大纲（不写新正文）');
+    const r = await api('/api/book/rebuild-outline2', 'POST', { book: CUR.slug });
+    openStream(CUR.slug);   // 进度走日志：梗概 12/86 → 24/86 …
+    toast(r.already ? '这本书的大纲已经在重建了，进度看下方日志' : `已开始重建大纲（用 ${r.model}）——进度看下方日志，再点一次这个按钮可以停`);
+    setTimeout(() => renderBoard(CUR.slug), 1500);
   } catch (e) { toast('重建失败：' + e.message); }
   finally { btn.disabled = false; btn.textContent = old; }
 });
