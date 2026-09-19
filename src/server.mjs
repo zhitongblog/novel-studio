@@ -32,6 +32,8 @@ import { chapterProgressLine, isFirstSight } from './progress.mjs';
 import { FANQIE_CATEGORIES, isValidCategory } from './categories.mjs';
 import { finaleArtifacts, finaleSummary } from './finaledone.mjs';
 import { checkupBook } from './checkup.mjs';
+import { buildAllDigests, rebuildVolumeOutlines } from './outlinerun.mjs';
+import { digestProgress } from './outlinerebuild.mjs';
 import { loadBooks } from './store.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
@@ -430,6 +432,11 @@ async function api(p, req, res, u) {
         }
         return json(res, 200, { ok: true, books: out });
       } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/digest-progress') {
+      try { const b=getBook(u.searchParams.get('book')); if(!b) return json(res,400,{error:'找不到书'});
+        const st=rt.get(b.slug); return json(res,200,{ ok:true, running: !!(st?.outlineRun && !st.outlineRun.stopped), ...digestProgress(b) }); }
+      catch(e){ return json(res,500,{error:e.message}); }
     }
     if (p === '/api/book/checkup') {
       // 体检：把软件已经知道、但从来没说出口的异常摆出来（缺章/漏发/状态与事实不符/模型能力…）。
@@ -1212,6 +1219,40 @@ async function api(p, req, res, u) {
         }
         const session = await startWriting({ book, model: body.model || book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         return json(res, 200, { ok: true, mode: 'opened', instanceId: session.instance?.id });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/rebuild-outline2') {
+      // 【给已有大量正文的书重建大纲】分层归纳，不是"通读全书"。
+      // 老的 rebuild-outline 指令第一步写着「通读 chapters/ 下所有已写章节」——
+      // 《大乾女帝》523 章 145 万字，这件事做不到，所以它只能读个开头往下编。
+      // 落盘证据：那本书 523 章，outlines/ 里只有一个 卷01分章大纲.md。
+      // 现在：逐章摘要（可断点续、可增量）→ 按卷据摘要生成分章大纲。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        const slug = book.slug;
+        if (rtOf(slug).outlineRun && !rtOf(slug).outlineRun.stopped) return json(res, 200, { ok: true, already: true });
+        const control = { stopped: false };
+        rtOf(slug).outlineRun = control;
+        const model = body.model || pickEditorModel(book.model || cfg.defaultModel, cfg);
+        const onLog = (e) => pushLog(slug, { ...e, source: 'outline' });
+        (async () => {
+          try {
+            pushLog(slug, { level: 'act', source: 'outline', msg: `开始重建大纲（用 ${model}）——先做逐章梗概，再按卷生成分章大纲。中途可停，已完成的会留下。` });
+            await buildAllDigests(book, { model, cfg, onLog, control });
+            if (!control.stopped) await rebuildVolumeOutlines(book, { model, cfg, onLog, control, only: body.volume || null });
+            pushLog(slug, { level: 'act', source: 'outline', msg: control.stopped ? '大纲重建已停止（进度已保留）' : '✅ 大纲重建完成' });
+          } catch (e) { pushLog(slug, { level: 'error', source: 'outline', msg: '大纲重建失败：' + e.message }); }
+          finally { const st = rt.get(slug); if (st) st.outlineRun = null; }
+        })();
+        return json(res, 200, { ok: true, started: true, model, ...digestProgress(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/rebuild-outline-stop') {
+      try {
+        const slug = slugOf(body.book);
+        const c = rtOf(slug).outlineRun;
+        if (c) { c.stopped = true; pushLog(slug, { level: 'warn', source: 'outline', msg: '已请求停止大纲重建——当前这一批跑完就停，已完成的梗概不会丢' }); }
+        return json(res, 200, { ok: true, stopping: !!c });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/rebuild-outline') {

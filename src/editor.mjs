@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { getModel, detectAll , resolveBin , canRunHeadless } from './models.mjs';
 import { planCliInvocation } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
+import { orderByHealth, noteReviewerOk, noteReviewerFail, classifyFail } from './reviewerhealth.mjs';
 
 function readSafe(p) { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } }
 function safeName(s) { return String(s).replace(/[\\/:*?"<>|\r\n]+/g, '_').slice(0, 40); }
@@ -73,17 +74,23 @@ export function reviewerCandidates(authorModel, cfg) {
   // 前三个都废了之后还要再废它一次，作者看到的就是"审稿功能无效"。
   const push = (id) => { if (id && avail.includes(id) && canRunHeadless(id) && !out.includes(id)) out.push(id); };
   const want = cfg?.editorReview?.model;
-  if (want && want !== 'auto') push(want);
-  // codex 的 headless(`exec`) 输出干净、真能非交互跑通 → 优先当审稿人（哪怕它=作者，"同模型独立审"也强过
-  // gemini 参数报错 / qwen 未登录 吐出来的噪音当审稿）。gemini/qwen/claude 只作兜底（本机实测多半跑不了）。
-  push('codex');
-  for (const id of ['gemini', 'qwen', 'claude']) if (id !== authorModel) push(id);
-  push(authorModel);   // 同模型独立审兜底
+  // 作者显式指定的永远第一，且【不参与健康排序】——他指定了就是他说了算
+  if (want && want !== 'auto') { push(want); }
+  // 【不再写死 codex 第一】原来这里是 push('codex')，注释写着"codex 输出干净真能跑通，
+  // gemini/qwen/claude 本机实测多半跑不了"。那是对着【某一刻】的状态写的，现在正好反过来：
+  // 2026-09-19 codex 额度用尽、gemini 长 prompt 撑坏，而 claude 237 秒给出高质量审稿。
+  // 同 5a805fc8 的教训（把「agy 走直连」写死，两天后网络翻个个儿，白跑几小时）：
+  // 别对着某一刻的环境过拟合。顺序交给 orderByHealth 按实际战绩排。
+  const rest = [];
+  const pushRest = (id) => { if (id && avail.includes(id) && canRunHeadless(id) && !out.includes(id) && !rest.includes(id)) rest.push(id); };
+  for (const id of ['codex', 'gemini', 'qwen', 'claude']) if (id !== authorModel) pushRest(id);
+  pushRest(authorModel);   // 同模型独立审兜底
+  out.push(...orderByHealth(rest));
   return out.length ? out : [authorModel];
 }
 
 // 非交互跑一次模型（异步 spawn，不阻塞事件循环 —— 与 planner 的同步版区分）。
-function runModelOnceAsync(model, prompt, cfg, timeoutMs = 180000) {
+export function runModelOnceAsync(model, prompt, cfg, timeoutMs = 180000) {
   return new Promise((resolve, reject) => {
     const m = getModel(model);
     if (!m) return reject(new Error('未知模型：' + model));
@@ -175,10 +182,12 @@ export async function reviewOutline({ book, scope = '立项', cfg, authorModel, 
     try {
       const out = await runModelOnceAsync(cand, prompt, cfg, timeout);
       const cleaned = strip(out);
-      if (cleaned && !looksBad(out)) { raw = cleaned; lastErr = null; break; }
+      if (cleaned && !looksBad(out)) { raw = cleaned; lastErr = null; noteReviewerOk(cand); break; }
       lastErr = new Error(looksBad(out) ? '疑似 CLI 报错/未登录/无效审稿输出' : '审稿返回空');
+      // 记账：额度用尽/未登录这类短期好不了的，下次直接往后排，别每次都去撞一遍墙
+      noteReviewerFail(cand, classifyFail(stripNoise(out)), stripNoise(out).slice(0, 100));
       onLog({ level: 'warn', msg: `主编 ${cand} 输出无效（${lastErr.message}）→ 换下一个审稿人` });
-    } catch (e) { lastErr = e; onLog({ level: 'warn', msg: `主编 ${cand} 审稿失败（${e.message}）→ 换下一个审稿人` }); }
+    } catch (e) { lastErr = e; noteReviewerFail(cand, classifyFail(e.message), e.message); onLog({ level: 'warn', msg: `主编 ${cand} 审稿失败（${e.message}）→ 换下一个审稿人` }); }
   }
   const reviewsDir = path.join(dir, 'reviews');
   try { fs.mkdirSync(reviewsDir, { recursive: true }); } catch {}
@@ -294,10 +303,11 @@ export async function reviewEnding({ book, cfg, authorModel, onLog = () => {} })
     onLog({ level: 'act', msg: `主编（${cand}${cand === authorModel ? '·同模型独立审' : ''}）完本审稿：核对主线/伏笔/人物是否真正收束…` });
     try {
       const raw = await runModelOnceAsync(cand, prompt, cfg, timeout);
-      if (!invalidReview(raw, prompt)) { out = stripNoise(raw); lastErr = null; break; }
+      if (!invalidReview(raw, prompt)) { out = stripNoise(raw); lastErr = null; noteReviewerOk(cand); break; }
       lastErr = new Error('输出无效（CLI 报错/额度用尽/把 prompt 原样退回）');
+      noteReviewerFail(cand, classifyFail(stripNoise(raw)), stripNoise(raw).slice(0, 100));
       onLog({ level: 'warn', msg: `主编 ${cand} 的完本审稿无效（${lastErr.message}）→ 换下一个审稿人` });
-    } catch (e) { lastErr = e; onLog({ level: 'warn', msg: `主编 ${cand} 完本审稿失败（${e.message}）→ 换下一个审稿人` }); }
+    } catch (e) { lastErr = e; noteReviewerFail(cand, classifyFail(e.message), e.message); onLog({ level: 'warn', msg: `主编 ${cand} 完本审稿失败（${e.message}）→ 换下一个审稿人` }); }
   }
   if (!out) {
     // 【拿不到有效审稿 ≠ 可以完本】完本产物那道闸另有把关（见 finaledone.mjs），这里只诚实回报
