@@ -31,7 +31,13 @@ const DEFAULTS = {
   editorReview: {
     enabled: true,                   // 关闭则作者写完大纲直接开写(autopilot 续写哨兵会自动放行)
     model: 'auto',                   // 'auto'=自动选一个与作者不同的可用模型；也可指定 codex|claude|gemini
-    timeoutMs: 180000,               // 单次审稿超时
+    // 单次审稿超时。【180 秒不够】2026-09-19 实测：claude 审一份 1 万字的
+    // 设定+卷大纲要 120 秒，而真实审稿的 prompt 往往更大（立项那次是 9 万字）。
+    // 当时的表现就是「主编 claude 审稿失败（Claude Code 审稿超时）」——
+    // 而 claude 恰恰是本机唯一还能把这活干完的模型（codex 额度用尽、gemini 长 prompt 撑坏、
+    // agy 跑不了无头）。四个候选全废，作者看到的就是"审稿功能无效"。
+    // 放宽到 7 分钟：审稿本来就是低频动作，宁可等，不能白等一场还什么都没有。
+    timeoutMs: 420000,
     maxRenudge: 2,                   // 修订验证：文件没动/复审没过时最多重催几次，超过则放行(避免死循环)
     recheck: true,                   // C：作者改完后由主编二次复审，确认【硬伤】真改对了才放行(每轮多一次模型调用)
     requireApproval: true,           // 全局确认门：审稿出意见后【暂停】，等你点"应用修订/跳过"才动 bible/大纲(不再自动改你的内容)
@@ -197,6 +203,18 @@ export function loadConfig() {
     try { stored = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { stored = {}; }
   }
   const cfg = deepMerge(DEFAULTS, stored);
+  // 【一次性迁移：审稿超时 180 秒 → 420 秒】
+  // 改 DEFAULTS 对【已经存过 config.json 的人】没有任何作用——存下来的旧值会盖在默认值上。
+  // 而 180 秒正是"审稿功能无效"的直接原因（claude 审一份 1 万字大纲要 120 秒，
+  // 真实 prompt 更大，必然超时；而它是本机唯一还能干这活的模型）。
+  // 只迁移【恰好等于旧默认值】的情况：作者自己调过别的数，一律尊重，不碰。
+  if (stored?.editorReview?.timeoutMs === 180000) {
+    cfg.editorReview.timeoutMs = DEFAULTS.editorReview.timeoutMs;
+    try {
+      stored.editorReview.timeoutMs = DEFAULTS.editorReview.timeoutMs;
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(stored, null, 2), 'utf8');
+    } catch {}
+  }
   // 确保书库目录存在
   fs.mkdirSync(cfg.workspace, { recursive: true });
   return cfg;

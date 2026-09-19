@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { getModel, detectAll , resolveBin } from './models.mjs';
+import { getModel, detectAll , resolveBin , canRunHeadless } from './models.mjs';
 import { planCliInvocation } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 
@@ -17,12 +17,61 @@ export function pickEditorModel(authorModel, cfg) {
   return reviewerCandidates(authorModel, cfg)[0];
 }
 
+// 清掉 node 噪音行（gemini/qwen headless 常在 stdout 前面吐 (node:...) 实验性警告）。
+export function stripNoise(s) {
+  return String(s || '').split('\n')
+    .filter(l => !/^\(node:\d+\)/.test(l) && !/ExperimentalWarning|EnvHttpProxyAgent|--trace-warnings/i.test(l))
+    .join('\n').trim();
+}
+
+// 致命失败的标志。【必须全文扫，不能只看开头】——
+// 2026-09-19 实证：codex 额度用尽时，它先打启动横幅、再把【整个 prompt 原样回显】(29KB)，
+// 最后一行才吐 "ERROR: You've hit your usage limit"。旧版只看前 600 字，
+// 于是这 29KB 垃圾被当成一份合格审稿【存了下来】——审稿"成功"，报告里一条真意见都没有。
+const FATAL_RE = /(hit your usage limit|usage limit|quota exceeded|insufficient (quota|credit)|rate limit exceeded|no auth type|not authenticated|configure an auth|--auth-type|please (configure|log ?in|sign ?in)|invalid api key|401 unauthorized|未(登录|认证|配置)|请先(登录|配置|设置))/i;
+// CLI 自曝家门的横幅：出现这些说明我们拿到的是 CLI 的自述，不是模型的回答
+const BANNER_RE = /(Reading prompt from stdin|OpenAI Codex v[\d.]+|^workdir:|^sandbox:|^approval:|^reasoning effort:)/im;
+const USAGE_RE = /^(usage:|error\b|错误[:：]|unknown (option|argument|command)|invalid (option|argument|value)|missing required|参数错误|command not found|not recognized)/im;
+
+// 把 prompt 原样回显回来，算不算审稿？不算。
+// 【这是 939ac90b 那个病的根】那次修的是"回显的 prompt 被拆成意见条目"，
+// 治的是下游；回显【整份被当成审稿存下来】这一层一直没堵。
+export function isPromptEcho(out, prompt) {
+  const t = stripNoise(out);
+  const p = String(prompt || '').trim();
+  if (!p || t.length < 200) return false;
+  // CLI 回显时 prompt 的尾部会原样出现在输出里。找到它，看后面还有没有【实质内容】。
+  const tail = p.slice(-240).trim();
+  if (!tail) return false;
+    const i = t.indexOf(tail);
+  if (i < 0) return false;
+  const after = t.slice(i + tail.length).trim();
+  // 回显之后只剩几行（通常就是那句 ERROR）→ 这不是审稿，是一份原样退回的 prompt
+  return after.length < 200;
+}
+
+// 一份"审稿"能不能收下。收错了的代价：作者拿到一份 29KB 的假报告，
+// 而闸门以为审过了——大乾女帝的完本审稿就是这么变成垃圾的。
+export function invalidReview(out, prompt) {
+  const t = stripNoise(out);
+  if (t.length < 120) return true;            // 正常审稿都几百字以上
+  if (FATAL_RE.test(t)) return true;          // 全文扫，不是只看开头
+  if (BANNER_RE.test(t)) return true;         // 拿到的是 CLI 自述
+  if (USAGE_RE.test(t.slice(0, 600))) return true;
+  if (isPromptEcho(t, prompt)) return true;   // 把 prompt 原样退回来了
+  return false;
+}
+
 // 审稿人候选（按优先级、去重、只取可用）：首选 cfg 指定；否则优先【与作者不同】的独立模型，快而稳的排前
 // （gemini/qwen），claude 因偶发无头慢/超时排后，作者同模型兜底最后。reviewOutline 逐个尝试，超时/失败自动换下一个。
 export function reviewerCandidates(authorModel, cfg) {
   const avail = detectAll().filter(m => m.available).map(m => m.id);
   const out = [];
-  const push = (id) => { if (id && avail.includes(id) && !out.includes(id)) out.push(id); };
+  // 【跑不了无头的模型不能当审稿人】审稿是一次性非交互调用，而 agy 的凭据不落盘、
+  // 每次 -p 都要人贴授权码（见 models.canRunHeadless）。它进候选的唯一结果是白等一轮超时，
+  // 还要在日志里留一条让人困惑的"agy 输出无效"。2026-09-19 实测：四个候选里它排最后，
+  // 前三个都废了之后还要再废它一次，作者看到的就是"审稿功能无效"。
+  const push = (id) => { if (id && avail.includes(id) && canRunHeadless(id) && !out.includes(id)) out.push(id); };
   const want = cfg?.editorReview?.model;
   if (want && want !== 'auto') push(want);
   // codex 的 headless(`exec`) 输出干净、真能非交互跑通 → 优先当审稿人（哪怕它=作者，"同模型独立审"也强过
@@ -118,17 +167,8 @@ export async function reviewOutline({ book, scope = '立项', cfg, authorModel, 
   const timeout = cfg?.editorReview?.timeoutMs || 180000;
   const candidates = reviewerCandidates(authorModel, cfg);
   let raw = '', editorModel = candidates[0], lastErr = null;
-  // 清掉 node 噪音行（gemini/qwen headless 常在 stdout 前面吐 (node:...) 实验性警告）。
-  const strip = (s) => String(s || '').split('\n').filter(l => !/^\(node:\d+\)/.test(l) && !/ExperimentalWarning|EnvHttpProxyAgent|--trace-warnings/i.test(l)).join('\n').trim();
-  // 无效审稿识别：CLI 用法/报错、未登录/未配置（qwen 常吐 "No auth type is selected"）、过短——都不能当审稿收下。
-  const looksBad = (s) => {
-    const t = strip(s);
-    if (t.length < 120) return true;   // 正常审稿都几百字以上
-    const head = t.slice(0, 600);
-    if (/^(usage:|error\b|错误[:：]|unknown (option|argument|command)|invalid (option|argument|value)|missing required|参数错误|command not found|not recognized)/im.test(head)) return true;
-    if (/(no auth type|not authenticated|configure an auth|--auth-type|please (configure|log ?in|sign ?in)|未(登录|认证|配置)|请先(登录|配置|设置))/i.test(head)) return true;
-    return false;
-  };
+  const strip = stripNoise;
+  const looksBad = (s) => invalidReview(s, prompt);
   for (const cand of candidates) {
     editorModel = cand;
     onLog({ level: 'act', msg: `主编（${cand}${cand === authorModel ? '·同模型独立审' : ''}）正在审【${scope}】大纲…` });
@@ -242,10 +282,28 @@ export async function reviewEnding({ book, cfg, authorModel, onLog = () => {} })
   const bible = readSafe(path.join(dir, 'novel_bible.md'));
   const ledger = readSafe(path.join(dir, 'continuity_ledger.md'));
   const ending = readLastChapters(dir, cfg?.finale?.endingChapters || 10, 24000);
-  const editorModel = pickEditorModel(authorModel, cfg);
-  onLog({ level: 'act', msg: `主编（${editorModel}）完本审稿：核对主线/伏笔/人物是否真正收束…` });
-  const raw = await runModelOnceAsync(editorModel, buildEndingPrompt(book, bible, ledger, ending), cfg, cfg?.editorReview?.timeoutMs || 180000);
-  const out = (raw || '').trim();
+  // 【完本审稿原来一道校验都没有】它直接把 CLI 吐出来的任何东西当审稿存下来、再跑 判定 正则。
+  // 2026-09-19 实证：大乾女帝的 完本审稿.md 是 27KB 的 codex 横幅 + 回显 prompt + 额度错误，
+  // 一条真意见都没有——而完本闸就是拿这份"审稿"在做决定的。
+  // 现在跟大纲审稿走同一套：逐个审稿人试，拿不到有效审稿就明说拿不到，绝不把垃圾当审稿收下。
+  const prompt = buildEndingPrompt(book, bible, ledger, ending);
+  const timeout = cfg?.editorReview?.timeoutMs || 180000;
+  let out = '', editorModel = pickEditorModel(authorModel, cfg), lastErr = null;
+  for (const cand of reviewerCandidates(authorModel, cfg)) {
+    editorModel = cand;
+    onLog({ level: 'act', msg: `主编（${cand}${cand === authorModel ? '·同模型独立审' : ''}）完本审稿：核对主线/伏笔/人物是否真正收束…` });
+    try {
+      const raw = await runModelOnceAsync(cand, prompt, cfg, timeout);
+      if (!invalidReview(raw, prompt)) { out = stripNoise(raw); lastErr = null; break; }
+      lastErr = new Error('输出无效（CLI 报错/额度用尽/把 prompt 原样退回）');
+      onLog({ level: 'warn', msg: `主编 ${cand} 的完本审稿无效（${lastErr.message}）→ 换下一个审稿人` });
+    } catch (e) { lastErr = e; onLog({ level: 'warn', msg: `主编 ${cand} 完本审稿失败（${e.message}）→ 换下一个审稿人` }); }
+  }
+  if (!out) {
+    // 【拿不到有效审稿 ≠ 可以完本】完本产物那道闸另有把关（见 finaledone.mjs），这里只诚实回报
+    onLog({ level: 'warn', msg: `所有审稿人都没给出有效的完本审稿（最后错误：${lastErr?.message || '未知'}）——不据此判定可完本` });
+    return { pass: false, body: '', file: path.join(dir, 'reviews', '完本审稿.md'), editorModel: '(无有效审稿)', unavailable: true };
+  }
   const pass = /判定[：:]\s*(可完本|通过)/.test(out) && !/判定[：:]\s*(未完本|不可完本|未通过)/.test(out);
   const file = path.join(dir, 'reviews', '完本审稿.md');
   try {
