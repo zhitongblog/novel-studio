@@ -86,6 +86,26 @@ export function checkupBook(book) {
     }
   }
 
+  // ②b 上次签约诊断留下的结论（诊断要开浏览器，体检只读它存下的摘要，不重新去番茄）
+  //   · 定时乱序：王莽那本读者会从第 19 章直接跳到第 35 章
+  //   · 签约被拒：离下次申请门槛还差多少字
+  const sd = book.signDiag;
+  if (sd) {
+    const ageH = (Date.now() - Date.parse(sd.at || 0)) / 3600000;
+    const stale = ageH > 72 ? `（${Math.round(ageH / 24)} 天前的诊断，可能已变化）` : '';
+    if (sd.outOfOrder?.length) {
+      out.push(issue('bad', 'schedule-disorder',
+        `番茄上的定时发布顺序是乱的：第 ${sd.outOfOrder.slice(0, 6).join('、')}${sd.outOfOrder.length > 6 ? ' 等' : ''} 章会插到前面章节之前上线，读者实际会读到 ${(sd.readerOrder || []).slice(0, 5).join(' → ')} …${stale}`,
+        { label: '看签约诊断', kind: 'signdiag' }));
+    }
+    if (sd.rejected && !sd.signed) {
+      const gap = sd.nextApplyChars && sd.publicChars ? sd.nextApplyChars - sd.publicChars : 0;
+      out.push(issue('warn', 'sign-rejected',
+        `番茄签约评估被拒${sd.mustFix ? `，诊断出必改 ${sd.mustFix} 条` : ''}${gap > 0 ? `；公开字数离下次申请（${sd.nextApplyChars / 10000} 万字）还差约 ${(gap / 10000).toFixed(1)} 万字` : ''}${stale}`,
+        { label: '看签约诊断', kind: 'signdiag' }));
+    }
+  }
+
   // ③ 状态与事实不符 —— 标着已完本却没有完本产物
   if (book.status === '已完本') {
     const art = finaleArtifacts(book);

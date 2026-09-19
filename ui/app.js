@@ -216,6 +216,8 @@ const NOW_ISSUE_ACT = {
   finale: () => $('#btnFinale')?.click(),
   synopsis: () => $('#synText')?.focus(),
   settings: () => $('#writeModel')?.focus(),
+  // 签约诊断的结论在 reviews/签约诊断.md——有就直接打开看，没有就跑一次
+  signdiag: () => { if (CUR) openReaderAt(CUR, 'reviews/签约诊断.md').catch(() => $('#btnSignDiag')?.click()); },
 };
 
 async function renderBoard(slug) {
@@ -1665,6 +1667,25 @@ $('#btnRebuildOutline').addEventListener('click', async () => {
     setTimeout(() => renderBoard(CUR.slug), 1500);
   } catch (e) { toast('重建失败：' + e.message); }
   finally { btn.disabled = false; btn.textContent = old; }
+});
+// 「签约诊断」——把 2026-09-19 手工查王莽签约被拒的那套流程固化成一个按钮。只读。
+$('#btnSignDiag')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const b = getBookBySlug(CUR.slug) || CUR;
+  if (!b.publish?.bookId) { toast('这本书还没绑定番茄作品——先在「发布到番茄」里选账号和书'); return; }
+  if (b.signDiag?.at && confirm(`上次诊断是 ${new Date(b.signDiag.at).toLocaleString('zh-CN')}。\n\n确定 = 直接看上次的报告\n取消 = 重新诊断一次`)) {
+    openReaderAt(b, 'reviews/签约诊断.md').catch(() => toast('上次的报告没找到，重新诊断一次吧'));
+    return;
+  }
+  // 说清楚要干什么、要多久、会不会动番茄上的东西——长耗时 + 碰外部账号的动作，这三句必须先讲
+  if (!confirm('签约诊断会：\n· 打开番茄后台，读签约进度和章节定时表（只读，不改任何东西）\n· 按签约编辑的标准评估编辑看得到的已发布章节\n\n约 5–8 分钟，进度看下方日志。开始？')) return;
+  const btn = $('#btnSignDiag'); const old = btn.textContent; btn.disabled = true; btn.textContent = '诊断中…';
+  try {
+    const r = await api('/api/book/sign-diagnose', 'POST', { book: CUR.slug });
+    openStream(CUR.slug);
+    toast(r.already ? '这本书正在诊断，进度看下方日志' : '已开始签约诊断——完成后报告在 reviews/签约诊断.md，此刻卡也会显示结论');
+  } catch (e) { toast('签约诊断启动失败：' + e.message); }
+  finally { setTimeout(() => { btn.disabled = false; btn.textContent = old; }, 3000); }
 });
 $('#olApply').addEventListener('click', async () => {
   if (!CUR) return;

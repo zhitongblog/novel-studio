@@ -120,7 +120,7 @@ test('每一条都必须带动作，且指向真实入口', () => {
   try {
     const r = checkupBook(b);
     assert.ok(r.items.length >= 3);
-    const kinds = new Set(['cowrite', 'read', 'publish', 'finale', 'synopsis', 'settings']);
+    const kinds = new Set(['cowrite', 'read', 'publish', 'finale', 'synopsis', 'settings', 'signdiag']);
     for (const i of r.items) {
       assert.ok(i.action && i.action.label, `「${i.text}」没带动作`);
       assert.ok(kinds.has(i.action.kind), `动作 kind「${i.action.kind}」不在已知入口里——指到不存在的地方等于没有`);

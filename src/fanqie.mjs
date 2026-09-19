@@ -18,6 +18,7 @@ import {
   mcpCall, UNZOO_TIMEOUT_MS,
   clickAt, inputText, uploadTrusted, handleDialog, launchProfile, waitFor,
 } from './unzoo.mjs';
+import { alignScheduleStart } from './signdiag.mjs';
 
 // 运行中的发布器（bookId → FanqiePublisher），供「停止发布」按外部请求中断。
 const RUNNING_PUBLISHERS = new Map();
@@ -2281,6 +2282,26 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
       await client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}&${volumeIdx}`);
       await client.sleep(2000);
     } else {
+      // 【开发之前先对齐番茄上已排的定时】见 signdiag.alignScheduleStart 的注释：
+      // 原来没指定起始日期时一律从"明天"排，完全不看已经排着的待发布章节——
+      // 《穿成王莽后》因此被排成 19 → 35 → 36 → 50 → 51 → 20……读者看完 19 章直接跳到 35。
+      // 必须在打开编辑页【之前】读（publishChapter 假设页面已经停在编辑页，读完再跳过去）。
+      // 读不到就照原逻辑走，但要说出来——沉默会被当成"已经对齐过了"。
+      try {
+        log('发布前核对番茄上已排的定时…');
+        await client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}&1`);
+        await client.sleep(6000);
+        const rows = await readPendingSchedule(client);
+        const a = alignScheduleStart(rows, innerConfig.scheduledStartDate);
+        if (a.changed && a.date) {
+          innerConfig.scheduledStartDate = a.date;
+          log('📅 ' + a.reason, 'warn');
+        } else {
+          log('定时核对：' + a.reason);
+        }
+      } catch (e) {
+        log('⚠️ 没能读到番茄上已排的定时（' + e.message + '）——按原逻辑发布，请发完到番茄后台核对章节上线顺序', 'warn');
+      }
       // 新建发布模式：导航到新建章节页面。卷切换由 publishChapter 逐章处理(matchVolumes 时)，这里不再整批切单卷。
       log('正在打开新建章节页面...');
       await client.navigate(`https://fanqienovel.com/main/writer/${bookId}/publish/?enter_from=newchapter`);
@@ -3753,4 +3774,41 @@ export async function pushNameExperiment({ bookId, bookTitle, items = [], profil
   }
 }
 
-export { UnzooClient, FanqiePublisher, maxChapterNumInText };
+// 读番茄章节管理表里【全部】章节的 状态+上线时间（翻页读全）。只读。
+// 调用前页面须已在 chapter-manage/<bookId>&1。
+// ⚠️ 这个函数第一次是用 shell 里的 node -e 写进来的——反引号全被 bash 当成命令替换吃掉，
+// 落盘的是 `const FIRE = ;` 这种废代码。含浏览器端脚本（evaluate 里的模板字符串）的代码
+// 一律用编辑器写，别再过 shell。
+async function readPendingSchedule(client) {
+  const FIRE = "function __f(e){['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){e.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});}";
+  const SEP_COL = String.fromCharCode(1), SEP_ROW = String.fromCharCode(2);
+  const all = new Map();
+  for (let page = 1; page <= 20; page++) {
+    const rows = await client.evaluate(`(function(){
+      var C=String.fromCharCode(1), R=String.fromCharCode(2), NL=String.fromCharCode(10);
+      var L=(document.body.innerText||'').split(NL).map(function(s){return s.trim();}).filter(Boolean);
+      var out=[];
+      for(var i=0;i<L.length;i++){ if(/^第[0-9]+章/.test(L[i])) out.push([L[i], L[i+3]||'', L[i+4]||''].join(C)); }
+      return out.join(R);
+    })()`);
+    let fresh = 0;
+    for (const r of String(rows || '').split(SEP_ROW).filter(Boolean)) {
+      const [title, status, time] = r.split(SEP_COL);
+      const num = parseInt((String(title).match(/第(\d+)章/) || [])[1], 10);
+      if (!num || all.has(num)) continue;
+      const tm = String(time || '').trim();
+      all.set(num, { num, status: String(status || '').trim(), time: /\d{4}-\d{2}-\d{2}/.test(tm) ? tm : '' });
+      fresh++;
+    }
+    if (!fresh) break;
+    const next = await client.evaluate(`(function(){${FIRE}
+      var n=document.querySelector('.arco-pagination-item-next:not(.arco-pagination-item-disabled)');
+      if(!n) return 'none'; __f(n); return 'ok';
+    })()`);
+    if (next !== 'ok') break;
+    await client.sleep(3000);
+  }
+  return [...all.values()];
+}
+
+export { UnzooClient, FanqiePublisher, maxChapterNumInText, readPendingSchedule };

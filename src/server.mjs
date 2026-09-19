@@ -34,6 +34,7 @@ import { finaleArtifacts, finaleSummary } from './finaledone.mjs';
 import { checkupBook } from './checkup.mjs';
 import { buildAllDigests, rebuildVolumeOutlines } from './outlinerun.mjs';
 import { digestProgress } from './outlinerebuild.mjs';
+import { diagnoseSigning } from './signrun.mjs';
 import { loadBooks } from './store.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
@@ -1245,6 +1246,24 @@ async function api(p, req, res, u) {
           finally { const st = rt.get(slug); if (st) st.outlineRun = null; }
         })();
         return json(res, 200, { ok: true, started: true, model, ...digestProgress(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/sign-diagnose') {
+      // 签约诊断：番茄签约进度 + 定时乱序 + 客观指标 + 编辑视角评估 → 修改清单。只读。
+      // 由来：王莽第二次签约被拒，拒信只有一句"质量暂未达到签约标准"。见 signrun.mjs。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
+        if (!book.publish?.bookId) return json(res, 400, { error: '这本书还没绑定番茄作品——先在发布设置里选账号和书' });
+        const slug = book.slug;
+        if (rtOf(slug).signRun) return json(res, 200, { ok: true, already: true });
+        rtOf(slug).signRun = true;
+        const onLog = (e) => pushLog(slug, { ...e, source: 'sign' });
+        (async () => {
+          try { await diagnoseSigning(book, { cfg, onLog }); }
+          catch (e) { pushLog(slug, { level: 'error', source: 'sign', msg: '签约诊断失败：' + e.message }); }
+          finally { const st = rt.get(slug); if (st) st.signRun = false; }
+        })();
+        return json(res, 200, { ok: true, started: true });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/rebuild-outline-stop') {
