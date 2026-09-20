@@ -5,7 +5,7 @@ import path from 'node:path';
 import { getModel, detectModel, resolveBin, trustAgyWorkspace } from './models.mjs';
 import {
   ensureProfile, spawnInstance, instancePids, waitForNewInstance, resolveSpawnedInstance,
-  resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow, killBookAgents, processAlive, winShell,
+  resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow, killBookAgents, processAlive, winShell, destroyPaneViaCli,
 } from './unterm.mjs';
 import { connectInstance } from './mcpclient.mjs';
 import { Autopilot } from './autopilot.mjs';
@@ -57,11 +57,15 @@ export async function closeBookOrphans(dir, selfSlug, onLog = () => {}) {
       mcp = await connectInstance(inst, {});
       const list = await mcp.sessionList();
       for (const p of list) {
-        if (p.is_dead) continue;
         if (busyPanes.has(String(p.id))) continue;
         if (normDir(p?.shell?.cwd) !== want) continue;
+        // 死 pane 也要清：0.71 上关不掉的 pane 会以"死 tab"留在窗口里，一本书堆一个，作者看着全是空 tab
+        if (p.is_dead) { if (destroyPaneViaCli(p.id, inst.id)) panes++; continue; }
         onLog({ level: 'warn', msg: `发现残留 pane ${p.id}（cwd 指向本书目录、引擎未在驱动）→ 关闭，避免两个窗口抢写同一章` });
-        try { await mcp.destroyPane(p.id); panes++; } catch (e) { onLog({ level: 'warn', msg: `关闭 pane ${p.id} 失败：${e.message}` }); }
+        try {
+          if (!destroyPaneViaCli(p.id, inst.id)) await mcp.destroyPane(p.id);
+          panes++;
+        } catch (e) { onLog({ level: 'warn', msg: `关闭 pane ${p.id} 失败：${e.message}` }); }
       }
       break;   // 端口/pane 命名空间是全局的，成功枚举过一次就够了
     } catch {}

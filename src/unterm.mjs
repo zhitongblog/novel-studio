@@ -133,7 +133,10 @@ export async function closeWindow({ id, mcp_port, auth_token, pid, pane, tab = f
     try {
       const { connectInstance } = await import('./mcpclient.mjs');
       mcp = await connectInstance({ id, mcp_port, auth_token }, {});
-      await mcp.destroyPane(pane);
+      // 先走 unterm-cli：TCP 那条 MCP 通道上 session.destroy 在 0.71.8 不回包（还会把连接卡住），
+      // pane 关不掉、只能留个"死 tab"，写一本书就堆一个——2026-09-20 一晚堆了 16 个，作者让清。
+      // CLI 走的是 GUI 那条通道，实测 72ms 关掉且连死记录都不留。CLI 不在/失败再退回 MCP。
+      if (!destroyPaneViaCli(pane, id)) await mcp.destroyPane(pane);
       await new Promise(r => setTimeout(r, 600));   // 给 agent 一点退出时间
       try {
         const rest = await mcp.sessionList();
@@ -158,6 +161,18 @@ export async function closeWindow({ id, mcp_port, auth_token, pid, pane, tab = f
     } else killed = true;
   }
   return killed;
+}
+
+// 用 unterm-cli 关一个 pane（GUI 通道，秒回）。成功返回 true。
+export function destroyPaneViaCli(paneId, instanceId) {
+  const cli = findUntermCli();
+  if (!cli || paneId == null || /unterm(\.exe)?$/i.test(cli)) return false;   // 只认真 CLI，别拿 GUI 去跑
+  try {
+    const args = ['session', 'destroy', '--pane-id', String(paneId), '--json'];
+    if (instanceId) args.push('--instance', String(instanceId));
+    const r = spawnSync(cli, args, { encoding: 'utf8', timeout: 10000 });
+    return r.status === 0 && /"destroyed"\s*:\s*true/.test(r.stdout || '');
+  } catch { return false; }
 }
 
 // 【按书兜底杀 agent】关 pane 不等于 agent 死了。
