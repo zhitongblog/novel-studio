@@ -71,6 +71,12 @@ export class Autopilot {
   static TERMINAL = /(用量|速率上限|额度|配额|agent 已退出|agent 未能启动|已完本|窗口\/pane 已关闭|agent 进程已退出)/;
   // 屏幕上出现这些=agent 自己报的环境级失败（连不上/没资格/要登录）。连着出现两次就判终止。
   static ENV_FAIL = /(eligibility check failed|userinfo": EOF|failed to authenticate|401 unauthorized|could not reach|network is unreachable|连接失败|无法连接到)/i;
+  // 【临时故障 ≠ 环境坏了】断连、超时、上游 5xx 都是催一下就能接着干的。
+  // 2026-09-20 实证：claude 分析完 12 分钟、打出"现在动笔"，紧接着
+  // 「API Error: Connection lost mid-response」——一个字没写就停在提示符前，
+  // 而当时引擎正好也没了，没人重催，它就空等了三个小时。
+  // 这类错要【立刻重催并说清原因】，别混进 ENV_FAIL 被判终止，也别只靠空闲检测慢慢兜。
+  static TRANSIENT = /(api error|connection lost mid-response|request timed out|econnreset|502 bad gateway|503 service|overloaded_error|internal server error)/i;
 
   stop(reason) {
     if (!this.running) return;
@@ -149,6 +155,18 @@ export class Autopilot {
         return;
       }
     } else if (this._envFail) { this._envFail = 0; }
+
+    // 【断连立刻重催】屏幕最后是"API Error / Connection lost"这类临时故障：催一句就能接着写。
+    // 连着催 6 次还是同一句，才当成环境问题停下——否则就是无限重试烧 token。
+    if (Autopilot.TRANSIENT.test(lastNonEmpty(screen, 6)) && !screenChanged) {
+      this._transient = (this._transient || 0) + 1;
+      if (this._transient > 6) { this.stop('反复断连（API Error/超时），催了六次都没接上'); return; }
+      const line = (lastNonEmpty(screen, 6).split(String.fromCharCode(10)).find(l => Autopilot.TRANSIENT.test(l)) || '').trim().slice(0, 100);
+      this.log(`agent 撞上临时故障（${line}）→ 第 ${this._transient} 次重催`, 'warn');
+      try { await this.mcp.submitText(this.paneId, this.opt.continueText || '继续'); } catch {}
+      return;
+    }
+    if (this._transient && screenChanged) this._transient = 0;
 
     // 【陈旧 working】——agent.status 是 claude 侧 hook 上报的，hook 一旦挂了，状态就【永远停在 working】。
     // 现场（《走进修仙》pane 7）：写完 104–106 章后 Stop 钩子报错（屏幕上一串 Hookify error），

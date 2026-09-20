@@ -17,6 +17,7 @@
 import assert from 'node:assert';
 import test from 'node:test';
 import { Autopilot, optionChoice, cursorRe } from '../src/autopilot.mjs';
+import fs from 'node:fs';
 
 const ap = new Autopilot({}, 1, { confirmOnly: true });
 const tailOf = (s) => s.split(/\r?\n/).filter(l => l.trim()).slice(-40).join('\n');
@@ -160,4 +161,19 @@ test('环境级失败要算【终止性】停止——补挂一个新的 autopil
 test('正常写作的屏幕不会被误判成环境失败', () => {
   const ok = ['● Edit(chapters/卷02/031_承明请缨.txt)', '写完 3 章，已更新索引与台账。', '>', '? for shortcuts'].join(String.fromCharCode(10));
   assert.ok(!Autopilot.ENV_FAIL.test(ok));
+});
+
+test('断连/超时属于临时故障：要立刻重催，而不是判死也不是干等', () => {
+  // 2026-09-20 实证：claude 打出"现在动笔"后撞上 API Error: Connection lost mid-response，
+  // 一个字没写就停在提示符前，空等了三个小时。
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  const re = Autopilot.TRANSIENT;
+  assert.ok(re, '要有 TRANSIENT 模式');
+  assert.ok(re.test('API Error: Connection lost mid-response'), '断连要认出来');
+  assert.ok(re.test('Request timed out'), '超时要认出来');
+  assert.ok(!re.test('Eligibility check failed'), '环境级失败归 ENV_FAIL，别混进来');
+  assert.ok(Autopilot.ENV_FAIL.test('Eligibility check failed'), 'ENV_FAIL 照旧管环境级失败');
+  // 不能无限重催
+  assert.match(src, /_transient > 6/, '催不动就得停，否则白烧 token');
+  assert.ok(src.includes('次重催'), '日志要说清这是第几次重催');
 });

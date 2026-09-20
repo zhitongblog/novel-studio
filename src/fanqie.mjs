@@ -3674,12 +3674,13 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
 //   · 简介   = 可见 textarea，上限 500 字（页面角标 190/500）
 //   · 提交   = 「立即修改」按钮；旁边还有「取消」「选择封面」
 // 注意：受控组件必须用原生 setter 派发 input/change，直接赋 value 番茄读不到。
-export async function updateFanqieBookInfo({ bookId, profilePath, title = '', intro = '', autoSubmit = true, onLog } = {}) {
+export async function updateFanqieBookInfo({ bookId, profilePath, title = '', intro = '', mainCategory = '', readTags = null, contentTags = null, autoSubmit = true, onLog } = {}) {
   const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
   if (!bookId) return { ok: false, error: '缺少番茄 bookId' };
   title = String(title || '').trim();
   intro = String(intro || '').trim();
-  if (!title && !intro) return { ok: false, error: '书名和简介都没给，没什么可改的' };
+  const wantTags = !!(mainCategory || (readTags && Object.values(readTags).flat().length) || (contentTags && Object.values(contentTags).flat().length));
+  if (!title && !intro && !wantTags) return { ok: false, error: '书名、简介、标签都没给，没什么可改的' };
   if (title && [...title].length > 15) return { ok: false, error: `书名 ${[...title].length} 字，番茄上限 15 字` };
   if (intro && ([...intro].length < 50 || [...intro].length > 500)) return { ok: false, error: `简介 ${[...intro].length} 字，番茄要求 50–500 字` };
 
@@ -3752,8 +3753,39 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
       if (!ok) return { ok: false, error: '简介没填进去（可能超长被番茄截断）' };
     }
 
+    // —— 阅读标签 / 内容标签：编辑态用的就是建书页那套 .cate-wrap（2026-09-20 实地确认），
+    //    所以直接复用 tagHelpers，番茄哪天改版也只用改一处。
+    const tagNotes = [];
+    if (wantTags) {
+      const { openTagDialog, selectTags, confirmTagDialog } = tagHelpers(client, log);
+      if (mainCategory || (readTags && Object.values(readTags).flat().length)) {
+        const op = await openTagDialog('阅读标签');
+        if (!op.ok) tagNotes.push('阅读标签没能打开：' + op.why);
+        else {
+          const want = { ...(mainCategory ? { 主分类: [mainCategory] } : {}), ...(readTags || {}) };
+          const r = await selectTags(want);
+          if (r.picked?.length) log('阅读标签已选：' + r.picked.join('、'));
+          if (r.missed?.length) tagNotes.push('阅读标签没选上：' + r.missed.join('；'));
+          const cf = await confirmTagDialog('阅读标签');
+          if (!cf.ok) tagNotes.push('阅读标签没存上：' + cf.why);
+        }
+      }
+      if (contentTags && Object.values(contentTags).flat().length) {
+        const op = await openTagDialog('内容标签');
+        if (!op.ok) tagNotes.push('内容标签没能打开：' + op.why);
+        else {
+          const r = await selectTags(contentTags);
+          if (r.picked?.length) log('内容标签已选：' + r.picked.join('、'));
+          if (r.missed?.length) tagNotes.push('内容标签没选上：' + r.missed.join('；'));
+          const cf = await confirmTagDialog('内容标签');
+          if (!cf.ok) tagNotes.push('内容标签没存上：' + cf.why);
+        }
+      }
+      for (const n of tagNotes) log(n, 'warn');
+    }
+
     if (!autoSubmit) {
-      return { ok: true, semiManual: true, msg: '已在番茄填好新书名/简介，请到浏览器核对后点「立即修改」' };
+      return { ok: true, semiManual: true, tagNotes, msg: '已在番茄填好新书名/简介/标签，请到浏览器核对后点「立即修改」' };
     }
     // 【提交必须是真实坐标点击】合成指针序列能点开弹窗、却提交不了：实测点完编辑态是退出了，
     // 值却还是旧的（番茄把它当成取消）。createFanqieBook 的「立即创建」当年也是这么踩出来的，
@@ -3776,7 +3808,7 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
     const titleOk = !title || page.includes(title);
     const introOk = !intro || page.includes(intro.slice(0, 20));
     log(`回读校验：书名 ${titleOk ? '✅' : '❌'}　简介 ${introOk ? '✅' : '❌'}`, titleOk && introOk ? 'act' : 'warn');
-    return { ok: titleOk && introOk, submitted: true, titleOk, introOk, title, introLen: [...intro].length };
+    return { ok: titleOk && introOk, submitted: true, titleOk, introOk, title, introLen: [...intro].length, tagNotes };
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
   }

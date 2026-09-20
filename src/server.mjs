@@ -1562,11 +1562,13 @@ async function api(p, req, res, u) {
         const r = await updateFanqieBookInfo({
           bookId: pc.bookId, profilePath: pc.profilePath,
           title: body.title || '', intro: body.intro || '', autoSubmit: body.autoSubmit !== false,
+          mainCategory: body.mainCategory || '', readTags: body.readTags || null, contentTags: body.contentTags || null,
           onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie' }),
         });
         // 番茄改成功了，本地也要跟上：简介直接同步，书名只记在发布配置里（本地改名是另一件事，得用改名功能）
         if (r.ok && body.intro) { try { setBookSynopsis(book.slug, body.intro); } catch {} }
         if (r.ok && body.title) { try { setBookPublish(book.slug, { bookName: body.title }); } catch {} }
+        if (r.ok && body.mainCategory) { try { setBookCategory(book.slug, { channel: body.channel || '男频', mainCategory: body.mainCategory }); } catch {} }
         return json(res, 200, r);
       } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
     }
