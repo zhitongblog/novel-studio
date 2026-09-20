@@ -80,6 +80,12 @@ export const STYLE_STD = {
   maxAvgPara: 40,      // 每段不超过手机三行
   maxExclaimQ: 1,      // 「？！」每章最多一处
   minKeepPct: 95,      // 改后字数不得低于改前的 95%  ← 防止改干
+  // 结构改造模式下字数是【软线】：诊断常常明确要求"把这段压缩到200字以内/砍掉三分之二"，
+  // 模型照做了却被字数闸判不达标退回重做，等于流水线自己跟必办清单打架
+  //（2026-09-20《代码逆子》第1章：诊断要求砍开篇铺垫 → 改后 61% → 被退回）。
+  // 所以：低于 minKeepPct 只记进报告提醒，低于 hardFloorPct 才真的判不达标。
+  keepSoft: false,
+  hardFloorPct: 70,
 };
 
 // 扫一段章号区间。before：{章号: 改前正文} —— 有它才能判"字数掉了"和"根本没改"。
@@ -113,7 +119,11 @@ export function styleScan(bookDir, from, to = 0, { std = {}, before = null } = {
     }
     const bad = [];
     if (c.unchanged) bad.push('根本没改');
-    if (c.keepPct != null && c.keepPct < S.minKeepPct) bad.push(`字数只剩 ${c.keepPct}%（不得低于 ${S.minKeepPct}%）`);
+    if (c.keepPct != null && c.keepPct < S.minKeepPct) {
+      const hard = !S.keepSoft || c.keepPct < S.hardFloorPct;
+      const msg = `字数只剩 ${c.keepPct}%（${hard ? '不得低于 ' + (S.keepSoft ? S.hardFloorPct : S.minKeepPct) + '%' : '目标 ' + S.minKeepPct + '%，按清单砍戏可接受'}）`;
+      if (hard) bad.push(msg); else (c.warn = c.warn || []).push(msg);
+    }
     if (c.tics.length > S.maxTics) bad.push(`叙述里还有套话：${c.tics.slice(0, 5).join('、')}`);
     if (c.piles > S.maxPiles) bad.push(`形容词堆砌 ${c.piles} 句（上限 ${S.maxPiles}）`);
     if (c.similes > S.maxSimiles) bad.push(`比喻 ${c.similes} 处（上限 ${S.maxSimiles}）`);
@@ -139,9 +149,14 @@ export function buildStyleFixInstruction(scan) {
     `【上一轮这几章没达标，只改这几章，别动别的】${lines.join('。')}`,
     '【怎么改】同义三连只留一处，最好换成具体动作（「他的手在袖子里抖」胜过「浑身战栗」）；'
     + '一个名词上不要摞三层形容词；套话在叙述里一个不留，人物对白里可以保留',
-    `【删了要补回来】字数不得低于原文 ${S.minKeepPct}%：把删掉的辞藻换成气味、温度、声音、疼痛、触感这类具体细节，`
-    + '以及人物的小动作。严禁靠拉长环境描写或重复叙述凑字数',
-    '【一场戏都不许砍】剧情、人物、对白内容、已埋伏笔全部保留，只调语言',
+    S.keepSoft
+      ? `【删了要补回来】按必办清单砍掉的段落不必还原，但砍出来的篇幅要用正面交锋、人物选择、可感的胜负补上，`
+        + `别只剩梗概；本章字数不要低于原文 ${S.hardFloorPct}%`
+      : `【删了要补回来】字数不得低于原文 ${S.minKeepPct}%：把删掉的辞藻换成气味、温度、声音、疼痛、触感这类具体细节，`
+        + '以及人物的小动作。严禁靠拉长环境描写或重复叙述凑字数',
+    S.keepSoft
+      ? '【清单没让改的地方不要动】没被点名的情节、爽点、伏笔保持原样'
+      : '【一场戏都不许砍】剧情、人物、对白内容、已埋伏笔全部保留，只调语言',
   ].join('。');
 }
 
@@ -154,7 +169,7 @@ export function writeStyleReport(bookDir, scan, tag = '') {
     + `阈值：比喻≤${S.maxSimiles}、堆砌句≤${S.maxPiles}、叙述套话=${S.maxTics}、感官≥${S.minSenses}、均段≤${S.maxAvgPara}、字数≥原文${S.minKeepPct}%\n\n`
     + '| 章 | 字数 | 保留 | 均段 | 比喻 | 堆砌 | 套话 | 感官 | 结论 |\n|---|---|---|---|---|---|---|---|---|\n';
   const rows = scan.chapters.map(c =>
-    `| ${c.num} | ${c.chars} | ${c.keepPct != null ? c.keepPct + '%' : '-'} | ${c.avgPara} | ${c.similes} | ${c.piles} | ${c.tics.length} | ${c.senses} | ${c.bad?.length ? '✗ ' + c.bad.join('；') : '✓'}${c.hint ? '（' + c.hint + '）' : ''} |`
+    `| ${c.num} | ${c.chars} | ${c.keepPct != null ? c.keepPct + '%' : '-'} | ${c.avgPara} | ${c.similes} | ${c.piles} | ${c.tics.length} | ${c.senses} | ${c.bad?.length ? '✗ ' + c.bad.join('；') : '✓'}${c.warn?.length ? '（提醒：' + c.warn.join('；') + '）' : ''}${c.hint ? '（' + c.hint + '）' : ''} |`
   ).join('\n');
   const fp = path.join(dir, `文风体检${tag ? '-' + tag : ''}.md`);
   fs.writeFileSync(fp, head + rows + '\n', 'utf8');

@@ -1107,7 +1107,10 @@ async function api(p, req, res, u) {
         ? buildFreehandKickoffInstruction(book, body.theme || body.genre, body.words, body.characters)
         : buildCompassKickoffInstruction(book, body.theme || body.genre, body.words, body.volumes, body.characters);
       if (freehand) pushLog(book.slug, { level: 'info', msg: '🌱 探索式立项：圣经只写【写作手法 + 主角名 + 故事概述】，不出全书大纲、不出卷大纲——剧情你一段一段给，AI 自拆 3–5 章' });
-      rtOf(book.slug).logs = [];
+      // 【别清日志】旧重写端点每次开窗都清空，改造流水线跑起来之后这等于把自己的质检记录抹掉——
+  // 2026-09-20 实测：第二轮一开窗，第一轮的质检结论就在界面上消失了，只能去翻落盘的报告。
+  // 一次性重写仍然清（作者要看干净的进度）；流水线调用时传 keepLogs。
+  if (!body.keepLogs) rtOf(book.slug).logs = [];
       try {
         const session = await startWriting({ book, model: launchModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: true });
         rtOf(book.slug).session = session;
@@ -1954,7 +1957,7 @@ async function api(p, req, res, u) {
           for (const f of ['改造诊断.md', '签约诊断.md']) {
             try {
               const t = fs.readFileSync(path.join(book.dir, 'reviews', f), 'utf8');
-              mustFix = [...t.matchAll(/^[-*\s]*\[?必改\]?[:：]?\s*(.+)$/gm)].map(m => m[1].trim()).slice(0, 12);
+              mustFix = [...t.matchAll(/^[-*\s]*\[?必改\]?[:：]?\s*(.+)$/gm)].map(m => m[1].trim()).slice(0, 40);
               if (mustFix.length) { pushLog(slug, { level: 'info', source: 'overhaul', msg: `必办清单取自 ${f}（${mustFix.length} 条）` }); break; }
             } catch {}
           }
@@ -2176,7 +2179,7 @@ function overhaulApi(book, cfg) {
   return {
     live: async () => sessionLive(slug),
     stop: async () => { try { const st = rt.get(slug); st?.session?.autopilot?.stop('改造流水线停止'); stopBook(slug); st?.streamer?.stop(); rt.delete(slug); } catch {} },
-    rewrite: async (b) => startRewrite(getBook(slug) || book, b, cfg),
+    rewrite: async (b) => startRewrite(getBook(slug) || book, { ...b, keepLogs: true }, cfg),
     killAgents: async () => { try { return killBookAgents((getBook(slug) || book).dir); } catch { return 0; } },
     // 撞没撞模型额度：看这段时间的日志（autopilot 会把"用量/速率上限"写进来）
     hitQuota: async (since) => (rtOf(slug).logs || []).some(e => e.t >= since && /用量|速率上限|quota/i.test(String(e.msg || ''))),

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { styleScan, countSimiles, countPiles, buildStyleFixInstruction, STYLE_STD } from '../src/stylegate.mjs';
-import { buildBatchInstruction, readFixBatches } from '../src/overhaul.mjs';
+import { buildBatchInstruction, readFixBatches, pickMustFix } from '../src/overhaul.mjs';
 import { parseReadReview, buildReadFixInstruction } from '../src/readreview.mjs';
 import { parseDiagnose } from '../src/diagnose.mjs';
 
@@ -82,7 +82,7 @@ test('返工指令只说这一批真的犯的毛病，且必须带"删了要补�
 test('【措辞纪律】批次指令绝不能出现能被读成"往后写"的话', () => {
   const b = mkBook({ 1: '正文' });
   try {
-    const ins = buildBatchInstruction(b, 11, 20, { mustFix: ['[必改] 开局太慢→第2章就给冲突'] });
+    const ins = buildBatchInstruction(b, 11, 20, { mustFix: ['[必改] 第14章 REM 写错了→改成 NREM 三期'] });
     assert.match(ins, /只改写第11到第20章/);
     assert.match(ins, /不新增任何章节/);
     assert.match(ins, /不写第21章/);
@@ -167,4 +167,45 @@ test('引擎必须提供改造流水线的四个入口，且只发改动章要�
   assert.ok(i > 0, '要有 changedChapters');
   // 没有基线指纹的章一律不算"改过"，否则会把整本书重发一遍
   assert.match(src.slice(i, i + 500), /hashes\[String\(c\.num\)\] &&/);
+});
+
+test('结构改造时字数是软线：按清单砍了戏不算不达标，砍过头才算', () => {
+  // 2026-09-20《代码逆子》第1章：诊断明确要求砍掉开篇铺垫，模型照做 → 61%，
+  // 却被字数闸判不达标退回重做——流水线自己跟必办清单打架。
+  const long = para('他').repeat(200);
+  const b = mkBook({ 1: para('他推门出去，雪腥味扑面。') + para('指节冻得发疼，喉咙一股铁锈味。') + para('远处有人在咳。') });
+  try {
+    const soft = styleScan(b.dir, 1, 1, { before: { 1: long }, std: { keepSoft: true, hardFloorPct: 70, minKeepPct: 85 } });
+    const hard = styleScan(b.dir, 1, 1, { before: { 1: long }, std: { minKeepPct: 85 } });
+    assert.ok(hard.chapters[0].bad.some(x => x.includes('字数只剩')), '精修模式下字数掉了就是不达标');
+    // 砍到 70% 以下仍然判死（这是"砍过头只剩梗概"）
+    assert.ok(soft.chapters[0].bad.some(x => x.includes('字数只剩')), '砍过头必须判不达标');
+    // 轻微低于目标线时只提醒
+    const mild = styleScan(b.dir, 1, 1, { before: { 1: para('他推门出去，雪腥味扑面。') + para('指节冻得发疼，喉咙一股铁锈味。') + para('远处有人在咳。') + para('他又站了一会。') }, std: { keepSoft: true, hardFloorPct: 70, minKeepPct: 95 } });
+    assert.equal(mild.chapters[0].bad.length, 0, '结构改造下轻微缩水不判死');
+    assert.ok(mild.chapters[0].warn?.length, '但要记进报告提醒');
+  } finally { rm(b); }
+});
+
+test('必办清单要【按批次筛】——不筛的话模型会认定"本批没事可做"，跑二十分钟一个字不改', () => {
+  // 2026-09-20《代码逆子》第 11–20 章实证：塞进去的是清单前 12 条，全在点名第 1–9 章，
+  // claude 读完就报"任务完成"收工，十章一个字没动。
+  const must = [
+    '[必改] 第1章开局慢→砍掉营养液那段',
+    '[必改] 第14章 REM 写错了→改成 NREM 三期',
+    '[必改] 主角全程平静从容→该慌就慌',        // 不带章号 = 全书通则
+  ];
+  const b = mkBook({ 1: '正文' });
+  try {
+    const p = pickMustFix(must, 11, 20);
+    assert.deepEqual(p.inRange, ['[必改] 第14章 REM 写错了→改成 NREM 三期'], '只要点名本批的');
+    assert.equal(p.global.length, 1, '不带章号的通则要留下');
+    const ins = buildBatchInstruction(b, 11, 20, { mustFix: must });
+    assert.match(ins, /第14章 REM/);
+    assert.ok(!/第1章开局慢/.test(ins), '别把别批的活塞进来');
+    assert.match(ins, /全书通则/);
+    // 清单一条都不沾这批时，必须明说"照样要改"，不能让模型以为没事可做
+    const none = buildBatchInstruction(b, 21, 30, { mustFix: ['[必改] 第1章开局慢→砍掉营养液那段'] });
+    assert.match(none, /诊断没有点名第21到第30章，但本批同样要改/);
+  } finally { rm(b); }
 });

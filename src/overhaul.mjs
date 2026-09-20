@@ -63,12 +63,27 @@ function chapterAt(book, num, snap) {
 // 两种模式都【绝不允许新增章节】——那是另一回事（续写），也是踩过大坑的地方。
 export const MODES = {
   polish: { name: '文风精修', std: {} },
-  rebuild: { name: '结构改造', std: { minKeepPct: 85 } },   // 改结构时砍冗长推演是对的，字数底线放宽
+  rebuild: { name: '结构改造', std: { minKeepPct: 85, keepSoft: true, hardFloorPct: 70 } },   // 按清单砍戏是对的，只有砍过头(<70%)才判不达标
 };
+
+// 必办清单按批次筛：清单是全书级的，一条条都点着章号（"第14章 REM 写错了"）。
+// 【2026-09-20 实证】不筛的后果：给第 11–20 章那批塞的是清单前 12 条，全在点名第 1–9 章，
+// claude 读完认定"本批没有要办的事"，跑了 20 分钟、一个字没改就报完成收工。
+// 所以：挑出点名本批章号的 + 不带章号的通则，两样都没有时明说"本批没有点名项，按文风规则逐章精修"。
+export function pickMustFix(mustFix, a, b, limit = 12) {
+  const inRange = [], global = [];
+  for (const m of mustFix || []) {
+    const nums = [...String(m).matchAll(/第\s*(\d+)\s*[章-]/g)].map(x => +x[1]);
+    if (!nums.length) global.push(m);
+    else if (nums.some(n => n >= a && n <= b)) inRange.push(m);
+  }
+  return { inRange: inRange.slice(0, limit), global: global.slice(0, Math.max(2, limit - inRange.length)) };
+}
 
 // 【指令措辞纪律】这里是整条流水线最容易出人命的地方，改这段前先读上面 ①
 export function buildBatchInstruction(book, a, b, { mustFix = [], carry = '', extra = '', mode = 'polish' } = {}) {
   const rebuild = mode === 'rebuild';
+  const picked = pickMustFix(mustFix, a, b);
   return [
     `【本次只改写第${a}到第${b}章这几个已有的文件，改完就停；不新增任何章节，不写第${b + 1}章，不碰这个范围以外的任何文件】`,
     rebuild
@@ -77,7 +92,10 @@ export function buildBatchInstruction(book, a, b, { mustFix = [], carry = '', ex
         + '改完必须同步更新 chapter_index.md 和 continuity_ledger.md，让后面的章节接得上'
       : '【这是文风精修，不是重写】剧情事实、人物、事件结果、已埋伏笔全部保留，章号与卷目录不变',
     a > 1 ? `【衔接】第1到${a - 1}章已经按同样的标准改过，动笔前先读 chapter_index.md、continuity_ledger.md 和第${a - 1}章的结尾，保证接得上` : '',
-    mustFix.length ? `【必办清单（诊断给的，逐条落实）】${mustFix.slice(0, 12).join('；')}` : '',
+    picked.inRange.length
+      ? `【必办清单·点名本批的条目（逐条落实，改完自检一遍有没有漏）】${picked.inRange.join('；')}`
+      : (mustFix.length ? `【诊断没有点名第${a}到第${b}章，但本批同样要改】按下面的文风硬规则逐章精修，并保证每章结尾是一件具体的事而不是"变局拉开"这类空话` : ''),
+    picked.global.length ? `【全书通则（也适用于本批）】${picked.global.join('；')}` : '',
     '【文风硬规则】叙述里不许出现套话（轰然、面如土色、战战兢兢、如遭雷击、目瞪口呆、倒吸一口凉气这类），人物对白里可以保留；'
     + '一个名词上不要摞三层形容词；同义的话不要说三遍；比喻一章不超过三处（含"如…般""…似的"）；'
     + '每段不超过四十字，动作、对白、转折各自成段；「？！」一章最多一处',
@@ -187,10 +205,16 @@ export async function runOverhaul(book, {
         continue;
       }
 
-      // 一章都没改 = 没跑起来（启动失败/额度），重试有限次
+      // 一章都没改：可能是没跑起来（启动失败/额度），也可能是【模型以为没事可做】——
+      // 2026-09-20 实证：必办清单里没有点名本批的条目时，claude 读完就报"任务完成"收工了。
+      // 所以重试时把话挑明：上一轮你一个文件都没动，这不是完成。
       if (r.unchanged.length === job.b - job.a + 1 && job.round < maxRounds) {
         job.round++;
-        onLog({ level: 'warn', msg: `↻ 一章都没改，1 分钟后重试（第 ${job.round} 次）` });
+        job.fixInstruction = buildBatchInstruction(getBook(slug) || book, job.a, job.b, { mustFix, carry, mode })
+          + `。【上一轮你一个文件都没动就报了完成——那不算完成】第${job.a}到第${job.b}章每一章都必须实际落盘修改：`
+          + '哪怕诊断没点名这几章，也要按文风硬规则逐章精修（删套话、拆长段、把形容词堆砌换成动作与感官细节），'
+          + '并检查每章结尾是不是一件具体的事。改完在回复里列出你改了哪几个文件';
+        onLog({ level: 'warn', msg: `↻ 一章都没改，1 分钟后带着"这不算完成"重试（第 ${job.round} 次）` });
         await sleep(60000);
         continue;
       }

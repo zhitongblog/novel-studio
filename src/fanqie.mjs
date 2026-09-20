@@ -3358,6 +3358,114 @@ export async function changeFanqieCover({ bookId, coverPath, profilePath, autoSu
   }
 }
 
+// 标签弹窗三件套（阅读标签 / 内容标签）。建书要用，改分类也要用——所以提到模块级，
+// 两处共用一套，免得番茄改版后只改好一处（主分类签约后不可改，赌不起）。
+function tagHelpers(client, log = () => {}) {
+  const FIRE = `function __fire(el){['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});}`;
+
+  // 弹窗里有四个分栏，四栏共用同一个类名 .category-choose-item（阅读标签整窗 154 张，
+  // 主分类栏只有 19 张）。所以【必须限定在分栏内找，且全名相等】：
+  //   · 不限定 → 可能点到别栏的同名词上，这一栏其实没选中；
+  //   · 用 indexOf 子串匹配 → 要「悬疑」会先撞上「悬疑脑洞」「悬疑恋爱」。
+  // 主分类【签约后不可改】，这里不能靠"多半能撞对"。
+  const TAGJS = `
+    function __sectionHost(modal, name){
+      var host=null, best=1e9;
+      var all=modal.querySelectorAll('*');
+      for(var i=0;i<all.length;i++){
+        var e=all[i], t=e.textContent||'';
+        if(t.indexOf(name)<0) continue;
+        if(!e.querySelectorAll('.category-choose-item').length) continue;
+        if(t.length<best){best=t.length;host=e;}
+      }
+      return host;
+    }
+    function __cardName(e){ var ti=e.querySelector('.category-choose-item-title'); return ((ti?ti.textContent:e.textContent)||'').trim(); }
+    function __bigModal(){
+      var m=[].slice.call(document.querySelectorAll('.arco-modal')).filter(function(e){return e.getBoundingClientRect().width>300;});
+      return m.length?m[m.length-1]:null;
+    }`;
+
+  // 打开某个标签选择框（阅读标签 / 内容标签），验证 + 重试。
+  const openTagDialog = async (which) => {
+    const isOpen = async () => (await client.evaluate(`(function(){${TAGJS} var m=__bigModal(); return m?'1':'0';})()`)) === '1';
+    if (await isOpen()) return { ok: true };
+    for (let i = 0; i < 5; i++) {
+      const r = await client.evaluate(`(function(){${FIRE}
+        var wrap=[].slice.call(document.querySelectorAll('.cate-wrap')).find(function(e){return (e.textContent||'').indexOf(${JSON.stringify('WHICH')})>=0;});
+        if(!wrap) return 'no-wrap';
+        var sv=wrap.querySelector('.select-view')||wrap.querySelector('.select-row');
+        if(!sv) return 'no-sv';
+        __fire(sv);
+        return 'fired';
+      })()`.replace(JSON.stringify('WHICH'), JSON.stringify(which)));
+      if (r === 'no-wrap' || r === 'no-sv') return { ok: false, why: `未找到「${which}」选择框（番茄改版？）` };
+      await client.sleep(1800);
+      if (await isOpen()) return { ok: true };
+      log(`「${which}」弹窗没打开，重试第 ${i + 1} 次…`, 'warn');
+    }
+    return { ok: false, why: `「${which}」弹窗点了 5 次都没打开（页面没加载完 / 有东西挡着 / 番茄改版）` };
+  };
+
+  // 在已打开的弹窗里，按分栏勾选若干标签。
+  // wanted = { 分栏名: [标签名…] }。返回 {ok, picked:[], missed:[]}。
+  // 【点了不等于选上了】选中的卡片会加 active 类，而且是 React 异步加的——
+  // 点完立刻查会查到"没选中"（实测 1.2 秒内还没加上）。所以逐个轮询确认。
+  const selectTags = async (wanted) => {
+    const picked = [], missed = [];
+    for (const [section, names] of Object.entries(wanted)) {
+      for (const name of (names || [])) {
+        const r = await client.evaluate(`(function(){${FIRE}${TAGJS}
+          var m=__bigModal(); if(!m) return 'no-modal';
+          var host=__sectionHost(m, ${JSON.stringify(section)}); if(!host) return 'no-section';
+          var items=[].slice.call(host.querySelectorAll('.category-choose-item'));
+          var hit=items.filter(function(e){return __cardName(e)===${JSON.stringify(name)};})[0];
+          if(!hit) return 'MISS|'+items.map(__cardName).join('、');
+          if(hit.classList.contains('active')) return 'ALREADY';
+          __fire(hit);
+          return 'FIRED';
+        })()`);
+        if (r === 'no-modal') return { ok: false, why: '弹窗不见了' };
+        if (r === 'no-section') { missed.push(`${section}·${name}（这个弹窗里没有「${section}」这一栏）`); continue; }
+        if (String(r).startsWith('MISS|')) { missed.push(`${section}·${name}（该栏没有这一项）`); continue; }
+        if (r === 'ALREADY') { picked.push(`${section}·${name}`); continue; }
+        let on = false;
+        for (let i = 0; i < 8 && !on; i++) {
+          await client.sleep(400);
+          on = (await client.evaluate(`(function(){${TAGJS}
+            var m=__bigModal(); if(!m) return '0';
+            var host=__sectionHost(m, ${JSON.stringify(section)}); if(!host) return '0';
+            var hit=[].slice.call(host.querySelectorAll('.category-choose-item')).filter(function(e){return __cardName(e)===${JSON.stringify(name)};})[0];
+            return (hit&&hit.classList.contains('active'))?'1':'0';
+          })()`)) === '1';
+        }
+        if (on) picked.push(`${section}·${name}`);
+        else missed.push(`${section}·${name}（点了但没选上，可能超了该栏上限）`);
+      }
+    }
+    return { ok: true, picked, missed };
+  };
+
+  // 点「确认」关掉弹窗。灰着/没关 都要报出来——那意味着没存进去。
+  const confirmTagDialog = async (which) => {
+    const r = await client.evaluate(`(function(){${FIRE}
+      var b=[].slice.call(document.querySelectorAll('button')).filter(function(e){return (e.textContent||'').trim()==='确认';}).pop();
+      if(!b) return 'no-btn';
+      if(b.disabled) return 'disabled';
+      __fire(b);
+      return 'ok';
+    })()`);
+    if (r === 'no-btn') return { ok: false, why: `「${which}」弹窗里没找到「确认」按钮` };
+    if (r === 'disabled') return { ok: false, why: `「${which}」的「确认」按钮是灰的——必选项可能还没选` };
+    await client.sleep(1400);
+    const still = (await client.evaluate(`(function(){${TAGJS} return __bigModal()?'1':'0';})()`)) === '1';
+    if (still) return { ok: false, why: `点了「确认」但「${which}」弹窗没关——没存进去，先别创建` };
+    return { ok: true };
+  };
+
+  return { openTagDialog, selectTags, confirmTagDialog, TAGJS, FIRE };
+}
+
 // ===== 在番茄【创建一本新书】=====
 // 全自动：导航 /main/writer/create → 原生 setter 填 书名/男女频/主角名/简介 →
 //         CDP 可信点击 打开作品标签弹窗、选主分类卡片、确认 → 点「立即创建」→ 跳转后抓回 bookId。
@@ -3477,107 +3585,7 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
   // 【每一步都要验证，不能 fire-and-forget】这一下点击本身就不稳（同样的代码，
   // 有时第一次开、有时不开）。不验证的话，失败会一路飘到"没找到主分类"，
   // 报出来的原因跟真因差着十万八千里。
-  const FIRE = `function __fire(el){['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});}`;
-
-  // 弹窗里有四个分栏，四栏共用同一个类名 .category-choose-item（阅读标签整窗 154 张，
-  // 主分类栏只有 19 张）。所以【必须限定在分栏内找，且全名相等】：
-  //   · 不限定 → 可能点到别栏的同名词上，这一栏其实没选中；
-  //   · 用 indexOf 子串匹配 → 要「悬疑」会先撞上「悬疑脑洞」「悬疑恋爱」。
-  // 主分类【签约后不可改】，这里不能靠"多半能撞对"。
-  const TAGJS = `
-    function __sectionHost(modal, name){
-      var host=null, best=1e9;
-      var all=modal.querySelectorAll('*');
-      for(var i=0;i<all.length;i++){
-        var e=all[i], t=e.textContent||'';
-        if(t.indexOf(name)<0) continue;
-        if(!e.querySelectorAll('.category-choose-item').length) continue;
-        if(t.length<best){best=t.length;host=e;}
-      }
-      return host;
-    }
-    function __cardName(e){ var ti=e.querySelector('.category-choose-item-title'); return ((ti?ti.textContent:e.textContent)||'').trim(); }
-    function __bigModal(){
-      var m=[].slice.call(document.querySelectorAll('.arco-modal')).filter(function(e){return e.getBoundingClientRect().width>300;});
-      return m.length?m[m.length-1]:null;
-    }`;
-
-  // 打开某个标签选择框（阅读标签 / 内容标签），验证 + 重试。
-  const openTagDialog = async (which) => {
-    const isOpen = async () => (await client.evaluate(`(function(){${TAGJS} var m=__bigModal(); return m?'1':'0';})()`)) === '1';
-    if (await isOpen()) return { ok: true };
-    for (let i = 0; i < 5; i++) {
-      const r = await client.evaluate(`(function(){${FIRE}
-        var wrap=[].slice.call(document.querySelectorAll('.cate-wrap')).find(function(e){return (e.textContent||'').indexOf(${JSON.stringify('WHICH')})>=0;});
-        if(!wrap) return 'no-wrap';
-        var sv=wrap.querySelector('.select-view')||wrap.querySelector('.select-row');
-        if(!sv) return 'no-sv';
-        __fire(sv);
-        return 'fired';
-      })()`.replace(JSON.stringify('WHICH'), JSON.stringify(which)));
-      if (r === 'no-wrap' || r === 'no-sv') return { ok: false, why: `未找到「${which}」选择框（番茄改版？）` };
-      await client.sleep(1800);
-      if (await isOpen()) return { ok: true };
-      log(`「${which}」弹窗没打开，重试第 ${i + 1} 次…`, 'warn');
-    }
-    return { ok: false, why: `「${which}」弹窗点了 5 次都没打开（页面没加载完 / 有东西挡着 / 番茄改版）` };
-  };
-
-  // 在已打开的弹窗里，按分栏勾选若干标签。
-  // wanted = { 分栏名: [标签名…] }。返回 {ok, picked:[], missed:[]}。
-  // 【点了不等于选上了】选中的卡片会加 active 类，而且是 React 异步加的——
-  // 点完立刻查会查到"没选中"（实测 1.2 秒内还没加上）。所以逐个轮询确认。
-  const selectTags = async (wanted) => {
-    const picked = [], missed = [];
-    for (const [section, names] of Object.entries(wanted)) {
-      for (const name of (names || [])) {
-        const r = await client.evaluate(`(function(){${FIRE}${TAGJS}
-          var m=__bigModal(); if(!m) return 'no-modal';
-          var host=__sectionHost(m, ${JSON.stringify(section)}); if(!host) return 'no-section';
-          var items=[].slice.call(host.querySelectorAll('.category-choose-item'));
-          var hit=items.filter(function(e){return __cardName(e)===${JSON.stringify(name)};})[0];
-          if(!hit) return 'MISS|'+items.map(__cardName).join('、');
-          if(hit.classList.contains('active')) return 'ALREADY';
-          __fire(hit);
-          return 'FIRED';
-        })()`);
-        if (r === 'no-modal') return { ok: false, why: '弹窗不见了' };
-        if (r === 'no-section') { missed.push(`${section}·${name}（这个弹窗里没有「${section}」这一栏）`); continue; }
-        if (String(r).startsWith('MISS|')) { missed.push(`${section}·${name}（该栏没有这一项）`); continue; }
-        if (r === 'ALREADY') { picked.push(`${section}·${name}`); continue; }
-        let on = false;
-        for (let i = 0; i < 8 && !on; i++) {
-          await client.sleep(400);
-          on = (await client.evaluate(`(function(){${TAGJS}
-            var m=__bigModal(); if(!m) return '0';
-            var host=__sectionHost(m, ${JSON.stringify(section)}); if(!host) return '0';
-            var hit=[].slice.call(host.querySelectorAll('.category-choose-item')).filter(function(e){return __cardName(e)===${JSON.stringify(name)};})[0];
-            return (hit&&hit.classList.contains('active'))?'1':'0';
-          })()`)) === '1';
-        }
-        if (on) picked.push(`${section}·${name}`);
-        else missed.push(`${section}·${name}（点了但没选上，可能超了该栏上限）`);
-      }
-    }
-    return { ok: true, picked, missed };
-  };
-
-  // 点「确认」关掉弹窗。灰着/没关 都要报出来——那意味着没存进去。
-  const confirmTagDialog = async (which) => {
-    const r = await client.evaluate(`(function(){${FIRE}
-      var b=[].slice.call(document.querySelectorAll('button')).filter(function(e){return (e.textContent||'').trim()==='确认';}).pop();
-      if(!b) return 'no-btn';
-      if(b.disabled) return 'disabled';
-      __fire(b);
-      return 'ok';
-    })()`);
-    if (r === 'no-btn') return { ok: false, why: `「${which}」弹窗里没找到「确认」按钮` };
-    if (r === 'disabled') return { ok: false, why: `「${which}」的「确认」按钮是灰的——必选项可能还没选` };
-    await client.sleep(1400);
-    const still = (await client.evaluate(`(function(){${TAGJS} return __bigModal()?'1':'0';})()`)) === '1';
-    if (still) return { ok: false, why: `点了「确认」但「${which}」弹窗没关——没存进去，先别创建` };
-    return { ok: true };
-  };
+  const { openTagDialog, selectTags, confirmTagDialog, TAGJS } = tagHelpers(client, log);
 
   // —— 阅读标签：主分类(必选1) + 主题/角色/情节(各≤2) ——
   log(`选择阅读标签（主分类「${cat}」${Object.values(readTags || {}).flat().length ? ' + ' + Object.values(readTags).flat().join('、') : ''}）…`);
