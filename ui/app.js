@@ -189,6 +189,7 @@ function openWrite(book) {
   $('#writeTokens').textContent = 'tokens ' + fmtTok(book.tokens || 0);
   hideReviewBar(); showReviewBar();   // 若有待确认审稿，恢复动作条
   renderBoard(book.slug);   // 创作看板：我在哪 / 健康体检 / 下一步
+  ovhPoll();                // 改造流水线在跑就把进度卡亮出来（没跑过就不显示）
   if (running) openStream(book.slug);
 }
 // 「此刻」卡：一本书的处境 + 该处理的异常 + 一个主行动。
@@ -1700,6 +1701,61 @@ $('#btnSignDiag')?.addEventListener('click', async () => {
   } catch (e) { toast('签约诊断启动失败：' + e.message); }
   finally { setTimeout(() => { btn.disabled = false; btn.textContent = old; }, 3000); }
 });
+// 「诊断这本书」——不连番茄也能问"这书哪儿不行"：指标 + 换个模型当责编读黄金三章。只读。
+$('#btnDiagnose')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  if (!confirm('诊断会：\n· 量一遍段落长度、套话、形容词堆砌、比喻这些指标\n· 让另一个模型当责编读黄金三章和抽样章\n· 出一份带章号的必办清单（reviews/改造诊断.md）\n\n只读，不改正文。约 3–6 分钟。开始？')) return;
+  const btn = $('#btnDiagnose'); const old = btn.textContent; btn.disabled = true; btn.textContent = '诊断中…';
+  try {
+    await api('/api/book/diagnose', 'POST', { book: CUR.slug });
+    openStream(CUR.slug);
+    toast('已开始诊断——完成后报告在 reviews/改造诊断.md，「改造这本书」会直接拿它当必办清单');
+  } catch (e) { toast('诊断启动失败：' + e.message); }
+  finally { setTimeout(() => { btn.disabled = false; btn.textContent = old; }, 3000); }
+});
+
+// 「改造这本书」——救书流水线：分批改 → 质检 → 返工 → 阅读复核。会覆盖正文，所以在危险区。
+$('#btnOverhaul')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const b = getBookBySlug(CUR.slug) || CUR;
+  const maxCh = b.stats?.chapters || 0;
+  const range = prompt(`改造哪些章？（格式：起-止，留空=全书 1-${maxCh || '末章'}）\n\n每 10 章一批，改完自动质检（套话/堆砌/比喻/字数保留/感官细节），不达标自动返工；\n撞模型额度会等恢复再接着跑；中途停了也能续跑。`, maxCh ? `1-${Math.min(maxCh, 30)}` : '');
+  if (range === null) return;
+  const m = String(range).trim().match(/^(\d+)\s*[-–]\s*(\d+)$/);
+  const from = m ? +m[1] : 1, to = m ? +m[2] : 0;
+  if (!confirm(`要改造《${b.title}》第 ${from}–${to || '末'} 章。\n\n这会覆盖这些章的正文（每批自动 git 存档，可回退）。\n必办清单取自 reviews/改造诊断.md 或 签约诊断.md——没有的话建议先点「诊断这本书」。\n\n开始？`)) return;
+  try {
+    const r = await api('/api/book/overhaul/start', 'POST', { book: CUR.slug, from, to, batchSize: 10, readCheck: true });
+    openStream(CUR.slug);
+    toast(r.already ? '这本书已经在改造中' : `已开始改造（必办清单 ${r.mustFix || 0} 条）——进度看下方卡片和日志`);
+    ovhPoll(true);
+  } catch (e) { toast('改造启动失败：' + e.message); }
+});
+$('#btnOverhaulStop')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const force = confirm('确定 = 本批做完就停（推荐，不会丢半章）\n取消 = 立刻停，连窗口一起收');
+  try { await api('/api/book/overhaul/stop', 'POST', { book: CUR.slug, force: !force }); toast(force ? '本批做完就停' : '已立刻停止'); } catch (e) { toast('停止失败：' + e.message); }
+});
+
+// 改造进度轮询：跑着的时候 10 秒一次，停了就不再问（别给引擎添无谓负担）
+let ovhTimer = null;
+async function ovhPoll(force = false) {
+  const box = $('#ovhBox'); if (!box || !CUR) return;
+  let r; try { r = await api('/api/book/overhaul/status?book=' + encodeURIComponent(CUR.slug)); } catch { return; }
+  const st = r.state;
+  if (!st && !force) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  const label = { running: '改造中', 'waiting-quota': '等模型额度恢复', done: '已完成', stopped: '已停止', error: '出错了' }[st?.status] || '未开始';
+  $('#ovhTitle').textContent = `改造进度 · ${label}`;
+  $('#ovhFill').style.width = (r.percent || 0) + '%';
+  const wait = st?.status === 'waiting-quota' && st.waitUntil ? `，预计 ${new Date(st.waitUntil).toLocaleTimeString('zh-CN')} 恢复` : '';
+  $('#ovhMsg').textContent = `第 ${st?.from || 1}–${st?.to || '?'} 章：${r.done}/${r.total} 批完成${wait}`
+    + (r.changed?.length ? `　｜ 待重发 ${r.changed.length} 章` : '');
+  $('#ovhIssues').textContent = (st?.issues || []).slice(0, 3).join('；');
+  if (ovhTimer) clearTimeout(ovhTimer);
+  if (r.running || st?.status === 'waiting-quota') ovhTimer = setTimeout(ovhPoll, 10000);
+}
+
 $('#olApply').addEventListener('click', async () => {
   if (!CUR) return;
   const scope = $('#olScope').value;

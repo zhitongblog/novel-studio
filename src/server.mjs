@@ -17,8 +17,9 @@ import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, dele
 import { STYLES } from './styles.mjs';
 import { recommendStyle, recommendCategory, recommendFanqieTags } from './planner.mjs';
 import { detectAll, getModel, canRunHeadless } from './models.mjs';
-import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig } from './unterm.mjs';
+import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig, killBookAgents } from './unterm.mjs';
 import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
+import { connectInstance } from './mcpclient.mjs';
 import { startWriting, snapshotPaneIds } from './writer.mjs';
 import { runStateless } from './statelessWriter.mjs';
 import { runWebWrite, getAdapter } from './webwriter.mjs';
@@ -43,7 +44,9 @@ import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction, parseReviewItems, critiqueOf } from './editor.mjs';
 import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
-import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
+import { previewPublish, publishToFanqie, republishRange, loadPublishChapters, loadPublishedHashes } from './publish.mjs';
+import { diagnoseBook } from './diagnose.mjs';
+import { runOverhaul, getState as getOverhaulState } from './overhaul.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
 import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment, updateFanqieBookInfo } from './fanqie.mjs';
 import { getCompletionReport, runFinaleClosure, locateCompletion, buildCompletionNote } from './finale.mjs';
@@ -64,6 +67,17 @@ const coverJobs = new Map();
 const rewriteJobs = new Map();
 // 推送封面到番茄（换封面）后台任务。slug -> {status,submitted,error,msg}
 const fanqieCoverJobs = new Map();
+// 改造流水线的在跑任务（slug → {status, stop}）。停止=置 stop 标志，流水线在批间自己收。
+const overhaulJobs = new Map();
+
+// 哪些章【真的改过】：本地指纹 ≠ 上次发布时记下的指纹。没有基线的不算（宁可漏发，不能误覆盖线上）。
+function changedChapters(book, { from = 1, to = 0 } = {}) {
+  const hashes = loadPublishedHashes(book);
+  return loadPublishChapters(book)
+    .filter(c => c.num >= from && (!to || c.num <= to))
+    .filter(c => hashes[String(c.num)] && hashes[String(c.num)] !== c.hash)
+    .map(c => c.num);
+}
 const fanqieCreateJobs = new Map();
 const nameExpJobs = new Map();
 const nameExpPushJobs = new Map();   // 书名实验「推到番茄」job
@@ -443,6 +457,22 @@ async function api(p, req, res, u) {
       try { const b=getBook(u.searchParams.get('book')); if(!b) return json(res,400,{error:'找不到书'});
         const st=rt.get(b.slug); return json(res,200,{ ok:true, running: !!(st?.outlineRun && !st.outlineRun.stopped), ...digestProgress(b) }); }
       catch(e){ return json(res,500,{error:e.message}); }
+    }
+    if (p === '/api/book/overhaul/status') {
+      // 改造进度：批次做到哪、还剩几批、有哪些没达标、阅读复核挑出多少条
+      try {
+        const slug = u.searchParams.get('book');
+        const book = getBook(slug); if (!book) return json(res, 400, { error: '找不到书：' + slug });
+        const st = getOverhaulState(book.slug) || null;
+        const job = overhaulJobs.get(book.slug) || null;
+        const done = st?.doneBatches?.length || 0;
+        return json(res, 200, {
+          ok: true, state: st, running: job?.status === 'running',
+          done, total: st?.total || 0,
+          percent: st?.total ? Math.round(done / st.total * 100) : 0,
+          changed: (() => { try { return changedChapters(book, { from: st?.from || 1, to: st?.to || 0 }); } catch { return []; } })(),
+        });
+      } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/checkup') {
       // 体检：把软件已经知道、但从来没说出口的异常摆出来（缺章/漏发/状态与事实不符/模型能力…）。
@@ -1892,42 +1922,91 @@ async function api(p, req, res, u) {
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/rewrite' || p === '/api/book/reproject') {
-      // 推倒重写：rewrite=范围重写 / reproject=整本重立项。先 git 存档(可回退)；在写穿插、没写开窗。
+      // 推倒重写：rewrite=范围重写 / reproject=整本重立项。真正的启动逻辑抽到了 startRewrite()，
+      // 因为「改造流水线」(overhaul) 每一批都要走同一条路——两处各写一遍迟早会走样。
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书：' + body.book });
-        const isRe = p === '/api/book/reproject';
-        // 范围可以留空，但只有在【勾了按复检报告重写】时才行——那种情况下"哪几章有问题"是报告说了算，
-        // 不该反过来要作者先知道。作者要是既不填范围、又不让它读报告，那就真的没有任何依据可循。
-        const autoScope = !isRe && !String(body.range || '').trim();
-        if (autoScope && body.useReviews === false) {
-          return json(res, 400, { error: '要么填重写范围（如 001-008 或 卷01），要么勾上「按复检报告重写」让它自己从报告里找出问题章节。' });
-        }
-        const hash = gitSnapshot(book.dir, isRe ? '整本重立项前存档'
-          : (autoScope ? '按复检报告重写前存档' : '重写' + (body.range || '') + '前存档'));
-        // useReviews：勾了「按复检报告重写」→ 指令里先让它去 reviews/ 里检索本范围相关的条目当必办清单。
-        // 之前这里断着：复检把问题写进报告，重写却完全不知道报告存在，只能靠作者人肉复制粘贴。
-        const instruction = isRe ? buildReprojectInstruction(book, body.note)
-          : buildRewriteInstruction(book, body.range, body.note, { useReviews: body.useReviews !== false });
-        // 只有【窗口在且 AI 真的在跑】才穿插指令；若 AI 已退出到命令行（只剩 shell 提示符），
-        // 绝不能把指令打进命令行——改为开新窗口重启 AI（治"没打开 ai 就给命令行发命令"）。
-        if (sessionLive(book.slug) && await sessionAgentAlive(book.slug, cfg)) {
-          const r = await injectToBook(book.slug, instruction, cfg);
-          pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 指令已穿插' + (hash ? '（已存档 ' + hash + '）' : '') });
-          await ensureAutopilot(book.slug, cfg);
-          return json(res, 200, { ...r, mode: 'inserted', snapshot: hash });
-        }
-        rtOf(book.slug).logs = [];
-        // 【重写开的窗口只应答、干完就收，不许自动"续写下一批"】
-        // 其他 6 个一次性任务端点（补大纲、完本感言、重建大纲…）开窗都带 autopilotConfirmOnly，
-        // 唯独这里漏了：重写一改完，autopilot 空闲时照常发 continueText「继续下一批…写下一批正文」，
-        // agent 就接着往后写新章——一个"改前 19 章"的任务变成"改完再多写 3 章"，
-        // 新写的还是用改稿前那套老毛病（2026-09-19 给王莽按签约诊断改稿时发现）。
-        // 整本重立项（reproject）是要从头写的，照旧走完整 autopilot。
-        const session = await startWriting({ book, model: book.model || cfg.defaultModel, instruction, cfg, onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg), onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: !isRe });
-        rtOf(book.slug).session = session;
-        pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 已开窗' + (hash ? '（已存档 ' + hash + '，可回退）' : '') + (isRe ? '' : '——改完这个范围就收窗，不会接着续写新章') });
-        return json(res, 200, { ok: true, mode: 'started', instance: session.instance.id, snapshot: hash });
+        const r = await startRewrite(book, { ...body, reproject: p === '/api/book/reproject' }, cfg);
+        return json(res, r.error ? 400 : 200, r);
       } catch (e) { pushLog(slugOf(body.book), { level: 'error', msg: e.message }); return json(res, 500, { error: e.message }); }
+    }
+    // ===== 改造一本书（救书流水线）=====
+    // 诊断 → 分批改 → 指标质检 → 返工 → 阅读复核 → 只发改动章。详见 overhaul.mjs 顶部。
+    if (p === '/api/book/diagnose') {   // 通用诊断（不依赖番茄签约页），产出 reviews/改造诊断.md
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const slug = book.slug;
+        if (overhaulJobs.get(slug)?.status === 'running') return json(res, 200, { ok: false, error: '这本书正在改造中，先停了再诊断' });
+        diagnoseBook(book, { cfg, sample: Number(body.sample) || 20, model: body.model || null, onLog: (e) => pushLog(slug, { ...e, source: 'diagnose' }) })
+          .then(r => pushLog(slug, { level: r.ok ? 'act' : 'error', source: 'diagnose', msg: r.ok ? `诊断完成：必办 ${r.must.length} 条` : '诊断失败：' + r.error }))
+          .catch(e => pushLog(slug, { level: 'error', source: 'diagnose', msg: '诊断异常：' + e.message }));
+        return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/overhaul/start') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const slug = book.slug;
+        if (overhaulJobs.get(slug)?.status === 'running') return json(res, 200, { ok: true, already: true, state: getOverhaulState(slug) });
+        // 必办清单：优先用刚跑的通用诊断，没有就读签约诊断报告里的 [必改] 行
+        let mustFix = Array.isArray(body.mustFix) ? body.mustFix : [];
+        if (!mustFix.length) {
+          for (const f of ['改造诊断.md', '签约诊断.md']) {
+            try {
+              const t = fs.readFileSync(path.join(book.dir, 'reviews', f), 'utf8');
+              mustFix = [...t.matchAll(/^[-*\s]*\[?必改\]?[:：]?\s*(.+)$/gm)].map(m => m[1].trim()).slice(0, 12);
+              if (mustFix.length) { pushLog(slug, { level: 'info', source: 'overhaul', msg: `必办清单取自 ${f}（${mustFix.length} 条）` }); break; }
+            } catch {}
+          }
+        }
+        const job = { status: 'running', stop: false, startedAt: Date.now() };
+        overhaulJobs.set(slug, job);
+        runOverhaul(book, {
+          cfg, api: overhaulApi(book, cfg),
+          from: Number(body.from) || 1, to: Number(body.to) || 0,
+          batchSize: Number(body.batchSize) || 10,
+          maxRounds: Number(body.maxRounds) || 2,
+          readCheck: body.readCheck !== false,
+          useReviews: body.useReviews !== false,
+          std: body.std || {}, mustFix,
+          shouldStop: () => job.stop,
+          onLog: (e) => pushLog(slug, { ...e, source: e.source || 'overhaul' }),
+        }).then(r => {
+          job.status = r.ok ? 'done' : (r.stopped ? 'stopped' : 'error');
+          pushLog(slug, { level: r.ok ? 'act' : 'warn', source: 'overhaul', msg: r.ok ? '🎉 改造完成，可以去发布了' : (r.stopped ? '改造已停止（进度已保存，可续跑）' : '改造中止：' + r.error) });
+        }).catch(e => { job.status = 'error'; pushLog(slug, { level: 'error', source: 'overhaul', msg: '改造异常：' + e.message }); });
+        return json(res, 200, { ok: true, started: true, mustFix: mustFix.length });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/overhaul/stop') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const job = overhaulJobs.get(book.slug);
+        if (job) job.stop = true;
+        // 批间才会停；作者要立刻停就连窗口一起收
+        if (body.force) { try { await overhaulApi(book, cfg).stop(); } catch {} }
+        pushLog(book.slug, { level: 'act', source: 'overhaul', msg: body.force ? '已请求立刻停止改造' : '已请求停止改造：本批做完就停（进度会保存）' });
+        return json(res, 200, { ok: true, stopping: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/publish-changed') {
+      // 只发【真正改动过】的章：靠 .studio/published-hashes.json 的指纹基线，不用人去数哪几章动了
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const pc = book.publish || {};
+        if (!pc.profilePath || !pc.bookId) return json(res, 400, { error: '该书未配番茄账号/bookId' });
+        const to = Number(body.to) || 0;
+        const changed = changedChapters(book, { from: Number(body.from) || 1, to });
+        if (!changed.length) return json(res, 200, { ok: true, changed: [], msg: '没有需要重发的章（正文与上次发布一致）' });
+        if (body.dryRun) return json(res, 200, { ok: true, changed, dryRun: true });
+        (async () => {
+          for (const n of changed) {
+            await republishRange(book, { from: n, to: n, onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie' }) });
+          }
+          pushLog(book.slug, { level: 'act', source: 'fanqie', msg: `只发改动章结束：共 ${changed.length} 章（第 ${changed.join('、')} 章）` });
+        })().catch(e => pushLog(book.slug, { level: 'error', source: 'fanqie', msg: '只发改动章异常：' + e.message }));
+        return json(res, 200, { ok: true, started: true, changed });
+      } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/apply-review') {
       // 让作者按【已生成的审稿意见】去修订：kind=outline(大纲审稿→修订大纲) | ending(完本审稿→补写结局)。
@@ -2056,6 +2135,64 @@ async function api(p, req, res, u) {
     return json(res, 404, { error: 'not found' });
   }
   json(res, 405, { error: 'method not allowed' });
+}
+
+// 开一轮「范围重写」：在写就穿插指令，没写就开窗（只应答、干完收窗，不许续写新章）。
+// 抽出来是因为改造流水线每一批都要走这条路——两处各写一份迟早走样。
+async function startRewrite(book, body, cfg) {
+  const isRe = !!body.reproject;
+  const autoScope = !isRe && !String(body.range || '').trim();
+  if (autoScope && body.useReviews === false) {
+    return { error: '要么填重写范围（如 001-008 或 卷01），要么勾上「按复检报告重写」让它自己从报告里找出问题章节。' };
+  }
+  const hash = gitSnapshot(book.dir, isRe ? '整本重立项前存档'
+    : (autoScope ? '按复检报告重写前存档' : '重写' + (body.range || '') + '前存档'));
+  const instruction = isRe ? buildReprojectInstruction(book, body.note)
+    : buildRewriteInstruction(book, body.range, body.note, { useReviews: body.useReviews !== false });
+  // 只有【窗口在且 AI 真的在跑】才穿插指令；AI 已退到命令行时绝不能把指令打进 shell。
+  if (sessionLive(book.slug) && await sessionAgentAlive(book.slug, cfg)) {
+    const r = await injectToBook(book.slug, instruction, cfg);
+    pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 指令已穿插' + (hash ? '（已存档 ' + hash + '）' : '') });
+    await ensureAutopilot(book.slug, cfg);
+    return { ...r, mode: 'inserted', snapshot: hash };
+  }
+  rtOf(book.slug).logs = [];
+  // 【重写开的窗口只应答、干完就收，不许自动"续写下一批"】2026-09-19 踩过：漏了这个开关，
+  // 一个"改前 19 章"的任务变成改完又往后多写了 14 章新章。
+  const session = await startWriting({
+    book, model: book.model || cfg.defaultModel, instruction, cfg,
+    onLog: (e) => pushLog(book.slug, e), onFreshRestart: mkFresh(book.slug, cfg),
+    onTerminalStop: mkTerminalStop(book.slug), autopilotConfirmOnly: !isRe,
+  });
+  rtOf(book.slug).session = session;
+  pushLog(book.slug, { level: 'act', msg: (isRe ? '整本重立项' : '范围重写：' + body.range) + ' 已开窗' + (hash ? '（已存档 ' + hash + '，可回退）' : '') + (isRe ? '' : '——改完这个范围就收窗，不会接着续写新章') });
+  return { ok: true, mode: 'started', instance: session.instance.id, snapshot: hash };
+}
+
+// 改造流水线要用的一组动作，注入给 overhaul.runOverhaul（测试里换成假的即可）
+function overhaulApi(book, cfg) {
+  const slug = book.slug;
+  return {
+    live: async () => sessionLive(slug),
+    stop: async () => { try { const st = rt.get(slug); st?.session?.autopilot?.stop('改造流水线停止'); stopBook(slug); st?.streamer?.stop(); rt.delete(slug); } catch {} },
+    rewrite: async (b) => startRewrite(getBook(slug) || book, b, cfg),
+    killAgents: async () => { try { return killBookAgents((getBook(slug) || book).dir); } catch { return 0; } },
+    // 撞没撞模型额度：看这段时间的日志（autopilot 会把"用量/速率上限"写进来）
+    hitQuota: async (since) => (rtOf(slug).logs || []).some(e => e.t >= since && /用量|速率上限|quota/i.test(String(e.msg || ''))),
+    // 额度什么时候恢复：agy 窗口里写着「Resets in 6m8s」，读屏幕拿准确值，读不到给 15 分钟
+    quotaResetMs: async () => {
+      try {
+        const sess = getSession(slug);
+        if (!sess) return 15 * 60000;
+        const mcp = await connectInstance({ id: sess.instanceId, mcp_port: sess.mcp_port, auth_token: sess.auth_token }, {});
+        const t = String(await mcp.screenText(sess.pane) || '');
+        try { mcp.close(); } catch {}
+        const m = [...t.matchAll(/Resets in\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?/g)].pop();
+        if (m) return (((+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0)) * 1000) + 90000;
+      } catch {}
+      return 15 * 60000;
+    },
+  };
 }
 
 function bootstrap(cfg) {
