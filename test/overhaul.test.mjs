@@ -92,6 +92,28 @@ test('【措辞纪律】批次指令绝不能出现能被读成"往后写"的话
   } finally { rm(b); }
 });
 
+test('结构改造模式：允许按清单改剧情，但照样不许新增章节、且要同步台账', () => {
+  // 2026-09-20《代码逆子与宇宙沙盒》诊断出 17 条必办，其中至少 10 条要动情节
+  //（书名承诺"逆子"正文写成孝子、爽点迟到第14章、国家级超算变家用机箱）。
+  // 精修模式的"剧情事实全部保留"会把这些全挡住，所以必须有第二种模式。
+  const b = mkBook({ 1: '正文' });
+  try {
+    const polish = buildBatchInstruction(b, 1, 10, { mode: 'polish' });
+    const rebuild = buildBatchInstruction(b, 1, 10, { mode: 'rebuild' });
+    assert.match(polish, /剧情事实.*全部保留/);
+    assert.match(rebuild, /允许按下面的必办清单改剧情/);
+    assert.match(rebuild, /chapter_index\.md/, '改了剧情必须同步台账，否则后面的章接不上');
+    for (const ins of [polish, rebuild]) {
+      assert.match(ins, /不新增任何章节/, '两种模式都不许新增章节');
+      assert.ok(!/后面各章|照此执行/.test(ins));
+    }
+    // 结构改造允许砍冗长推演，字数底线放宽，但不能只剩梗概
+    assert.match(polish, /不得低于原文的 95%/);
+    assert.match(rebuild, /不得低于原文的 85%/);
+    assert.match(rebuild, /不能只剩梗概/);
+  } finally { rm(b); }
+});
+
 test('阅读复核：解析成结构化条目，并能变成定点返工指令', () => {
   const raw = [
     '第29章｜空钩子｜结尾只说「变局已然拉开」，没有具体的事｜改成：南阳粮册上少掉的三千石被送到案头',

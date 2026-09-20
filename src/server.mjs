@@ -1969,6 +1969,7 @@ async function api(p, req, res, u) {
           readCheck: body.readCheck !== false,
           useReviews: body.useReviews !== false,
           std: body.std || {}, mustFix,
+          mode: body.mode === 'rebuild' ? 'rebuild' : 'polish',
           shouldStop: () => job.stop,
           onLog: (e) => pushLog(slug, { ...e, source: e.source || 'overhaul' }),
         }).then(r => {

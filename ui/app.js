@@ -1723,9 +1723,12 @@ $('#btnOverhaul')?.addEventListener('click', async () => {
   if (range === null) return;
   const m = String(range).trim().match(/^(\d+)\s*[-–]\s*(\d+)$/);
   const from = m ? +m[1] : 1, to = m ? +m[2] : 0;
-  if (!confirm(`要改造《${b.title}》第 ${from}–${to || '末'} 章。\n\n这会覆盖这些章的正文（每批自动 git 存档，可回退）。\n必办清单取自 reviews/改造诊断.md 或 签约诊断.md——没有的话建议先点「诊断这本书」。\n\n开始？`)) return;
+  // 两种模式差别很大：精修一个字剧情都不动；结构改造允许按必办清单改情节
+  //（诊断说"承诺没兑现/设定前后打架/爽点迟到"时，非用结构改造不可——精修的硬约束会把这些挡在门外）
+  const rebuild = !confirm(`要改造《${b.title}》第 ${from}–${to || '末'} 章，选哪种？\n\n确定 = 文风精修：只调语言，剧情一个字不动\n取消 = 结构改造：允许按必办清单改剧情（改事件结果、提前爽点、补设定交代）\n\n两种都不会新增章节，每批自动 git 存档可回退。`);
+  if (!confirm(`确认：对《${b.title}》第 ${from}–${to || '末'} 章做【${rebuild ? '结构改造（会改剧情）' : '文风精修（不改剧情）'}】。\n\n必办清单取自 reviews/改造诊断.md 或 签约诊断.md——没有的话建议先点「诊断这本书」。\n\n开始？`)) return;
   try {
-    const r = await api('/api/book/overhaul/start', 'POST', { book: CUR.slug, from, to, batchSize: 10, readCheck: true });
+    const r = await api('/api/book/overhaul/start', 'POST', { book: CUR.slug, from, to, batchSize: 10, readCheck: true, mode: rebuild ? 'rebuild' : 'polish' });
     openStream(CUR.slug);
     toast(r.already ? '这本书已经在改造中' : `已开始改造（必办清单 ${r.mustFix || 0} 条）——进度看下方卡片和日志`);
     ovhPoll(true);

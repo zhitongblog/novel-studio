@@ -55,19 +55,38 @@ function chapterAt(book, num, snap) {
   try { return execFileSync('git', ['-C', book.dir, 'show', `${snap}:${rel}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return null; }
 }
 
+// 两种改造模式。为什么要分（2026-09-20 给《代码逆子与宇宙沙盒》跑诊断时发现的）：
+//   · polish（文风精修）：故事本身没问题，只是文笔像 AI。剧情一个字不许动。——王莽那本就是这种。
+//   · rebuild（结构改造）：诊断说的是"承诺没兑现、设定前后打架、爽点迟到十四章"，
+//     这些非改剧情不可。代码逆子那本 17 条必办里至少 10 条要动情节，
+//     照 polish 的硬约束跑，等于自己把自己挡在门外。
+// 两种模式都【绝不允许新增章节】——那是另一回事（续写），也是踩过大坑的地方。
+export const MODES = {
+  polish: { name: '文风精修', std: {} },
+  rebuild: { name: '结构改造', std: { minKeepPct: 85 } },   // 改结构时砍冗长推演是对的，字数底线放宽
+};
+
 // 【指令措辞纪律】这里是整条流水线最容易出人命的地方，改这段前先读上面 ①
-export function buildBatchInstruction(book, a, b, { mustFix = [], carry = '', extra = '' } = {}) {
+export function buildBatchInstruction(book, a, b, { mustFix = [], carry = '', extra = '', mode = 'polish' } = {}) {
+  const rebuild = mode === 'rebuild';
   return [
     `【本次只改写第${a}到第${b}章这几个已有的文件，改完就停；不新增任何章节，不写第${b + 1}章，不碰这个范围以外的任何文件】`,
-    '【这是改造，不是重写】剧情事实、人物、事件结果、已埋伏笔全部保留，章号与卷目录不变',
+    rebuild
+      ? '【这是结构改造】允许按下面的必办清单改剧情——包括改事件结果、调整爽点位置、补设定交代、让人物做出不同的选择。'
+        + '但只改清单点名的地方，清单没提到的情节保持原样；章号、章数、卷目录一律不变；'
+        + '改完必须同步更新 chapter_index.md 和 continuity_ledger.md，让后面的章节接得上'
+      : '【这是文风精修，不是重写】剧情事实、人物、事件结果、已埋伏笔全部保留，章号与卷目录不变',
     a > 1 ? `【衔接】第1到${a - 1}章已经按同样的标准改过，动笔前先读 chapter_index.md、continuity_ledger.md 和第${a - 1}章的结尾，保证接得上` : '',
     mustFix.length ? `【必办清单（诊断给的，逐条落实）】${mustFix.slice(0, 12).join('；')}` : '',
     '【文风硬规则】叙述里不许出现套话（轰然、面如土色、战战兢兢、如遭雷击、目瞪口呆、倒吸一口凉气这类），人物对白里可以保留；'
     + '一个名词上不要摞三层形容词；同义的话不要说三遍；比喻一章不超过三处（含"如…般""…似的"）；'
     + '每段不超过四十字，动作、对白、转折各自成段；「？！」一章最多一处',
     '【删了必须补回来】删掉的辞藻要换成具体的动作和感官细节（气味、温度、声音、疼痛、触感），'
-    + '每章至少两处；字数不得低于原文的 95%——这一条是防止把书改干，比上面任何一条都重要',
-    '【一场戏都不许砍】爽点、打脸、反转、冲突，一处都不能删减或概括成一句话',
+    + `每章至少两处；字数不得低于原文的 ${rebuild ? 85 : 95}%——这一条是防止把书改干，比上面任何一条都重要`,
+    rebuild
+      ? '【删戏要换成更好的戏】清单让你砍的（比如冗长推演、流水账参数）可以砍，但砍出来的篇幅要用正面交锋、'
+        + '人物选择、可感的胜负补回来，不能只剩梗概；清单没让砍的爽点、打脸、反转一处都不许少'
+      : '【一场戏都不许砍】爽点、打脸、反转、冲突，一处都不能删减或概括成一句话',
     carry ? `【上一批质检发现的毛病，本批别再犯】${carry}` : '',
     extra || '',
   ].filter(Boolean).join('。');
@@ -91,7 +110,7 @@ async function runBatch(ctx, job) {
   const r = await api.rewrite({
     range: `${pad(a)}-${pad(b)}`,
     useReviews: opts.useReviews !== false,
-    note: job.fixInstruction || buildBatchInstruction(fresh(), a, b, { mustFix: opts.mustFix, carry: job.carry }),
+    note: job.fixInstruction || buildBatchInstruction(fresh(), a, b, { mustFix: opts.mustFix, carry: job.carry, mode: opts.mode }),
   });
   if (!r?.ok) return { ok: false, error: '开批失败：' + JSON.stringify(r).slice(0, 160) };
   const snap = r.snapshot;
@@ -124,12 +143,14 @@ async function runBatch(ctx, job) {
 // 主流程。api 由调用方注入（server 传真的 HTTP 调用，测试传假的）
 export async function runOverhaul(book, {
   cfg, api, onLog = () => {}, from = 1, to = 0, batchSize = 10,
-  mustFix = [], std = {}, maxRounds = 2, readCheck = true, useReviews = true,
+  mustFix = [], std = {}, maxRounds = 2, readCheck = true, useReviews = true, mode = 'polish',
   shouldStop = () => false, batchTimeoutMin = 70,
 } = {}) {
   const slug = book.slug;
   const last = to || maxChapter(book);
-  const opts = { mustFix, std, useReviews, batchTimeoutMin };
+  // 模式决定硬约束与质检阈值：结构改造允许改剧情、字数底线放宽到 85%
+  const modeDef = MODES[mode] || MODES.polish;
+  const opts = { mustFix, std: { ...modeDef.std, ...std }, useReviews, batchTimeoutMin, mode };
   const ctx = { book, cfg, api, onLog, opts, killAgents: api.killAgents || (async () => 0) };
 
   // 断点续跑：已经做完的批次不再做
@@ -138,7 +159,7 @@ export async function runOverhaul(book, {
   const batches = [];
   for (let a = from; a <= last; a += batchSize) batches.push({ a, b: Math.min(a + batchSize - 1, last), round: 0, carry: '', fixInstruction: '' });
 
-  setState(slug, { status: 'running', from, to: last, batchSize, total: batches.length, doneBatches: [...doneBatches], issues: [], startedAt: prev?.startedAt || new Date().toISOString() });
+  setState(slug, { status: 'running', mode, from, to: last, batchSize, total: batches.length, doneBatches: [...doneBatches], issues: [], startedAt: prev?.startedAt || new Date().toISOString() });
   const report = { batches: [], readItems: [] };
   let carry = '';
 
@@ -177,7 +198,7 @@ export async function runOverhaul(book, {
       // 指标不达标 → 带着【具体哪章哪条】返工
       if (!r.gate.ok && job.round < maxRounds) {
         job.round++;
-        job.fixInstruction = buildBatchInstruction(getBook(slug) || book, job.a, job.b, { mustFix, carry })
+        job.fixInstruction = buildBatchInstruction(getBook(slug) || book, job.a, job.b, { mustFix, carry, mode })
           + '。' + r.gate.instruction;
         onLog({ level: 'warn', msg: `↻ 质检不过（${r.gate.issues.length} 章），带着具体意见返工（第 ${job.round} 轮）` });
         continue;
