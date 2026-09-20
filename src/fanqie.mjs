@@ -262,6 +262,26 @@ class UnzooClient {
     await this.humanDelay(40, 100);
   }
 
+  // 按【可见文字】做可信点击。这是点番茄按钮的正路。
+  // 2026-09-20：Unzoo 把 CDP shim 用 managed_mode 关掉了（`fetch failed`），于是所有走 cdpClick 的地方
+  // ——改封面的「立即修改」、创建新书的「立即创建」——全都点不动了。官方 MCP 的 human_click 是真实输入事件
+  // （bezier 移动 + click_human），番茄认；它还自带遮挡检测，比我们自己算坐标稳。
+  // 顺序：human_click → CDP 坐标点（老环境还开着 shim 时）→ 合成指针序列（最后兜底，某些按钮认）。
+  async trustedClickText(text, { index = 0, exact = true } = {}) {
+    await this.ensureTabId();
+    try {
+      const r = await unzooCallTool('human_click', { tab_id: String(this.tabId), text, exact, index });
+      const s = JSON.stringify(r || {});
+      if (r && r.success !== false && r.ok !== false && !/not_found|no_match|未找到|找不到/i.test(s)) return true;
+    } catch {}
+    const Q = (s) => JSON.stringify(s);
+    const coord = await this.evaluate(`(function(){var l=[].slice.call(document.querySelectorAll('button')).filter(function(e){return (e.textContent||'').trim()===${Q(text)}&&e.offsetParent!==null;});var b=l[${index}]||l[0];if(!b)return '';try{b.scrollIntoView({block:'center'});}catch(e){}var r=b.getBoundingClientRect();return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);})()`);
+    if (coord) {
+      try { const [x, y] = String(coord).split(',').map(Number); await this.cdpClick(x, y); return true; } catch {}
+    }
+    return !!(await this.evaluate(`(function(){var all=[].slice.call(document.querySelectorAll('button,div[role=button],span,a')).filter(function(e){return (e.textContent||'').trim()===${Q(text)}&&e.offsetParent!==null;});var btns=all.filter(function(e){return e.tagName==='BUTTON'||e.getAttribute('role')==='button';});var els=btns.length?btns:all;var el=els[${index}]||els[els.length-1];if(!el)return false;try{el.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`));
+  }
+
   // 真实可信点击（CDP Input.dispatchMouseEvent，isTrusted=true）—— 走 Unzoo CDP shim(ws://127.0.0.1:9222)。
   // 番茄新版 Arco 弹窗卡片/「确认」/「立即创建」等只认可信点击（合成 pointer、/api/v1/click 坐标点、JS .click()
   // 都可能落空不触发）。CDP page-id 即 daemon tab_id：ws://<host>:<port>/devtools/page/<tabId>。
@@ -3262,6 +3282,9 @@ export async function changeFanqieCover({ bookId, coverPath, profilePath, autoSu
     // 点番茄按钮：在【元素本身】派发完整指针序列(pointerdown→…→click)。位置无关(不靠坐标)，实测对
     // 修改/选择封面/本地上传/确定/立即修改 都触发。优先点真正的 <button>(同文字常有 span 子节点，点 span 不触发)。
     const cdpClickText = async (txt, which = 'last') => {
+      // 先走可信点击（human_click）——番茄的提交类按钮只认真实输入事件；合成序列能点开弹窗、
+      // 却可能提交不了（2026-09-20 在作品信息页实证：点完退出编辑态，值还是旧的）。
+      if (await client.trustedClickText(txt, { index: 0 })) return true;
       const pick = which === 'first' ? 'els[0]' : 'els[els.length-1]';
       return !!(await client.evaluate(`(function(){var all=[].slice.call(document.querySelectorAll('button,div[role=button],span,a')).filter(function(e){return (e.textContent||'').trim()===${Q(txt)}&&e.offsetParent!==null;});var btns=all.filter(function(e){return e.tagName==='BUTTON'||e.getAttribute('role')==='button';});var els=btns.length?btns:all;var el=${pick};if(!el)return false;try{el.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`));
     };
@@ -3605,7 +3628,7 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
   log('点击「立即创建」…');
   const createCoord = await client.evaluate("(function(){var b=[].slice.call(document.querySelectorAll('button')).find(function(e){return (e.textContent||'').trim()==='立即创建';});if(!b)return '';var r=b.getBoundingClientRect();return Math.round(r.x+r.width/2)+','+Math.round(r.y+r.height/2);})()");
   if (!createCoord) return { ok: false, error: '未找到「立即创建」按钮' };
-  { const [x, y] = createCoord.split(',').map(Number); await client.cdpClick(x, y); }
+  if (!(await client.trustedClickText("立即创建"))) return { ok: false, error: "点不动「立即创建」按钮" };
 
   // 7. 等跳转 book-info/<id> 抓 bookId；期间若弹校验错误则报错
   let bookId = null;
@@ -3633,6 +3656,122 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
     } catch (e) { cover = { ok: false, error: String(e.message || e) }; log('新书封面上传异常（不影响建书）：' + cover.error, 'warn'); }
   }
   return { ok: true, bookId, title, channel, mainCategory: cat, cover };
+}
+
+// ===== 改番茄「作品信息」里的书名 / 简介 =====
+// 为什么要有：签约被拒的原因之一就是「书名和简介卖的东西正文没兑现」。改完正文往往就要同步改文案，
+// 而以前引擎只能改封面和卷名，书名简介得人工去网页改（2026-09-20 王莽这本第一次真用上）。
+// 实地结构（book-info/<id>?type=1 → 点「修改」进编辑态）：
+//   · 书名   = 可见 input，maxlength=15   ← 15 字是番茄的硬上限，超了直接填不进去
+//   · 简介   = 可见 textarea，上限 500 字（页面角标 190/500）
+//   · 提交   = 「立即修改」按钮；旁边还有「取消」「选择封面」
+// 注意：受控组件必须用原生 setter 派发 input/change，直接赋 value 番茄读不到。
+export async function updateFanqieBookInfo({ bookId, profilePath, title = '', intro = '', autoSubmit = true, onLog } = {}) {
+  const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
+  if (!bookId) return { ok: false, error: '缺少番茄 bookId' };
+  title = String(title || '').trim();
+  intro = String(intro || '').trim();
+  if (!title && !intro) return { ok: false, error: '书名和简介都没给，没什么可改的' };
+  if (title && [...title].length > 15) return { ok: false, error: `书名 ${[...title].length} 字，番茄上限 15 字` };
+  if (intro && ([...intro].length < 50 || [...intro].length > 500)) return { ok: false, error: `简介 ${[...intro].length} 字，番茄要求 50–500 字` };
+
+  const client = new UnzooClient(profilePath || null, onLog || null, 'fanqienovel.com', '番茄');
+  const Q = (s) => JSON.stringify(s);
+  const fire = async (txt) => client.evaluate(`(function(){var l=[].slice.call(document.querySelectorAll('button,div[role=button],span,a,li')).filter(function(e){return (e.textContent||'').trim()===${Q(txt)}&&e.offsetParent!==null;});var b=l[l.length-1];if(!b)return false;try{b.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
+  const SETTER = `function __sv(el,val){var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(pr,'value').set;s.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}`;
+  // 书名框认 maxlength=15；简介框是页面上唯一可见的 textarea
+  const TITLE_EL = `[].slice.call(document.querySelectorAll('input')).filter(function(e){return e.offsetParent!==null&&e.maxLength===15;})[0]`;
+  const INTRO_EL = `[].slice.call(document.querySelectorAll('textarea')).filter(function(e){return e.offsetParent!==null;})[0]`;
+
+  try {
+    await client.getActiveTab();
+    log('打开番茄「作品信息」页…');
+    await client.navigate(`https://fanqienovel.com/main/writer/book-info/${bookId}?type=1`);
+    await client.sleep(6000);
+    // 从别的 tab（签约管理）跳过来时地址栏虽对、内容可能还停在旧 tab → 只有确实没看到「书本名称」才去点标签
+    if (!String(await client.evaluate("(document.body.innerText||'')") || '').includes('书本名称')) {
+      await fire('作品信息');
+      await client.sleep(3000);
+    }
+
+    const before = await client.evaluate(`(function(){var t=${TITLE_EL},i=${INTRO_EL};return JSON.stringify({title:t?t.value:'',intro:i?String(i.value||'').slice(0,40):'',hasForm:!!(t&&i)});})()`);
+    let inEdit = (typeof before === 'string' ? JSON.parse(before) : before)?.hasForm;
+    // 【审核中 = 改不了，别再瞎点】番茄对作品信息的每次修改都要审核，审核期间「修改」按钮是 disabled，
+    // 页面上明写「作品信息审核中，请稍后再做修改」。不认这个状态的话，上层只会看到一句
+    // “没能进入编辑态”，人会以为是自动化坏了（2026-09-20 我就先这么误判了一轮）。
+    if (!inEdit) {
+      const pageTxt = String(await client.evaluate("(document.body.innerText||'')") || '');
+      const disabled = await client.evaluate("(function(){var b=[].slice.call(document.querySelectorAll('button')).find(function(x){return (x.textContent||'').trim()==='修改';});return !!(b&&(b.disabled||b.getAttribute('disabled')!==null));})()");
+      if (/作品信息审核中|请稍后再做修改/.test(pageTxt) || disabled) {
+        return { ok: false, pending: true, error: '番茄正在审核上一次的作品信息修改，期间不允许再改（页面写着「作品信息审核通过后才能再次修改」）。等审核出结果再来。' };
+      }
+      log('进入编辑态…');
+      // 「修改」也用真实坐标点击：合成事件在这页时灵时不灵（页面文本里"更多申请完结修改"是连在一起的，
+      // 说明这几个按钮同在一行，合成事件容易落到错的节点上）。
+      // 进编辑态用合成指针序列：实测它有效，而 human_click 虽然回 ok:true 却不触发这颗按钮
+      for (let i = 0; i < 3 && !inEdit; i++) {
+        await fire('修改');
+        await client.sleep(3000);
+        inEdit = !!(await client.evaluate(`!!(${TITLE_EL}) && !!(${INTRO_EL})`));
+      }
+    }
+    if (!inEdit) return { ok: false, error: '没能进入作品信息的编辑态（未登录/页面结构变了/该书不可改）' };
+
+    // 【必须真打字，不能灌 value】2026-09-20 实证：用原生 setter 灌进去，框里显示对了，
+    // 点「立即修改」也退出了编辑态，可保存下来的还是旧书名旧简介——番茄的表单状态没收到这次变更。
+    // browser_type 是真实键盘事件（中文走 IME 提交），填完再回读校验。
+    const typeInto = async (selector, text, what) => {
+      try {
+        await unzooCallTool('browser_type', { tab_id: String(client.tabId), selector, text, clear_first: true, timeout: 15000 }, 180000);
+      } catch (e) {
+        log(`${what} 真实输入失败（${String(e.message || e).slice(0, 60)}），退回注入`, 'warn');
+        const el = selector.startsWith('textarea') ? INTRO_EL : TITLE_EL;
+        await client.evaluate(`(function(){${SETTER}var el=${el};if(el){el.focus();__sv(el,${Q(text)});}return 1;})()`);
+      }
+      await client.sleep(800);
+      const el = selector.startsWith('textarea') ? INTRO_EL : TITLE_EL;
+      const got = await client.evaluate(`(function(){var e=${el};return e?e.value:'';})()`);
+      return String(got || '') === text;
+    };
+    if (title) {
+      const ok = await typeInto('input[maxlength="15"]', title, '书名');
+      log(ok ? `已填新书名：《${title}》` : '填书名失败', ok ? 'info' : 'error');
+      if (!ok) return { ok: false, error: '书名没填进去（可能超长被番茄截断）' };
+    }
+    if (intro) {
+      const ok = await typeInto('textarea', intro, '简介');
+      log(ok ? `已填新简介（${[...intro].length} 字）` : '填简介失败', ok ? 'info' : 'error');
+      if (!ok) return { ok: false, error: '简介没填进去（可能超长被番茄截断）' };
+    }
+
+    if (!autoSubmit) {
+      return { ok: true, semiManual: true, msg: '已在番茄填好新书名/简介，请到浏览器核对后点「立即修改」' };
+    }
+    // 【提交必须是真实坐标点击】合成指针序列能点开弹窗、却提交不了：实测点完编辑态是退出了，
+    // 值却还是旧的（番茄把它当成取消）。createFanqieBook 的「立即创建」当年也是这么踩出来的，
+    // 那边用的就是 cdpClick 坐标点击。
+    log('点击「立即修改」…', 'act');
+    if (!(await fire('立即修改'))) return { ok: false, error: '未找到「立即修改」按钮' };
+    await client.sleep(2500);
+    // 可能弹二次确认（确定/确认/继续修改）
+    for (const t of ['确定', '确认', '继续修改']) {
+      const has = await client.evaluate(`[].slice.call(document.querySelectorAll('button')).some(function(e){return (e.textContent||'').trim()===${Q(t)}&&e.offsetParent!==null;})`);
+      if (has) { await client.trustedClickText(t); log(`确认弹窗：点了「${t}」`); await client.sleep(1500); break; }
+    }
+    await client.sleep(3000);
+    // 回读校验：番茄可能弹校验错误（敏感词/重名），不看回读就报成功等于骗自己
+    const err = await client.evaluate("(function(){var e=document.querySelector('.arco-message-error,[class*=message-error]');return e?(e.textContent||'').trim().slice(0,80):'';})()");
+    if (err) return { ok: false, error: '番茄拒绝修改：' + err };
+    await client.navigate(`https://fanqienovel.com/main/writer/book-info/${bookId}?type=1`);
+    await client.sleep(5000);
+    const page = String(await client.evaluate("(document.body.innerText||'').slice(0,4000)") || '');
+    const titleOk = !title || page.includes(title);
+    const introOk = !intro || page.includes(intro.slice(0, 20));
+    log(`回读校验：书名 ${titleOk ? '✅' : '❌'}　简介 ${introOk ? '✅' : '❌'}`, titleOk && introOk ? 'act' : 'warn');
+    return { ok: titleOk && introOk, submitted: true, titleOk, introOk, title, introLen: [...intro].length };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
 }
 
 // ===== 把「书名实验」候选推到番茄「多书名实验·实验配置」（设置别名 + 逐个上传封面）=====

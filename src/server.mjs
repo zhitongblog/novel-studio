@@ -45,7 +45,7 @@ import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, g
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
-import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment } from './fanqie.mjs';
+import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment, updateFanqieBookInfo } from './fanqie.mjs';
 import { getCompletionReport, runFinaleClosure, locateCompletion, buildCompletionNote } from './finale.mjs';
 import { previewFanqieImport, importFromFanqie } from './import_fanqie.mjs';
 import { generateCoverBg, buildArtPromptAuto } from './imagegen.mjs';
@@ -1518,6 +1518,22 @@ async function api(p, req, res, u) {
         const pc = book.publish || {};
         if (!pc.profilePath || !pc.bookId) return json(res, 400, { ok: false, error: '该书未配番茄账号/bookId（先在发布里配好）' });
         const r = await getFanqieVolumes({ profilePath: pc.profilePath, bookId: pc.bookId, onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie' }) });
+        return json(res, 200, r);
+      } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
+    }
+    if (p === '/api/fanqie/update-book-info') {   // 改番茄的书名/简介（作品信息页 → 修改 → 立即修改）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { ok: false, error: '找不到书' });
+        const pc = book.publish || {};
+        if (!pc.profilePath || !pc.bookId) return json(res, 400, { ok: false, error: '该书未配番茄账号/bookId' });
+        const r = await updateFanqieBookInfo({
+          bookId: pc.bookId, profilePath: pc.profilePath,
+          title: body.title || '', intro: body.intro || '', autoSubmit: body.autoSubmit !== false,
+          onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie' }),
+        });
+        // 番茄改成功了，本地也要跟上：简介直接同步，书名只记在发布配置里（本地改名是另一件事，得用改名功能）
+        if (r.ok && body.intro) { try { setBookSynopsis(book.slug, body.intro); } catch {} }
+        if (r.ok && body.title) { try { setBookPublish(book.slug, { bookName: body.title }); } catch {} }
         return json(res, 200, r);
       } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
     }
