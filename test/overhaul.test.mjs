@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { styleScan, countSimiles, countPiles, buildStyleFixInstruction, STYLE_STD } from '../src/stylegate.mjs';
-import { buildBatchInstruction, readFixBatches, pickMustFix } from '../src/overhaul.mjs';
+import { buildBatchInstruction, readFixBatches, pickMustFix, parseReadReportFile } from '../src/overhaul.mjs';
 import { parseReadReview, buildReadFixInstruction } from '../src/readreview.mjs';
 import { parseDiagnose } from '../src/diagnose.mjs';
 
@@ -160,7 +160,7 @@ test('通用诊断的输出能解析成必办清单（流水线直接拿它当�
 
 test('引擎必须提供改造流水线的四个入口，且只发改动章要靠指纹', () => {
   const src = fs.readFileSync(new URL('../src/server.mjs', import.meta.url), 'utf8');
-  for (const p of ['/api/book/diagnose', '/api/book/read-review', '/api/book/overhaul/start', '/api/book/overhaul/stop', '/api/book/overhaul/status', '/api/book/publish-changed']) {
+  for (const p of ['/api/book/diagnose', '/api/book/read-review', '/api/book/apply-read-review', '/api/book/overhaul/start', '/api/book/overhaul/stop', '/api/book/overhaul/status', '/api/book/publish-changed']) {
     assert.ok(src.includes(p), '缺端点 ' + p);
   }
   const i = src.indexOf('function changedChapters');
@@ -208,4 +208,17 @@ test('必办清单要【按批次筛】——不筛的话模型会认定"本批�
     const none = buildBatchInstruction(b, 21, 30, { mustFix: ['[必改] 第1章开局慢→砍掉营养液那段'] });
     assert.match(none, /诊断没有点名第21到第30章，但本批同样要改/);
   } finally { rm(b); }
+});
+
+test('复核报告能从落盘的 md 读回条目——复核与定点修常隔着几小时甚至隔天', () => {
+  const md = [
+    '# 阅读复核 1-20', '', '| 章 | 类型 | 问题 | 怎么改 |', '|---|---|---|---|',
+    '| 1 | 逻辑 | 十九秒里做完五件事 | 把倒计时改成九十秒 |',
+    '| 20 | 空钩子 | 结尾落在"收：待定" | 改成一件具体的事 |',
+    '| 说明 | 这行不是条目 | x | y |',
+  ].join(String.fromCharCode(10));
+  const items = parseReadReportFile(md);
+  assert.equal(items.length, 2, '只认四列且类型合法的行');
+  assert.equal(items[0].num, 1);
+  assert.equal(items[1].kind, '空钩子');
 });

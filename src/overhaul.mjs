@@ -256,6 +256,53 @@ export async function runOverhaul(book, {
   return { ok: true, report };
 }
 
+// 从落盘的阅读复核报告里把条目读回来（报告是 | 章 | 类型 | 问题 | 怎么改 | 的表格）。
+// 为什么要能从文件读：复核和定点修常常隔着好几个小时甚至隔天（引擎中间退过两次），
+// 内存里的那份早没了，但报告一直在。
+export function parseReadReportFile(text) {
+  const items = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = line.match(/^\|\s*(\d+)\s*\|\s*(空钩子|逻辑|人物|情绪)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*$/);
+    if (m) items.push({ num: +m[1], kind: m[2], problem: m[3].trim(), fix: m[4].trim() });
+  }
+  return items;
+}
+
+// 按复核意见定点修：一次改一批章，指令只说这几章的这几条，改完照样过文风闸。
+// 与 runOverhaul 共用 runBatch（开窗/盯跑飞/额度感知/质检全都一样），区别只在指令来源。
+export async function runReadFix(book, { cfg, api, items, onLog = () => {}, batchSize = 8, maxRounds = 1, std = {}, shouldStop = () => false, batchTimeoutMin = 70 } = {}) {
+  const slug = book.slug;
+  const batches = readFixBatches(items, batchSize);
+  if (!batches.length) return { ok: true, nothing: true };
+  const opts = { mustFix: [], std: { keepSoft: true, hardFloorPct: 80, minKeepPct: 95, ...std }, useReviews: false, batchTimeoutMin, mode: 'rebuild' };
+  const ctx = { book, cfg, api, onLog, opts, killAgents: api.killAgents || (async () => 0) };
+  setState(slug, { status: 'running', stage: 'readfix', total: batches.length, doneBatches: [] });
+  const done = [], report = [];
+  for (const b of batches) {
+    if (shouldStop()) { setState(slug, { status: 'stopped' }); return { ok: false, stopped: true, report }; }
+    const job = { a: b.from, b: b.to, round: 0, carry: '', fixInstruction: buildBatchInstruction(getBook(slug) || book, b.from, b.to, { mode: 'rebuild' }) + '。' + b.instruction };
+    onLog({ level: 'act', msg: `定点修 第${b.from}–${b.to}章（${b.nums.length} 章有意见，共 ${items.filter(i => b.nums.includes(i.num)).length} 条）…` });
+    for (;;) {
+      const r = await runBatch(ctx, job);
+      if (!r.ok) { setState(slug, { status: 'error', error: r.error }); return { ok: false, error: r.error, report }; }
+      if (r.quota && r.unchanged.length && job.round < 12) { job.round++; const w = (await api.quotaResetMs?.()) ?? 15 * 60000; onLog({ level: 'warn', msg: `⏳ 撞额度，等 ${Math.round(w / 60000)} 分钟` }); await ctx.killAgents(); await sleep(w); continue; }
+      if (r.unchanged.length === b.to - b.from + 1 && job.round < maxRounds) {
+        job.round++;
+        job.fixInstruction += '。【上一轮你一个文件都没动就报了完成——那不算完成】必须实际落盘修改这几章';
+        onLog({ level: 'warn', msg: '↻ 一章都没改，重试一次' });
+        continue;
+      }
+      report.push({ range: `${b.from}-${b.to}`, issues: r.gate.issues.map(i => i.msg), ok: r.gate.ok });
+      done.push(`${b.from}-${b.to}`);
+      setState(slug, { doneBatches: done });
+      onLog({ level: 'act', msg: r.gate.ok ? `✅ 第${b.from}–${b.to}章定点修完成` : `⚠️ 第${b.from}–${b.to}章完成，文风指标还有 ${r.gate.issues.length} 处不达标` });
+      break;
+    }
+  }
+  setState(slug, { status: 'done', stage: 'readfix', finishedAt: new Date().toISOString() });
+  return { ok: true, report };
+}
+
 // 阅读复核挑出来的问题 → 再开一轮定点修（按章分组，一次修一批）
 export function readFixBatches(items, batchSize = 10) {
   const nums = [...new Set((items || []).map(i => i.num))].sort((a, b) => a - b);

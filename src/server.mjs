@@ -46,7 +46,7 @@ import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, g
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange, loadPublishChapters, loadPublishedHashes } from './publish.mjs';
 import { diagnoseBook } from './diagnose.mjs';
-import { runOverhaul, getState as getOverhaulState } from './overhaul.mjs';
+import { runOverhaul, runReadFix, parseReadReportFile, getState as getOverhaulState } from './overhaul.mjs';
 import { readReview, writeReadReport } from './readreview.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
 import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment, updateFanqieBookInfo } from './fanqie.mjs';
@@ -1964,6 +1964,38 @@ async function api(p, req, res, u) {
           })
           .catch(e => pushLog(slug, { level: 'error', source: 'readreview', msg: '阅读复核异常：' + e.message }));
         return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/apply-read-review') {
+      // 按阅读复核的意见定点修：条目从 reviews/阅读复核-*.md 读回（复核与修常常隔着几小时甚至隔天）
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const slug = book.slug;
+        if (overhaulJobs.get(slug)?.status === 'running') return json(res, 200, { ok: false, error: '这本书正在改造中，先停了再修' });
+        let items = Array.isArray(body.items) ? body.items : [];
+        if (!items.length) {
+          const dir = path.join(book.dir, 'reviews');
+          let files = []; try { files = fs.readdirSync(dir).filter(f => /^阅读复核.*\.md$/.test(f)); } catch {}
+          files.sort((a, b) => fs.statSync(path.join(dir, b)).mtimeMs - fs.statSync(path.join(dir, a)).mtimeMs);
+          if (!files.length) return json(res, 400, { error: '没有阅读复核报告，先点「让它读一遍挑毛病」' });
+          items = parseReadReportFile(fs.readFileSync(path.join(dir, files[0]), 'utf8'));
+          pushLog(slug, { level: 'info', source: 'overhaul', msg: `复核意见取自 ${files[0]}（${items.length} 条）` });
+        }
+        const from = Number(body.from) || 0, to = Number(body.to) || 0;
+        if (from || to) items = items.filter(i => (!from || i.num >= from) && (!to || i.num <= to));
+        if (!items.length) return json(res, 400, { error: '这个范围里没有复核意见' });
+        const job = { status: 'running', stop: false, startedAt: Date.now() };
+        overhaulJobs.set(slug, job);
+        runReadFix(book, {
+          cfg, api: overhaulApi(book, cfg), items,
+          batchSize: Number(body.batchSize) || 8,
+          shouldStop: () => job.stop,
+          onLog: (e) => pushLog(slug, { ...e, source: e.source || 'readfix' }),
+        }).then(r => {
+          job.status = r.ok ? 'done' : (r.stopped ? 'stopped' : 'error');
+          pushLog(slug, { level: r.ok ? 'act' : 'warn', source: 'readfix', msg: r.ok ? '🎉 复核意见已逐批落实' : (r.stopped ? '定点修已停止（进度已保存）' : '定点修中止：' + r.error) });
+        }).catch(e => { job.status = 'error'; pushLog(slug, { level: 'error', source: 'readfix', msg: '定点修异常：' + e.message }); });
+        return json(res, 200, { ok: true, started: true, items: items.length });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/overhaul/start') {

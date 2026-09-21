@@ -1756,6 +1756,20 @@ $('#btnOverhaulStop')?.addEventListener('click', async () => {
   try { await api('/api/book/overhaul/stop', 'POST', { book: CUR.slug, force: !force }); toast(force ? '本批做完就停' : '已立刻停止'); } catch (e) { toast('停止失败：' + e.message); }
 });
 
+// 「按复核意见定点修」——把阅读复核挑出的问题逐批落实（只改被点名的地方）
+$('#btnApplyReadReview')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const range = prompt('修哪些章？（格式：起-止，留空=报告里全部）', '');
+  if (range === null) return;
+  const m3 = String(range).trim().match(/^(d+)s*[-–]s*(d+)$/);
+  if (!confirm('会按 reviews/阅读复核-*.md 的意见改这些章的正文（自动 git 存档，可回退）。开始？')) return;
+  try {
+    const r = await api('/api/book/apply-read-review', 'POST', { book: CUR.slug, from: m3 ? +m3[1] : 0, to: m3 ? +m3[2] : 0 });
+    openStream(CUR.slug);
+    toast(`已开始定点修（${r.items} 条意见）`);
+    ovhPoll(true);
+  } catch (e) { toast('定点修启动失败：' + e.message); }
+});
 // 改造进度轮询：跑着的时候 10 秒一次，停了就不再问（别给引擎添无谓负担）
 let ovhTimer = null;
 async function ovhPoll(force = false) {
