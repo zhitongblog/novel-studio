@@ -187,3 +187,15 @@ test('撞额度要把窗口原话带进停止原因——不带的话上层根�
   assert.match(seg, /窗口原话/, '停止原因里要带上屏幕上那句 reset 提示');
   assert.match(seg, /LIMIT_RE\.test\(l\)/, '原话要从命中那一行取');
 });
+
+test('claude 自己在重试时不许插嘴——那是它在干活，不是卡住', () => {
+  // 2026-09-21 现场：日志里出现「✻ API error · Retrying in 0s · attempt 1/10」，
+  // 我的断连重催把它当成卡住去催了一句，反而可能打断人家的重试。
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  const i = src.indexOf('const retrying =');
+  assert.ok(i > 0, '要先判断是不是正在重试');
+  const seg = src.slice(i, i + 500);
+  assert.match(seg, /retrying|attempt/i);
+  assert.match(seg, /!retrying/, '正在重试就不催');
+  assert.match(seg, /looksIdleWaiting\(screen\)/, '还要确实停在提示符前才催');
+});

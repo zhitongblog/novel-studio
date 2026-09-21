@@ -158,7 +158,11 @@ export class Autopilot {
 
     // 【断连立刻重催】屏幕最后是"API Error / Connection lost"这类临时故障：催一句就能接着写。
     // 连着催 6 次还是同一句，才当成环境问题停下——否则就是无限重试烧 token。
-    if (Autopilot.TRANSIENT.test(lastNonEmpty(screen, 6)) && !screenChanged) {
+    // 【别打断人家自己的重试】claude 撞到网络错会自己重试，屏幕上是
+    //   「✻ API error · Retrying in 0s · attempt 1/10」——它在干活，不是卡住。
+    // 2026-09-21 我第一版没排除这种，当场就误催了一次。只有【它已经不再重试、且停在提示符前】才轮到我们催。
+    const retrying = /retrying|attempt\s*\d+\s*\/\s*\d+|重试中/i.test(lastNonEmpty(screen, 6));
+    if (Autopilot.TRANSIENT.test(lastNonEmpty(screen, 6)) && !screenChanged && !retrying && this.looksIdleWaiting(screen)) {
       this._transient = (this._transient || 0) + 1;
       if (this._transient > 6) { this.stop('反复断连（API Error/超时），催了六次都没接上'); return; }
       const line = (lastNonEmpty(screen, 6).split(String.fromCharCode(10)).find(l => Autopilot.TRANSIENT.test(l)) || '').trim().slice(0, 100);
