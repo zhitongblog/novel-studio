@@ -199,3 +199,21 @@ test('claude 自己在重试时不许插嘴——那是它在干活，不是卡�
   assert.match(seg, /!retrying/, '正在重试就不催');
   assert.match(seg, /looksIdleWaiting\(screen\)/, '还要确实停在提示符前才催');
 });
+
+test('额度判据不许认孤立数字——正文里写个 429，写作就被掐断了', () => {
+  // 2026-09-21 实证（靠"窗口原话"才暴露出来）：agent 正在写的正文是
+  //   「429 +我把这串编号，跟我压在四层壳底下那十六个字节比了一遍。」
+  // 裸的 429 命中了额度判据 → autopilot 当场终止、收窗、清会话，作者看到的是"莫名其妙撞了额度"。
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  const re = eval(src.match(/const LIMIT_RE = (\/.*\/i);/)[1]);
+  // 正文：一个都不许命中
+  assert.ok(!re.test('429 +我把这串编号，跟我压在四层壳底下那十六个字节比了一遍。'));
+  assert.ok(!re.test('那台机器的编号是 4290，功率 429 瓦。'));
+  assert.ok(!re.test('他盯着屏幕上的配额分配表看了很久。'));
+  // 真额度：一个都不许漏
+  assert.ok(re.test('API Error: 429 Too Many Requests'));
+  assert.ok(re.test('status code 429 returned'));
+  assert.ok(re.test('Claude usage limit reached · your limit will reset at 10pm'));
+  assert.ok(re.test('Individual quota reached. Resets in 6m8s'));
+  assert.ok(re.test('当前额度已用完，请稍后再试'));
+});
