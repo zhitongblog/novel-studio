@@ -177,3 +177,13 @@ test('断连/超时属于临时故障：要立刻重催，而不是判死也不�
   assert.match(src, /_transient > 6/, '催不动就得停，否则白烧 token');
   assert.ok(src.includes('次重催'), '日志要说清这是第几次重催');
 });
+
+test('撞额度要把窗口原话带进停止原因——不带的话上层根本算不出什么时候恢复', () => {
+  // 2026-09-21 实测：上层想去读屏幕时窗口早被收了，只能盲目退避，每次白开一个窗口白撞一次。
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  const i = src.indexOf('_limitStreak >= 2');
+  assert.ok(i > 0);
+  const seg = src.slice(i, i + 800);
+  assert.match(seg, /窗口原话/, '停止原因里要带上屏幕上那句 reset 提示');
+  assert.match(seg, /LIMIT_RE\.test\(l\)/, '原话要从命中那一行取');
+});

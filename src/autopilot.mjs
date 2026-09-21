@@ -216,7 +216,13 @@ export class Autopilot {
     // 模型用量/速率上限 → 立即停止，不再重试（要去抖一次，避免误判）
     if (this.opt.stopOnLimit !== false && LIMIT_RE.test(tail)) {
       this._limitStreak = (this._limitStreak || 0) + 1;
-      if (this._limitStreak >= 2) { this.stop('检测到模型用量/速率上限，已停止（不再重试，等额度恢复后手动继续）'); return; }
+      if (this._limitStreak >= 2) {
+        // 【把屏幕上那句原话带出去】上层要靠它算"什么时候恢复"（claude 写 reset at 10pm、agy 写 Resets in 6m8s）。
+        // 2026-09-21 实测：不带出去的话，等上层想去读屏幕时窗口早关了，只能盲目退避、每次白开一个窗口。
+        const raw = (tail.split('\n').filter(l => LIMIT_RE.test(l)).pop() || '').trim().replace(/\s+/g, ' ').slice(0, 160);
+        this.stop(`检测到模型用量/速率上限，已停止（不再重试，等额度恢复后手动继续）${raw ? '｜窗口原话：' + raw : ''}`);
+        return;
+      }
     } else { this._limitStreak = 0; }
 
     // 解析并上报 token 用量（agent TUI footer 的累计值）

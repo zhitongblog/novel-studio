@@ -2242,6 +2242,12 @@ function overhaulApi(book, cfg) {
     //     每 15 分钟白开一次窗口、白撞一次。所以会话没了就去日志里找最后那个 pane id。
     quotaResetMs: async (attempt = 1) => {
       const backoff = Math.min(15 * 60000 * Math.pow(2, Math.max(0, attempt - 1)), 60 * 60000);
+      // 先看日志：autopilot 发现上限时会把屏幕原话一起带出来（窗口那会儿还开着，之后就读不到了）
+      try {
+        const fromLog = (rtOf(slug).logs || []).map(e => String(e.msg || '')).filter(m => /窗口原话/.test(m)).pop();
+        const ms0 = fromLog ? parseQuotaReset(fromLog) : null;
+        if (ms0) { pushLog(slug, { level: 'info', source: 'overhaul', msg: `窗口原话说额度 ${Math.round(ms0 / 60000)} 分钟后恢复` }); return ms0 + 90000; }
+      } catch {}
       try {
         const sess = getSession(slug);
         const paneFromLog = (rtOf(slug).logs || []).map(e => String(e.msg || '').match(/agent pane id=(\d+)/)).filter(Boolean).pop();
