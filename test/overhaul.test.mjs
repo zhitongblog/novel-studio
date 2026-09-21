@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { styleScan, countSimiles, countPiles, buildStyleFixInstruction, STYLE_STD } from '../src/stylegate.mjs';
-import { buildBatchInstruction, readFixBatches, pickMustFix, parseReadReportFile } from '../src/overhaul.mjs';
+import { buildBatchInstruction, readFixBatches, pickMustFix, parseReadReportFile, parseQuotaReset } from '../src/overhaul.mjs';
 import { parseReadReview, buildReadFixInstruction } from '../src/readreview.mjs';
 import { parseDiagnose } from '../src/diagnose.mjs';
 
@@ -221,4 +221,14 @@ test('复核报告能从落盘的 md 读回条目——复核与定点修常隔�
   assert.equal(items.length, 2, '只认四列且类型合法的行');
   assert.equal(items[0].num, 1);
   assert.equal(items[1].kind, '空钩子');
+});
+
+test('额度恢复时间：agy 和 claude 两种写法都要认，认不出才退避', () => {
+  // 2026-09-21 实测：claude 的额度按小时窗口给，而解析只认 agy 的「Resets in 6m8s」，
+  // 于是每次都退回默认 15 分钟 → 每 15 分钟白开一次窗口、白撞一次上限。
+  const now = new Date('2026-09-21T21:12:00');
+  assert.equal(parseQuotaReset('⚠ Individual quota reached. Resets in 6m8s', now), 368000);
+  assert.equal(Math.round(parseQuotaReset('Claude usage limit reached · your limit will reset at 10pm', now) / 60000), 48);
+  assert.equal(Math.round(parseQuotaReset('resets at 3:00 AM', now) / 60000), 348);
+  assert.equal(parseQuotaReset('什么都没写', now), null, '认不出要返回 null，让调用方退避，别硬编一个数');
 });

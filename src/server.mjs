@@ -46,7 +46,7 @@ import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, g
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange, loadPublishChapters, loadPublishedHashes } from './publish.mjs';
 import { diagnoseBook } from './diagnose.mjs';
-import { runOverhaul, runReadFix, parseReadReportFile, getState as getOverhaulState } from './overhaul.mjs';
+import { runOverhaul, runReadFix, parseReadReportFile, parseQuotaReset, getState as getOverhaulState } from './overhaul.mjs';
 import { readReview, writeReadReport } from './readreview.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
 import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment, updateFanqieBookInfo } from './fanqie.mjs';
@@ -2235,18 +2235,28 @@ function overhaulApi(book, cfg) {
     killAgents: async () => { try { return killBookAgents((getBook(slug) || book).dir); } catch { return 0; } },
     // 撞没撞模型额度：看这段时间的日志（autopilot 会把"用量/速率上限"写进来）
     hitQuota: async (since) => (rtOf(slug).logs || []).some(e => e.t >= since && /用量|速率上限|quota/i.test(String(e.msg || ''))),
-    // 额度什么时候恢复：agy 窗口里写着「Resets in 6m8s」，读屏幕拿准确值，读不到给 15 分钟
-    quotaResetMs: async () => {
+    // 额度什么时候恢复：读那块屏幕。两个坑都踩过——
+    //  ① 写法不同：agy 是「Resets in 6m8s」，claude 是「limit will reset at 10pm」（parseQuotaReset 都认）
+    //  ② 撞上限时 autopilot 判终止，会话记录【当场就被清掉】，getSession 拿不到 pane
+    //     → 只能退回默认值。2026-09-21 实测后果：claude 的额度按小时给，默认 15 分钟等于
+    //     每 15 分钟白开一次窗口、白撞一次。所以会话没了就去日志里找最后那个 pane id。
+    quotaResetMs: async (attempt = 1) => {
+      const backoff = Math.min(15 * 60000 * Math.pow(2, Math.max(0, attempt - 1)), 60 * 60000);
       try {
         const sess = getSession(slug);
-        if (!sess) return 15 * 60000;
-        const mcp = await connectInstance({ id: sess.instanceId, mcp_port: sess.mcp_port, auth_token: sess.auth_token }, {});
-        const t = String(await mcp.screenText(sess.pane) || '');
+        const paneFromLog = (rtOf(slug).logs || []).map(e => String(e.msg || '').match(/agent pane id=(\d+)/)).filter(Boolean).pop();
+        const pane = sess?.pane ?? (paneFromLog ? Number(paneFromLog[1]) : null);
+        if (pane == null) return backoff;
+        const inst = sess ? { id: sess.instanceId, mcp_port: sess.mcp_port, auth_token: sess.auth_token } : listInstances()[0];
+        if (!inst) return backoff;
+        const mcp = await connectInstance(inst, {});
+        const t = String(await mcp.screenText(pane) || '');
         try { mcp.close(); } catch {}
-        const m = [...t.matchAll(/Resets in\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?/g)].pop();
-        if (m) return (((+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0)) * 1000) + 90000;
+        const ms = parseQuotaReset(t);
+        if (ms) { pushLog(slug, { level: 'info', source: 'overhaul', msg: `窗口说额度 ${Math.round(ms / 60000)} 分钟后恢复` }); return ms + 90000; }
       } catch {}
-      return 15 * 60000;
+      pushLog(slug, { level: 'info', source: 'overhaul', msg: `读不到额度恢复时间，按退避等 ${Math.round(backoff / 60000)} 分钟（第 ${attempt} 次）` });
+      return backoff;
     },
   };
 }

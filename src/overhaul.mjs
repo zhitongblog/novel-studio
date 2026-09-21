@@ -42,6 +42,31 @@ export function clearState(slug) {
   upsertBook(b);
 }
 
+// 从窗口文字里算出「额度什么时候恢复」。两家写法完全不同，都得认：
+//   · agy   ：Individual quota reached … Resets in 6m8s
+//   · claude：Claude usage limit reached · your limit will reset at 10pm / resets at 3:00 AM
+// 认不出就返回 null，由调用方给默认值——但默认值只能兜底，不能当常态：
+// 2026-09-21 实测，claude 的额度是按小时窗口给的，默认等 15 分钟意味着每 15 分钟白开一次窗口。
+export function parseQuotaReset(text, now = new Date()) {
+  const t = String(text || '');
+  const rel = [...t.matchAll(/resets?\s+in\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/gi)].pop();
+  if (rel && (rel[1] || rel[2] || rel[3])) {
+    return (((+rel[1] || 0) * 3600 + (+rel[2] || 0) * 60 + (+rel[3] || 0)) * 1000) || null;
+  }
+  const at = [...t.matchAll(/reset(?:s|ting)?\s*(?:at|在)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/gi)].pop();
+  if (at) {
+    let h = +at[1]; const min = +(at[2] || 0); const ap = (at[3] || '').toLowerCase();
+    if (ap === 'pm' && h < 12) h += 12;
+    if (ap === 'am' && h === 12) h = 0;
+    const target = new Date(now);
+    target.setHours(h, min, 0, 0);
+    if (target <= now) target.setDate(target.getDate() + 1);   // 说的是明天那个点
+    const ms = target - now;
+    return ms > 0 && ms <= 13 * 3600 * 1000 ? ms : null;       // 超过 13 小时多半是解析错了
+  }
+  return null;
+}
+
 const maxChapter = (book) => Math.max(0, ...listBookChapters(book).map(c => c.num));
 function chapterText(book, num) {
   const c = listBookChapters(book).find(x => x.num === num);
@@ -195,7 +220,7 @@ export async function runOverhaul(book, {
       // 撞额度 → 等恢复，从第一章没改的地方接着改（不算失败，也不算一轮）
       if (r.quota && r.unchanged.length && quotaWaits < (opts.quotaWaits || 12)) {
         quotaWaits++;
-        const wait = (await api.quotaResetMs?.()) ?? 15 * 60000;
+        const wait = (await api.quotaResetMs?.(quotaWaits + 1)) ?? 15 * 60000;
         onLog({ level: 'warn', msg: `⏳ 撞模型额度：本批已改 ${job.b - job.a + 1 - r.unchanged.length} 章，还剩 ${r.unchanged.length} 章；等 ${Math.round(wait / 60000)} 分钟后从第${Math.min(...r.unchanged)}章接着改` });
         setState(slug, { status: 'waiting-quota', waitUntil: new Date(Date.now() + wait).toISOString(), current: key });
         await ctx.killAgents();
@@ -285,7 +310,7 @@ export async function runReadFix(book, { cfg, api, items, onLog = () => {}, batc
     for (;;) {
       const r = await runBatch(ctx, job);
       if (!r.ok) { setState(slug, { status: 'error', error: r.error }); return { ok: false, error: r.error, report }; }
-      if (r.quota && r.unchanged.length && job.round < 12) { job.round++; const w = (await api.quotaResetMs?.()) ?? 15 * 60000; onLog({ level: 'warn', msg: `⏳ 撞额度，等 ${Math.round(w / 60000)} 分钟` }); await ctx.killAgents(); await sleep(w); continue; }
+      if (r.quota && r.unchanged.length && job.round < 12) { job.round++; const w = (await api.quotaResetMs?.(job.round)) ?? 15 * 60000; onLog({ level: 'warn', msg: `⏳ 撞额度，等 ${Math.round(w / 60000)} 分钟` }); await ctx.killAgents(); await sleep(w); continue; }
       if (r.unchanged.length === b.to - b.from + 1 && job.round < maxRounds) {
         job.round++;
         job.fixInstruction += '。【上一轮你一个文件都没动就报了完成——那不算完成】必须实际落盘修改这几章';
