@@ -3729,18 +3729,32 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
     // 【必须真打字，不能灌 value】2026-09-20 实证：用原生 setter 灌进去，框里显示对了，
     // 点「立即修改」也退出了编辑态，可保存下来的还是旧书名旧简介——番茄的表单状态没收到这次变更。
     // browser_type 是真实键盘事件（中文走 IME 提交），填完再回读校验。
+    // 三级输入，逐级退。【注入永远排最后】——它填得进框、却进不了表单状态，提交上去还是旧值，
+    // 这个坑 2026-09-20/21 连栽三次（王莽改书名、代码逆子改简介各一次）。
+    //   ① browser_type：真实键盘事件，中文走 IME 提交
+    //   ② human_type：真人式逐字输入，自带读回校验（browser_type 偶发报错时顶上）
+    //   ③ 原生 setter 注入：只当最后一线希望，并且【明说它多半白填】
     const typeInto = async (selector, text, what) => {
-      try {
-        await unzooCallTool('browser_type', { tab_id: String(client.tabId), selector, text, clear_first: true, timeout: 15000 }, 180000);
-      } catch (e) {
-        log(`${what} 真实输入失败（${String(e.message || e).slice(0, 60)}），退回注入`, 'warn');
-        const el = selector.startsWith('textarea') ? INTRO_EL : TITLE_EL;
-        await client.evaluate(`(function(){${SETTER}var el=${el};if(el){el.focus();__sv(el,${Q(text)});}return 1;})()`);
-      }
-      await client.sleep(800);
       const el = selector.startsWith('textarea') ? INTRO_EL : TITLE_EL;
-      const got = await client.evaluate(`(function(){var e=${el};return e?e.value:'';})()`);
-      return String(got || '') === text;
+      const readBack = async () => String(await client.evaluate(`(function(){var e=${el};return e?e.value:'';})()`) || '');
+      const tries = [
+        ['browser_type', { tab_id: String(client.tabId), selector, text, clear_first: true, timeout: 15000 }],
+        ['human_type', { tab_id: String(client.tabId), selector, text, clear: true, profile: 'fast' }],
+      ];
+      for (const [tool, args] of tries) {
+        try {
+          await unzooCallTool(tool, args, 240000);
+          await client.sleep(800);
+          if (await readBack() === text) return true;
+          log(`${what} 用 ${tool} 填完对不上，换下一种`, 'warn');
+        } catch (e) {
+          log(`${what} ${tool} 失败（${String(e.message || e).replace(/\s+/g, ' ').slice(0, 80)}），换下一种`, 'warn');
+        }
+      }
+      log(`${what} 两种真实输入都没成，退到注入——注意：注入常常填得进框但番茄收不到，提交后很可能还是旧值`, 'error');
+      await client.evaluate(`(function(){${SETTER}var el=${el};if(el){el.focus();__sv(el,${Q(text)});}return 1;})()`);
+      await client.sleep(800);
+      return await readBack() === text;
     };
     if (title) {
       const ok = await typeInto('input[maxlength="15"]', title, '书名');
