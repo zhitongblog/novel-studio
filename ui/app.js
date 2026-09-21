@@ -1714,6 +1714,22 @@ $('#btnDiagnose')?.addEventListener('click', async () => {
   finally { setTimeout(() => { btn.disabled = false; btn.textContent = old; }, 3000); }
 });
 
+// 「让它读一遍挑毛病」——阅读复核单独可跑（以前只能跟在改造流水线最后，引擎一断就没了）
+$('#btnReadReview')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const b2 = getBookBySlug(CUR.slug) || CUR;
+  const maxCh = b2.stats?.chapters || 0;
+  const range = prompt(`读哪些章？（格式：起-止，留空=全书）
+
+换一个模型只读不量，专挑：空钩子、逻辑断裂、人物失格、情绪落空。`, maxCh ? `1-${Math.min(maxCh, 20)}` : '');
+  if (range === null) return;
+  const m2 = String(range).trim().match(/^(d+)s*[-–]s*(d+)$/);
+  try {
+    await api('/api/book/read-review', 'POST', { book: CUR.slug, from: m2 ? +m2[1] : 1, to: m2 ? +m2[2] : 0 });
+    openStream(CUR.slug);
+    toast('已开始阅读复核——完成后结果在 reviews/阅读复核-*.md');
+  } catch (e) { toast('阅读复核启动失败：' + e.message); }
+});
 // 「改造这本书」——救书流水线：分批改 → 质检 → 返工 → 阅读复核。会覆盖正文，所以在危险区。
 $('#btnOverhaul')?.addEventListener('click', async () => {
   if (!CUR) return;

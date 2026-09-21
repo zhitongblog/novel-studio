@@ -47,6 +47,7 @@ import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, dele
 import { previewPublish, publishToFanqie, republishRange, loadPublishChapters, loadPublishedHashes } from './publish.mjs';
 import { diagnoseBook } from './diagnose.mjs';
 import { runOverhaul, getState as getOverhaulState } from './overhaul.mjs';
+import { readReview, writeReadReport } from './readreview.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
 import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment, updateFanqieBookInfo } from './fanqie.mjs';
 import { getCompletionReport, runFinaleClosure, locateCompletion, buildCompletionNote } from './finale.mjs';
@@ -1945,6 +1946,23 @@ async function api(p, req, res, u) {
         diagnoseBook(book, { cfg, sample: Number(body.sample) || 20, model: body.model || null, onLog: (e) => pushLog(slug, { ...e, source: 'diagnose' }) })
           .then(r => pushLog(slug, { level: r.ok ? 'act' : 'error', source: 'diagnose', msg: r.ok ? `诊断完成：必办 ${r.must.length} 条` : '诊断失败：' + r.error }))
           .catch(e => pushLog(slug, { level: 'error', source: 'diagnose', msg: '诊断异常：' + e.message }));
+        return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/read-review') {
+      // 阅读复核单独可跑：它本来只跟在改造流水线最后，引擎一断（2026-09-20 夜里断过两次）这一步就没了。
+      // 而它恰恰是唯一能查出"空钩子/逻辑断/人物失格"的工序——指标闸永远查不出这些。
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const slug = book.slug;
+        const from = Number(body.from) || 1, to = Number(body.to) || 0;
+        readReview(book, from, to, { cfg, model: body.model || null, chunk: Number(body.chunk) || 5, onLog: (e) => pushLog(slug, { ...e, source: 'readreview' }) })
+          .then(r => {
+            if (!r.ok) return pushLog(slug, { level: 'error', source: 'readreview', msg: '阅读复核失败：' + r.error });
+            const fp = writeReadReport(book.dir, r, `${from}-${to || '末'}`);
+            pushLog(slug, { level: 'act', source: 'readreview', msg: `阅读复核完成：${r.items.length} 处待处理 → ${path.basename(fp)}` });
+          })
+          .catch(e => pushLog(slug, { level: 'error', source: 'readreview', msg: '阅读复核异常：' + e.message }));
         return json(res, 200, { ok: true, started: true });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }

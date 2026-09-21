@@ -160,7 +160,7 @@ test('通用诊断的输出能解析成必办清单（流水线直接拿它当�
 
 test('引擎必须提供改造流水线的四个入口，且只发改动章要靠指纹', () => {
   const src = fs.readFileSync(new URL('../src/server.mjs', import.meta.url), 'utf8');
-  for (const p of ['/api/book/diagnose', '/api/book/overhaul/start', '/api/book/overhaul/stop', '/api/book/overhaul/status', '/api/book/publish-changed']) {
+  for (const p of ['/api/book/diagnose', '/api/book/read-review', '/api/book/overhaul/start', '/api/book/overhaul/stop', '/api/book/overhaul/status', '/api/book/publish-changed']) {
     assert.ok(src.includes(p), '缺端点 ' + p);
   }
   const i = src.indexOf('function changedChapters');
