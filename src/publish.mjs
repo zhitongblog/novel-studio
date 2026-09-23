@@ -3,8 +3,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { publishBook, getFanqieMaxChapter, getFanqieVolumes, createFanqieVolumes, numToCn } from './fanqie.mjs';
+import { publishBook, getFanqieMaxChapter, getFanqieVolumes, createFanqieVolumes, renameFanqieVolume, numToCn } from './fanqie.mjs';
 import { setBookPublish } from './books.mjs';
+import { assertPlatform } from './platform.mjs';
+import { getQidianMaxChapter, publishChapterToQidian } from './qidian.mjs';
 
 // —— 排期起始日 ——
 function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
@@ -145,6 +147,60 @@ export function bookVolNum(vol) { const m = String(vol).match(/卷\s*0*(\d+)/) |
 // 番茄卷名 "第十三卷：九州雷震"/"第1卷" → 卷号
 function fanqieVolNum(name) { const m = String(name).match(/第\s*([0-9一二三四五六七八九十两]+)\s*卷/); return m ? cnNum(m[1]) : null; }
 
+// 番茄卷名与本地卷名的对账。
+//
+// 两件事促成它（2026-09-23）：
+//  ① 番茄建书时会自动生成一个「第一卷：默认」，而建卷逻辑【只补缺的卷、不动已存在的卷】
+//     （建卷不可逆，这条谨慎是对的），于是卷1 永远"不缺"，那个占位名就一直留着——
+//     实测《岳飞：跟我讲规矩》发完 8 章，番茄上仍叫「第一卷：默认」。
+//  ② 光治占位名不够。作者要的是【和本地比对】：本地卷名才是这本书的准绳
+//     （目录名 → 大纲文件名 → bible 卷名清单，与建卷取名同一条优先级），
+//     番茄上跟它不一样就该扶正，不管那边现在叫什么。
+//
+// 纪律：
+//  · 只在【本地确实有卷名】时才动手。本地没有名字，绝不把番茄那边清空。
+//  · 改名是可逆的（不像建卷），所以允许自动做；但每改一条都在日志里写明
+//    "番茄叫X → 本地叫Y → 已改"，作者看得见、也改得回去。
+//  · 任何一卷改名失败都不阻断发章——卷名是体面问题，章发不出去才是事故。
+export const PLACEHOLDER_VOL = /^(默认|默认卷|未命名|新建卷|正文)$/;
+
+// 「第十三卷：九州雷震」→「九州雷震」；「第1卷」→ ''
+export function fanqieVolSub(name) {
+  const m = String(name || '').match(/第\s*[0-9一二三四五六七八九十两]+\s*卷\s*[：:]\s*(.+)$/);
+  return m ? m[1].trim() : '';
+}
+
+async function syncVolNamesFromLocal(book, vm, pc, onLog) {
+  if (!vm?.ok || !vm.map) return { checked: 0, renamed: 0 };
+  let checked = 0, renamed = 0;
+  for (const [localVol, fqName] of Object.entries(vm.map)) {
+    const num = bookVolNum(localVol);
+    if (num == null) continue;
+    checked++;
+    const fqSub = fanqieVolSub(fqName);                       // 番茄现在叫什么
+    const want = volDisplayNameForBook(book, localVol);       // 本地这一卷该叫什么
+    const wantSub = want.includes('：') ? want.split('：').pop().trim() : '';
+    if (!wantSub) continue;                                   // 本地没名字 → 不动番茄，更不清空
+    if (wantSub === fqSub) continue;                          // 已经一致
+    const why = !fqSub ? '番茄那卷没有副标题'
+      : PLACEHOLDER_VOL.test(fqSub) ? `番茄还挂着建书时的占位名「${fqSub}」`
+      : `番茄叫「${fqSub}」，与本地不一致`;
+    onLog({ level: 'act', msg: `第${num}卷：${why} → 按本地改成「${wantSub}」` });
+    try {
+      const r = await renameFanqieVolume({
+        profilePath: pc.profilePath, bookId: pc.bookId,
+        num, oldName: fqName, newName: wantSub, onLog,
+      });
+      if (r?.ok) { renamed++; onLog({ level: 'info', msg: `✅ 第${num}卷已更名为「${wantSub}」` }); }
+      else onLog({ level: 'warn', msg: `第${num}卷改名没成功：${r?.error || '未知'}（不影响发章）` });
+    } catch (e) {
+      onLog({ level: 'warn', msg: `第${num}卷改名异常：${e.message || e}（不影响发章）` });
+    }
+  }
+  if (checked && !renamed) onLog({ level: 'info', msg: `卷名对账：${checked} 卷，与本地一致，无需改动` });
+  return { checked, renamed };
+}
+
 // 建立 图书卷 → 番茄卷名 的映射（【按卷号】匹配，不靠顺序——番茄卷下拉是倒序且用中文数字）。
 // 预检番茄是否已有对应卷。返回 { ok, map:{图书vol:番茄卷名}, missing:[图书vol…], fanqieVolumes, single } 或 { ok:false, error }。
 async function buildVolumeMap(book, allChapters, pc, onLog) {
@@ -274,6 +330,7 @@ export function loadPublishChapters(book, { fromNum = 1 } = {}) {
 
 // 预览：番茄到第几章、本地到第几章、将发哪些（只读，不发）。
 export async function previewPublish(book, { onLog = () => {} } = {}) {
+  assertPlatform(book, 'fanqie');
   const pc = book.publish || {};
   if (!pc.profilePath) throw new Error('未配置番茄账号(Unzoo profilePath)');
   if (!pc.bookId) throw new Error('未配置番茄 bookId');
@@ -363,6 +420,7 @@ export async function republishRange(book, { from, to, limit = 0, onLog = () => 
 
 // 真发：把番茄还没有的新章发到番茄（按 per-book 配置：账号/书/卷开关/每日数/预约）。limit 可只发前 N 章（首测用）。
 export async function publishToFanqie(book, { limit = 0, confirmRewrites = false, onLog = () => {} } = {}) {
+  assertPlatform(book, 'fanqie');
   const pc = book.publish || {};
   if (!pc.profilePath) throw new Error('未配置番茄账号(Unzoo profilePath)');
   if (!pc.bookId) throw new Error('未配置番茄 bookId');
@@ -453,6 +511,10 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
         vm = await buildVolumeMap(book, all, pc, onLog);
         if (!vm.ok) { onLog({ level: 'error', msg: '⛔ 建卷后重读卷列表失败：' + vm.error }); return { ok: false, blocked: true, reason: vm.error, published: 0 }; }
       }
+      // 建卷补完之后，拿本地卷名跟番茄对一遍账（见 syncVolNamesFromLocal）。
+      // 放在这里而不是建卷之前：新建的卷本来就带着正确名字，要对的是番茄上原有的那些。
+      try { await syncVolNamesFromLocal(book, vm, pc, onLog); } catch (e) { onLog({ level: 'warn', msg: '卷名对账跳过：' + (e.message || e) }); }
+
       // ⚠️按章号顺序截断：发到【第一个番茄仍缺卷】的章之前为止。番茄章号全局连续、卷按序排，
       // 缺卷之后的章必须等该卷建好才能发（否则乱序/发错卷）；已有卷的章照常发，缺卷的章暂缓（不阻断）。
       let deferReason = '';
@@ -564,4 +626,111 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
     stopped: !!(newRes?.stopped || editRes?.stopped),
     error: newRes?.error || editRes?.error || null,
   };
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 起点发布编排
+//
+// 与番茄那条线同构：先确认线上到第几章，再只发线上没有的。
+// 上面番茄那条路踩过的两个坑，这里【必须同样防住】——它们不是番茄特有的，
+// 是"读线上章号"这件事本身固有的风险：
+//   🛡️高水位：线上读到的不可能比我们已发到的更少，读少了按记录兜底。
+//   🛡️零章阻断：发过的书却读到 0 章，一定是读取异常，绝不从第 1 章重发。
+// 另外起点是一章一提交（不像番茄有批量通道），所以逐章发、发一章记一章，
+// 中途失败也不会把已发的那些漏记成"没发"。
+// ══════════════════════════════════════════════════════════════════
+
+// 读线上章号 + 两道防重发闸。返回 { ok, onlineMax, blocked?, reason? }
+async function qidianOnlineMax(book, pc, onLog) {
+  const r = await getQidianMaxChapter({ profilePath: pc.profilePath, cbid: pc.bookId, onLog });
+  if (!r.ok) return { ok: false, blocked: true, reason: r.error || '起点页面无效' };
+  const read = Number.isFinite(Number(r.maxChapter)) ? Number(r.maxChapter) : 0;
+  const floor = pc.publishedMax || 0;
+  const onlineMax = Math.max(read, floor);
+  if (floor > read) {
+    onLog({ level: 'warn', msg: `⚠️ 起点实时只读到第 ${read} 章，记录显示已发到第 ${floor} 章——按第 ${floor} 章兜底，避免重复发布` });
+  }
+  if (onlineMax === 0 && (pc.lastPublishAt || 0) > 0) {
+    return { ok: false, blocked: true, reason: '该书之前发布过，这次却读到起点 0 章——疑似页面未加载完/读取异常，已中止以防从第1章重复发布，请重试' };
+  }
+  return { ok: true, onlineMax, read, floored: floor > read };
+}
+
+// 预览：起点到第几章、本地到第几章、将发哪些（只读，不发）
+export async function previewQidian(book, { onLog = () => {} } = {}) {
+  assertPlatform(book, 'qidian');
+  const pc = book.publish || {};
+  if (!pc.profilePath) throw new Error('未配置起点账号(Unzoo profilePath)');
+  if (!pc.bookId) throw new Error('未配置起点 CBID');
+  const m = await qidianOnlineMax(book, pc, onLog);
+  const all = loadPublishChapters(book);
+  const localMax = all.length ? all[all.length - 1].num : 0;
+  if (!m.ok) return { ok: false, blocked: true, reason: m.reason, onlineMax: null, localMax, newCount: 0 };
+  const newCh = all.filter(c => c.num > m.onlineMax);
+  return {
+    ok: true, platform: 'qidian',
+    onlineMax: m.onlineMax, onlineRead: m.read, floored: m.floored, localMax,
+    newCount: newCh.length,
+    from: newCh[0]?.num || null, to: newCh[newCh.length - 1]?.num || null,
+    titles: newCh.slice(0, 5).map(c => c.title),
+  };
+}
+
+// 真发：逐章发到起点。
+// draft=true 时只存草稿（可逆，用来验证整条链路）；默认 false = 真发布。
+export async function publishToQidian(book, { limit = 0, draft = false, onLog = () => {} } = {}) {
+  assertPlatform(book, 'qidian');
+  const pc = book.publish || {};
+  if (!pc.profilePath) throw new Error('未配置起点账号(Unzoo profilePath)');
+  if (!pc.bookId) throw new Error('未配置起点 CBID');
+
+  onLog({ level: 'act', msg: '读取起点当前最大章号…' });
+  const m = await qidianOnlineMax(book, pc, onLog);
+  if (!m.ok) {
+    onLog({ level: 'error', msg: '⛔ 已中止发布：' + m.reason });
+    return { ok: false, blocked: true, reason: m.reason, published: 0 };
+  }
+  onLog({ level: 'info', msg: `起点已发到第 ${m.onlineMax} 章` });
+
+  const all = loadPublishChapters(book);
+  let newCh = all.filter(c => c.num > m.onlineMax);
+  if (!newCh.length) {
+    onLog({ level: 'info', msg: '没有新章可发' });
+    return { ok: true, onlineMax: m.onlineMax, attempted: 0, published: 0 };
+  }
+  if (limit > 0) newCh = newCh.slice(0, limit);
+  onLog({ level: 'info', msg: `将${draft ? '存草稿' : '发布'} ${newCh.length} 章：第 ${newCh[0].num}–${newCh[newCh.length - 1].num} 章` });
+
+  const interval = Math.max(0, Number(pc.intervalSeconds) || 3) * 1000;
+  let published = 0, lastChapter = null, error = null;
+  for (const c of newCh) {
+    try {
+      const r = await publishChapterToQidian({
+        profilePath: pc.profilePath, cbid: pc.bookId,
+        title: c.title, content: c.content,
+        mode: draft ? 'draft' : 'publish', confirm: true, onLog,
+      });
+      if (!r.ok) { error = `第 ${c.num} 章${draft ? '存草稿' : '发布'}结果不确定`; break; }
+      published++; lastChapter = { num: c.num, title: c.title };
+      // 发一章记一章：中途失败也不会把已发的漏记成"没发"，下次续发才不会重复。
+      // 草稿不记账——它还没上线，记了会让下次预览误以为线上已有这章。
+      if (!draft) {
+        try {
+          const patch = { lastPublishAt: Date.now(), publishedMax: c.num };
+          setBookPublish(book.slug, patch);
+          const hs = loadPublishedHashes(book);
+          if (c.hash) hs[String(c.num)] = c.hash;
+          savePublishedHashes(book, hs);
+        } catch {}
+      }
+    } catch (e) {
+      error = `第 ${c.num} 章失败：${String(e?.message || e)}`;
+      onLog({ level: 'error', msg: error });
+      break;
+    }
+    if (interval) await new Promise(r => setTimeout(r, interval));
+  }
+  onLog({ level: published === newCh.length ? 'info' : 'warn',
+    msg: `${draft ? '存草稿' : '发布'}完成：${published}/${newCh.length} 章` });
+  return { ok: !error, onlineMax: m.onlineMax, attempted: newCh.length, published, lastChapter, draft, error };
 }

@@ -9,6 +9,7 @@ import { getStyle } from './styles.mjs';
 import { resolveRomance, DEFAULT_ROMANCE } from './romance.mjs';
 import { isValidCategory } from './categories.mjs';
 import { READ_TAGS, CONTENT_TAGS, TAG_LIMITS } from './fanqietags.mjs';
+import { canSwitchPlatform } from './platform.mjs';
 
 // 删除一本书：停会话、删 profile、移出书架；可选连磁盘文件夹一起删（危险）
 export function deleteBook(slugOrId, { deleteFiles = false } = {}) {
@@ -211,7 +212,9 @@ export function suggestRenamePairs(oldName, newName) {
 function renameTargetRels(dir) {
   const rels = ['novel_bible.md', 'chapter_index.md', 'continuity_ledger.md', '简介.txt'];
   try { for (const x of fs.readdirSync(path.join(dir, 'outlines'))) if (x.endsWith('.md')) rels.push(path.join('outlines', x)); } catch {}
-  (function walk(d) { try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.txt$/i.test(e.name)) rels.push(path.relative(dir, p)); } } catch {} })(path.join(dir, 'chapters'));
+    // 与 checkup.mjs 同一条约定：点号/下划线开头的目录与文件是备份、废稿，不参与改名也不算章节。
+  const skip = (n) => n.startsWith('.') || n.startsWith('_');
+  (function walk(d) { try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (skip(e.name)) continue; const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.txt$/i.test(e.name)) rels.push(path.relative(dir, p)); } } catch {} })(path.join(dir, 'chapters'));
   return rels;
 }
 
@@ -245,6 +248,12 @@ export function applyRenamePairs(slugOrId, pairs, dry = false) {
 export function setBookPublish(slugOrId, patch) {
   const b = getBook(slugOrId);
   if (!b) throw new Error('找不到书：' + slugOrId);
+  // 一本书只能发一个平台。已经往某平台发过章的，不许在这里悄悄改绑到另一个平台
+  // ——那等于一稿两投，两边的独家条款和重复内容检测会同时命中。详见 platform.mjs。
+  if (patch && patch.platform) {
+    const v = canSwitchPlatform(b, patch.platform);
+    if (!v.ok) throw new Error(v.reason);
+  }
   b.publish = { ...(b.publish || {}), ...(patch || {}) };
   upsertBook(b);
   return b;
