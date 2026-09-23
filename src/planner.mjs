@@ -153,7 +153,10 @@ function applyProxy(env, on) {
   return env;
 }
 // 这次失败像不像"网络/地区"这一类（值得翻过来再试一次）
-const NET_FAIL_RE = /User location is not supported|FAILED_PRECONDITION|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)|eligibility check failed|userinfo": EOF|Request not allowed|403/i;
+// ⚠️ 各家 CLI 报同一件事的写法都不一样，别只写一种：
+//   claude 报 `API Error: Unable to connect to API (ConnectionRefused)`——【没有下划线】，
+//   2026-09-20 就因为正则里只有 ECONNREFUSED，这条漏了、翻转重试没被触发，整批零产出。
+const NET_FAIL_RE = /User location is not supported|FAILED_PRECONDITION|ENOTFOUND|ECONNREFUSED|ConnectionRefused|Unable to connect|Connection (refused|reset|timed out)|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)|eligibility check failed|userinfo": EOF|Request not allowed|403/i;
 export function looksNetworkFailure(out) { return NET_FAIL_RE.test(String(out || '')); }
 
 // 一次性调用某个 CLI 时，参数怎么摆、prompt 从哪进、要不要过 shell。抽成纯函数只为可测——

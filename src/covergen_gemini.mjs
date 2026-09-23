@@ -81,7 +81,19 @@ async function sendPrompt(client, prompt, log) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try { await client.click(EDITOR); } catch {}
     await sleep(400);
-    await client.trustedType(EDITOR, prompt, { delayMs: 22, clearFirst: true });
+    // ⚠️【trustedType 抛错也不能中断】2026-09-21 实测：Unzoo 的 browser_type 打完字会做一次
+    // 状态校验，而 Gemini 的 Quill 富文本框不更新它检查的那个属性，于是回 not_verified 并抛异常——
+    // 可字【其实已经进去了】（现场证据：typed_len=253、dom_changed=true、page_feedback=changed）。
+    // 原来这行没包 try，一抛错整个封面流程就断在这儿，下面那道真正的判据（waitTypingSettled
+    // 读框里实际字数）根本没机会跑。所以这里只记一笔，把判断权交给下一步。
+    try {
+      await client.trustedType(EDITOR, prompt, { delayMs: 22, clearFirst: true });
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      // 真正的硬失败（框找不到/页面没开）还是要抛；只放过"打了但没验证到"这一类。
+      if (!/not_verified|verify|未观察到/i.test(msg)) throw e;
+      log && log('输入框状态校验没通过（Gemini 富文本框的老毛病），改以框里实际字数为准…', 'warn');
+    }
     // ⚠️【trustedType 返回 ≠ 字打完了】——它是一个字一个字敲的（delayMs=22），
     // 封面提示词有两三百字，敲完要五六秒，而调用早就返回了。
     // 第一版只等 1.2 秒就去点发送：发出去的是【半截提示词】，紧接着剩下的字继续往框里落，

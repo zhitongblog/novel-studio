@@ -9,6 +9,7 @@ import path from 'node:path';
 import { UnzooClient } from './fanqie.mjs';
 import { createBook, getBook, setBookPublish } from './books.mjs';
 import { loadConfig } from './config.mjs';
+import { writeVolNameToBible } from './volname.mjs';
 
 const API = 'https://fanqienovel.com/api/author';
 const COMMON = 'aid=2503&app_name=muye_novel';
@@ -78,6 +79,18 @@ function volNumOf(volumeName, fallback) {
   const m = String(volumeName || '').match(/第\s*([0-9一二三四五六七八九十两]+)\s*卷/);
   if (m) { const n = cnToNum(m[1]); if (!isNaN(n)) return n; }
   return fallback;
+}
+// 番茄卷名里的【副标题】："第一卷：靖康之耻，雪夜狂刀" → "靖康之耻，雪夜狂刀"。
+// 卷名是番茄上现成的，导进来就该留下——否则本地七卷全无名，建卷/改卷名那一步又要卡住。
+// 只剩序号的（"第一卷"/"卷01"）没有副标题可留，返回 ''。
+export function volSubOf(volumeName) {
+  const t = String(volumeName || '')
+    .replace(/^第\s*[0-9一二三四五六七八九十两]+\s*卷/, '')
+    .replace(/^卷\s*\d+/, '')
+    .replace(/^[\s：:、．.\-_—]+/, '')
+    .replace(/[《》「」""]/g, '')
+    .trim();
+  return t.slice(0, 40);
 }
 function chapterNumOf(title, fallback) {
   const m = String(title || '').match(/第\s*(\d+)\s*章/);
@@ -192,6 +205,18 @@ export async function importFromFanqie({ profilePath, bookId, title, model, onLo
     ...indexRows.map(r => `| ${String(r.num).padStart(3, '0')} | ${r.name} | ${r.vol} | chapters/${r.vol}/${r.file} | 已写 |`),
   ].join('\n');
   try { fs.writeFileSync(path.join(book.dir, 'chapter_index.md'), idx + '\n', 'utf8'); } catch {}
+
+  // 卷名落盘 → 番茄上叫什么，本地就叫什么（写进 bible 卷名清单，与 bibleVolSubtitle 读法一致）
+  // 只登记真落了章的卷：limit 截断时后面的卷是空的，给空卷起名等于凭空造一个卷。
+  const gotVols = new Set(indexRows.map(r => parseInt(String(r.vol).replace(/^卷/, ''), 10)).filter(n => n >= 1));
+  const named = [];
+  for (const vol of plan) {
+    if (!gotVols.has(vol.volNum)) continue;
+    const sub = volSubOf(vol.volName);
+    if (!sub) continue;
+    try { writeVolNameToBible(book, vol.volNum, sub); named.push(`卷${String(vol.volNum).padStart(2, '0')}《${sub}》`); } catch {}
+  }
+  if (named.length) log('info', `卷名已随书导入：${named.join('、')}`);
 
   // 配好番茄发布配置 → 完结收口/完本感言可直接用
   try { setBookPublish(book.slug, { profilePath, bookId, bookName: book.title }); } catch {}

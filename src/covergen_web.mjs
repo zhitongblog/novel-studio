@@ -61,7 +61,16 @@ async function sendPrompt(client, prompt, log) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try { await client.click(SEL); } catch {}
     await sleep(400);
-    await client.trustedType(SEL, prompt, { delayMs: 28, clearFirst: true });
+    // ⚠️ 与 covergen_gemini 同一个坑：contenteditable 富文本框打完字后，
+    // Unzoo 的 browser_type 校验不到它检查的那个属性，回 not_verified 并抛异常——
+    // 但字其实已经进去了。这一行原来没包 try，一抛错整个流程就断在这儿，
+    // 下面"等发送键可用 + 校验是否真提交"那两道真判据根本没机会跑。
+    try {
+      await client.trustedType(SEL, prompt, { delayMs: 28, clearFirst: true });
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      if (!/not_verified|verify|未观察到/i.test(msg)) throw e;   // 硬失败仍要抛
+    }
     await sleep(700);
     // 等发送按钮出现且可用（有文字后才渲染）
     for (let i = 0; i < 12; i++) {

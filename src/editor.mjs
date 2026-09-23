@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { getModel, detectAll , resolveBin , canRunHeadless } from './models.mjs';
-import { planCliInvocation } from './planner.mjs';
+import { planCliInvocation, looksNetworkFailure, getNetMode, rememberNetMode } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { orderByHealth, noteReviewerOk, noteReviewerFail, classifyFail } from './reviewerhealth.mjs';
 
@@ -90,15 +90,34 @@ export function reviewerCandidates(authorModel, cfg) {
 }
 
 // 非交互跑一次模型（异步 spawn，不阻塞事件循环 —— 与 planner 的同步版区分）。
-export function runModelOnceAsync(model, prompt, cfg, timeoutMs = 180000) {
+const PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
+
+// 这一次该不该挂代理、失败了能不能翻过来再试。抽成纯函数只为可测（与 planCliInvocation 同一个理由）。
+//   remembered：上次真正成功过的模式（'proxy' | 'direct' | null），来自 planner 的 netmode 账本
+// 【为什么不跟着 cfg.enableProxy 一条道走到黑】2026-09-20 实测：
+//   这台机器直连出口在洛杉矶（agy 正常），而 cfg 里的 7897 代理出口在新加坡，
+//   Google 直接回 FAILED_PRECONDITION: User location is not supported。
+//   planner.runModelOnce 早有"失败就把代理翻过来再试一次"的协商，editor 这条路却没接上——
+//   于是大纲重建/审稿/卷名生成（全走 editor）遇到这种情况就是零产出，而同一台机器上 planner 那条路能跑通。
+export function planNetMode(model, cfg, remembered = null) {
+  const forcedDirect = Array.isArray(cfg?.noProxyModels) && cfg.noProxyModels.includes(model);
+  if (forcedDirect) return { proxyOn: false, mayFlip: false };
+  const proxyOn = remembered === 'proxy' ? true
+    : remembered === 'direct' ? false
+    : !!cfg?.enableProxy;
+  return { proxyOn, mayFlip: true };
+}
+
+function spawnModelOnce(model, prompt, timeoutMs, proxyOn) {
   return new Promise((resolve, reject) => {
     const m = getModel(model);
     if (!m) return reject(new Error('未知模型：' + model));
     const env = { ...process.env };
-    if (cfg?.enableProxy) {
-      const px = proxyUrl();
-      if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; }
-    }
+    const px = proxyOn ? proxyUrl() : '';
+    // 关代理时必须【显式删掉】这几个变量：进程环境里可能本来就有系统级代理，
+    // 只是"不设置"等于继续走它，那一轮翻转就白翻了。
+    if (px) for (const k of PROXY_ENV_KEYS) env[k] = px;
+    else for (const k of PROXY_ENV_KEYS) delete env[k];
     // 参数怎么摆、prompt 从哪进、要不要过 shell —— 统一走 planner 里那个纯函数，
     // 别在这儿再抄一份。抄一份的代价已经付过了：这里原来是裸 ['-p']，claude 无头跑起来
     // 一遇到要用工具就被自动拒绝（「headless mode cannot prompt」），一个字都不产出。
@@ -114,6 +133,21 @@ export function runModelOnceAsync(model, prompt, cfg, timeoutMs = 180000) {
     if (viaStdin) { try { cp.stdin.write(prompt); cp.stdin.end(); } catch (e) { clearTimeout(to); reject(e); } }
     else { try { cp.stdin.end(); } catch {} }
   });
+}
+
+export async function runModelOnceAsync(model, prompt, cfg, timeoutMs = 180000) {
+  const { proxyOn, mayFlip } = planNetMode(model, cfg, getNetMode(model));
+  const out = await spawnModelOnce(model, prompt, timeoutMs, proxyOn);
+  if (!looksNetworkFailure(out)) {
+    rememberNetMode(model, proxyOn ? 'proxy' : 'direct');   // 记住这次成功的模式，下次先用它
+    return out;
+  }
+  if (!mayFlip) return out;
+  // 像网络/地区问题 → 把代理翻过来再试一次（别靠猜，也别写死：哪种配置能用本来就会变）
+  const flipped = !proxyOn;
+  const out2 = await spawnModelOnce(model, prompt, timeoutMs, flipped);
+  if (!looksNetworkFailure(out2)) { rememberNetMode(model, flipped ? 'proxy' : 'direct'); return out2; }
+  return out2;   // 两种都不行 → 报后一次（更接近当前网络的真相）
 }
 
 // 找出该 scope 要审的大纲文件：立项/全书=全部；卷NN=该卷的分章大纲。

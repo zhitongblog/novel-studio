@@ -55,12 +55,15 @@ const unzooCallTool = (tool, args = {}, timeoutMs = UNZOO_TIMEOUT_MS) => mcpCall
 class UnzooClient {
   // siteHost：锁定标签页用的站点域（默认番茄）。网页版写作会传入 qianwen.com/chatgpt.com 等，
   // 让同一套 getActiveTab 逻辑改为锁定该聊天站点的标签页。siteLabel 仅用于日志文案。
-  constructor(profilePath = null, onLog = null, siteHost = '', siteLabel = '') {
+  // siteUrl：该站点的【后台首页】。账号窗口一个标签页都没有时，直接开这个地址把窗口拉起来
+  // ——见 openSiteTab。不传就退回 https://{siteHost}/。
+  constructor(profilePath = null, onLog = null, siteHost = '', siteLabel = '', siteUrl = '') {
     this.tabId = null;
     this.selectedProfilePath = profilePath || null;
     this.onLog = onLog || (() => {});
     this.siteHost = siteHost || 'fanqienovel.com';
     this.siteLabel = siteLabel || '番茄';
+    this.siteUrl = siteUrl || (siteHost ? `https://${siteHost}/` : 'https://fanqienovel.com/main/writer/book-manage');
   }
 
   // 原前端的全局 addLog(msg, level) → 实例 log（转发到 onLog）
@@ -90,6 +93,53 @@ class UnzooClient {
       this.addLog(ok ? '✅ 已启动该账号浏览器窗口' : ('⚠️ 启动 profile 返回异常：' + JSON.stringify(r).slice(0, 120)), ok ? 'info' : 'error');
       return ok;
     } catch (e) { this.addLog('启动 profile 失败：' + (e.message || e), 'error'); return false; }
+  }
+
+  // 账号窗口一个标签页都没有时的兜底：【直接开该站点的后台地址】。
+  //
+  // 由来（2026-09-23 作者提）：选书籍那一步，番茄没开着就只剩 profile_launch 一条路，
+  // 而 profile_launch 偶发 "failed to load profile" —— 一失败整条链就断在
+  // 「请手动打开该账号浏览器」，作者得自己去开窗口、自己敲网址。
+  // tab_create 能直接在指定 profile 下开一个标签页并导航，比先拉窗口再找页可靠得多。
+  //
+  // ⚠️ 安全同 recoverTab：建完【必须验证它落在选中账号下】，落错了立刻关掉并失败。
+  // 宁可这一步失败，也绝不拿别的账号的标签页顶上去（发错号是不可逆的）。
+  async openSiteTab() {
+    if (!this.selectedProfilePath) return false;
+    try {
+      // profile_id 用的是 profile 的【名字】而不是路径，且名字与路径不是简单规则
+      //（"工作" 对应的目录是 Default），所以查表按路径末段匹配，别去猜。
+      const want = String(this.selectedProfilePath).split(/[\/]/).filter(Boolean).pop().toLowerCase();
+      const pl = await unzooCallTool('profile_list', {});
+      const rows = pl?.profiles || (Array.isArray(pl) ? pl : []);
+      const row = rows.find(x => String(x.path || x.profile_path || '').split(/[\/]/).filter(Boolean).pop().toLowerCase() === want);
+      const pid = row?.name || row?.id;
+      if (!pid) { this.addLog(`⚠️ profile 列表里找不到该账号（${want}），无法自动开${this.siteLabel}后台`, 'error'); return false; }
+
+      this.addLog(`${this.siteLabel}没有开着 → 直接打开后台：${this.siteUrl}`, 'act');
+      const created = await unzooCallTool('tab_create', { profile_id: pid, url: this.siteUrl });
+      const id = created?.tab_id ?? created?.id;
+      if (!id) { this.addLog('⚠️ tab_create 没返回 tab_id', 'error'); return false; }
+
+      // 验证落点：必须在选中账号下，否则关掉
+      await this.sleep(1200);
+      const norm = (x) => String(x || '').replace(/[\/]+$/, '').toLowerCase();
+      const list = await unzooCallTool('tab_list', {}).catch(() => null);
+      const t = (list?.tabs || []).find(x => String(x.tab_id) === String(id));
+      const same = t && (norm(t.profile_path) === norm(this.selectedProfilePath)
+        || String(t.profile_path || '').split(/[\/]/).filter(Boolean).pop().toLowerCase() === want);
+      if (!same) {
+        try { await unzooCallTool('tab_close', { tab_id: id }); } catch {}
+        this.addLog('⚠️ 新开的标签页落到了别的账号下，已关掉并中止（绝不发错号）', 'error');
+        return false;
+      }
+      this.tabId = String(id);
+      this.addLog(`✅ 已打开${this.siteLabel}后台`, 'info');
+      return true;
+    } catch (e) {
+      this.addLog(`直接打开${this.siteLabel}后台失败：` + (e.message || e), 'error');
+      return false;
+    }
   }
 
   async getActiveTab() {
@@ -129,9 +179,19 @@ class UnzooClient {
           }
         }
       }
+      // profile_launch 这条路偶发 "failed to load profile"，一失败整条链就断在
+      // 「请手动打开浏览器」。再兜一层：【直接开该站点后台地址】——tab_create 能指定 profile，
+      // 比先拉窗口再等它自己出页可靠。
+      if (union.size === 0 && await this.openSiteTab()) {
+        for (let attempt = 0; attempt < 10 && union.size === 0; attempt++) {
+          await this.sleep(1200);
+          data = await unzooCallTool('tab_list', {}); tabs = data?.tabs || [];
+          for (const [k, v] of collect()) union.set(k, v);
+        }
+      }
       let inProfile = [...union.values()];
       if (inProfile.length === 0) {
-        this.addLog(`⚠️ 启动后仍未读到该账号标签页（Unzoo 异常），请手动打开该账号浏览器并登录${this.siteLabel}后重试`, 'error');
+        this.addLog(`⚠️ 仍未读到该账号标签页（Unzoo 异常），请手动打开该账号浏览器并登录${this.siteLabel}后重试`, 'error');
         return null;
       }
 
