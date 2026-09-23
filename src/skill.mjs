@@ -6,10 +6,40 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { styleVoice } from './styles.mjs';
 import { romanceVoice, ROMANCE_REDLINE } from './romance.mjs';
+import { ORAL_MARKER_SETS } from './chapgate.mjs';
 
 export const SKILL_NAME = 'longform-webnovel-writer';
 
 // 写作标准正文（源自 ~/.codex/skills/longform-webnovel-writer/SKILL.md，精炼为可直接执行的项目规范）
+// 读书目录下 gate.json 的 oralSet，渲出「① 词换成口语」那一段。
+// 缺省（北方官话）时原样返回旧文案——它的每一句都被 register-standard 测试钉着。
+const NORTH_SECTION = [
+  '**① 词换成口语。** 目标 **每千字 20 个以上口语标记**。北方官话一路的：',
+  '上头、里头、后头、外头、自个儿、俩、仨、打哪天、末了、家什、囫囵、出溜、杵着、瞧、搁、',
+  '头一个、一溜、没准、味儿、这地方、就算完、不作数、啥、咋、那就是说、跟……似的、挺久/挺好。',
+  '　　· 「意味着府里已经把这个人当成死人了」→「那就是说府里头已经把这人当死的算了」',
+  '　　· 「她整个人往下淌，像一袋没扎紧的米」→「她整个人往下出溜，跟一口袋没扎紧的米似的」',
+  '　　· 「按今天的标准」→「搁今天的标准」；「最后」→「末了」；「两个儿媳」→「俩儿媳妇」',
+  '　　⚠️ **换书换背景时连这张词表一起换。** 吴语、川渝、岭南背景的书堆北方词，是另一种假。',
+].join(String.fromCharCode(10));
+
+export function oralSectionFor(book) {
+  let conf = {};
+  try { conf = JSON.parse(fs.readFileSync(path.join(book && book.dir || '', 'gate.json'), 'utf8')); } catch { conf = {}; }
+  const set = ORAL_MARKER_SETS[conf.oralSet];
+  if (!set || !set.display) return NORTH_SECTION;
+  const NL = String.fromCharCode(10);
+  return [
+    `**① 词换成口语。** 目标 **每千字 ${set.minPerK} 个以上口语标记**。${conf.oralSet}一路的：`,
+    set.display,
+    ...set.examples.map(x => '　　· ' + x),
+    `　　⚠️ **这张表是按本书背景（${conf.oralSet}）换过的**，别往里掺别的方言——`
+      + '把现代北方口语塞进古人嘴里，是另一种假。',
+    set.calibrated ? '' : `　　⚠️ 这一档的 ${set.minPerK}/千字【未经朱雀标定】，是暂定值：往口语走的方向是对的，`
+      + '但不必为了凑数把词硬塞进去——凑出来的口语比书面腔更假。',
+  ].filter(Boolean).join(NL);
+}
+
 export function skillBody(book) {
   const b = book || {};
   const std = b.standards || {};
@@ -18,6 +48,10 @@ export function skillBody(book) {
   const tgtLo = std.targetCharsLo || 3000;
   const tgtHi = std.targetCharsHi || 3600;
   const sv = styleVoice(b.style || std.style);
+  // 口语词表按书的背景走，跟审校闸读的是【同一张表】（gate.json 的 oralSet）。
+  // 为什么必须同源：2026-09-23 给三国书换了闸的表，模板却还在教"自个儿/啥/咋"——
+  // 那等于一边判它书面腔，一边让它往汉末对白里塞豫北方言，两头都错。
+  const oralSection = oralSectionFor(b);
   // 这本书有没有挂范本，决定文风那一节怎么写（范本优先，形容词降级为补充）
   let hasRefs = false;
   try { hasRefs = b.dir ? fs.readdirSync(path.join(b.dir, 'style_refs')).some(f => /\.(txt|md)$/i.test(f)) : false; } catch { hasRefs = false; }
@@ -223,13 +257,7 @@ ${hasRefs ? `## 文风与反 AI 味（最高优先级，逐章自检）
 
 ### 怎么做（三件事，缺一不可）
 
-**① 词换成口语。** 目标 **每千字 20 个以上口语标记**。北方官话一路的：
-上头、里头、后头、外头、自个儿、俩、仨、打哪天、末了、家什、囫囵、出溜、杵着、瞧、搁、
-头一个、一溜、没准、味儿、这地方、就算完、不作数、啥、咋、那就是说、跟……似的、挺久/挺好。
-　　· 「意味着府里已经把这个人当成死人了」→「那就是说府里头已经把这人当死的算了」
-　　· 「她整个人往下淌，像一袋没扎紧的米」→「她整个人往下出溜，跟一口袋没扎紧的米似的」
-　　· 「按今天的标准」→「搁今天的标准」；「最后」→「末了」；「两个儿媳」→「俩儿媳妇」
-　　⚠️ **换书换背景时连这张词表一起换。** 吴语、川渝、岭南背景的书堆北方词，是另一种假。
+${oralSection}
 
 **② 句子放短，但【必须留长句】。** 均句长压到 22 字以内（原版 25.9 就是书面腔的另一半病根），
 　　**同时 25 字以上的长句要占到两成**。

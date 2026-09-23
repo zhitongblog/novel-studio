@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 
 const src = fs.readFileSync(new URL('../src/skill.mjs', import.meta.url), 'utf8');
 
@@ -52,7 +53,26 @@ test('「这不是写差一点去骗检测器」的定性要留着', () => {
 });
 
 test('代码闸与模板说的是同一组阈值', async () => {
+  // 钉运行时的值，不钉源码文本——阈值搬过一次家（挪进 ORAL_MARKER_SETS）时，
+  // 钉文本的写法会在重构里红掉，而它本来想守的东西其实没变。
+  const { ORAL_MARKER_SETS, scanRegister } = await import('../src/chapgate.mjs');
+  assert.equal(ORAL_MARKER_SETS['北方官话'].minPerK, 20, '口语阈值应是 20，与模板一致');
+  assert.equal(ORAL_MARKER_SETS['北方官话'].hardFloor, 5, '硬伤线应是 5，与模板一致');
+  assert.equal(scanRegister('甲').meanSent !== undefined, true);
   const gate = fs.readFileSync(new URL('../src/chapgate.mjs', import.meta.url), 'utf8');
-  assert.match(gate, /minPerK = 20/, 'scanRegister 的口语阈值应是 20，与模板一致');
   assert.match(gate, /maxMeanSent = 22/, 'scanRegister 的句长阈值应是 22，与模板一致');
+});
+
+test('换了口语表的书，模板里的词表也跟着换——闸和模型不许各说各话', async () => {
+  const os = await import('node:os');
+  const { oralSectionFor } = await import('../src/skill.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oral-'));
+  // 没有 gate.json → 仍是北方官话那一段
+  assert.match(oralSectionFor({ dir }), /自个儿/);
+  fs.writeFileSync(path.join(dir, 'gate.json'), JSON.stringify({ oralSet: '汉末三国' }), 'utf8');
+  const sg = oralSectionFor({ dir });
+  assert.match(sg, /甚么/, '三国书要教三国的词');
+  assert.ok(!/自个儿/.test(sg), '三国书的模板里不许再出现豫北词');
+  assert.match(sg, /未经朱雀标定/, '没标定的阈值要在模板里也说清楚');
+  fs.rmSync(dir, { recursive: true, force: true });
 });

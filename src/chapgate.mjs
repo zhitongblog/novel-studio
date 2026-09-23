@@ -293,7 +293,7 @@ export function namesFromLedger(ledgerText) {
 // 他没说」——没有情节功能，却让人物立起来了（他知道娘辛苦，所以不说）。
 // 我们之前那个"每一句都在做功"的精准文学腔，既是 AI 指纹，也是番茄读者的门槛。
 
-// 北方官话口语/语气标记。本书背景是相州汤阴（豫北，近河北），用这一路的词。
+// 北方官话口语/语气标记。岳飞那本背景是相州汤阴（豫北，近河北），用这一路的词。
 // 换书换背景时【连这张表一起换】——吴语背景的书堆北方词，是另一种假。
 export const ORAL_MARKERS = [
   '上头', '里头', '后头', '外头', '自个儿', '俩', '仨', '打哪', '末了', '家什',
@@ -302,12 +302,94 @@ export const ORAL_MARKERS = [
   '跟[^，。！？]{1,8}似的', '[^一-鿿]呢。', '了吧',
 ];
 
-export function scanRegister(text, { minPerK = 20, maxMeanSent = 22 } = {}) {
+// 汉末三国口语标记（半文半白）。
+//
+// 【为什么非得另起一张表】2026-09-23 拿上面那张豫北表去量《重生三国，我吕布杀出一片天》，
+// 113 章全判"整章书面腔"，63 章是 0/千字。数值没错，可结论没法用：
+// 汉末的人不说"自个儿""啥""咋"，往三国书里堆这些词是另一种假，不是修好。
+//
+// 【表是怎么定的】拿 37 万字全书去探底，结果比任何理论都直白——
+// 半文半白的口语骨架【整根缺失】：甚么 / 怎地 / 怎的 / 晓得 / 省得 / 寻思 / 也罢 /
+// 这厮 这八个词，全书 0 次。用到的只有咱们(42) 某家(39) 后头(46)，各自 0.1/千字。
+// 所以这张表收的就是这一路词：演义、水浒那种「人物嘴里说得出口」的白话，
+// 而不是「尔等」「岂敢」这种写在奏章上的文言——后者这本书满篇都是，它正是病灶。
+//
+// 【避坑】单字词一律不收或加约束，否则书面词会被算成口语：
+//   便（便宜从事）、且（况且）、某（某种）、罢（罢免）、休（休整）、莫（莫名）、
+//   厮（厮杀，三国书里满篇都是）、搁（搁置）、鸟（真的鸟）。
+//
+// 【下面每一条带 (?<!…) 的，都是拿 37 万字全书验出来的误伤，删约束前先看例句】
+//   一发   → 千钧「一发」，全是它，直接踢掉
+//   端的   → 「粥是我叫端的」「好端端的」
+//   似的   → 「相似的地方」
+//   他娘的 → 「缩在娘的怀里」「拖他娘的兵」——是母亲不是骂人
+//   攥     → 38 次全是旁白「攥紧」。一个词占掉总量三分之一，而旁白动词恰恰是
+//            这道闸【不该给分】的东西：它量的是人物嘴里的口语，不是叙述腔。踢掉。
+//   咱/咱们 → 不加约束会重复计数（「咱们」被数两次）
+export const ORAL_MARKERS_SANGUO = [
+  // 自称与称谓——口语的那一路
+  '俺', '咱们', '咱(?!们)', '某家', '老子', '这厮', '那厮', '竖子', '匹夫', '鼠辈', '黄口小儿',
+  // 疑问与语气
+  '甚么', '作甚', '做甚', '是甚', '怎地', '怎的', '怎生', '难不成', '莫不是',
+  '也罢', '罢了', '便罢', '就是了', '便是了', '不成[？?！!]', '(?<![什怎那这甚])么[？?]',
+  // 否定与劝止
+  '莫要', '休要', '休得', '不济', '不中用', '不打紧', '犯不着', '用不着', '值当', '省得', '免得',
+  // 白话副词
+  '索性', '偏生', '平白', '委实', '(?<![叫端])端的', '兀自', '好生', '生怕', '眼下', '只顾', '横竖', '当真',
+  // 方位与杂词（跨时代通用口语）
+  '里头', '外头', '上头', '后头', '底下', '没准', '末了', '打哪', '一溜', '这地方',
+  // 动词口语
+  '晓得', '寻思', '打量', '瞧', '瞅', '拾掇', '撒手', '拎',
+  // 感叹与军中粗口
+  '呸', '他娘的(?![兵卒军民怀手身])', '直娘贼', '撮鸟', '鸟人',
+  // 结构与句尾
+  '跟[^，。！？]{1,8}似的', '(?<![相类近])似的', '[^作了休罢]罢[。！]',
+];
+
+// 口语表按书背景切换。gate.json 里写 `"oralSet": "汉末三国"`，
+// 或者直接写 `"oralMarkers": ["…"]` 自带一张表（自带的优先）。
+//
+// ⚠️【两组阈值的分量不一样，别混着读】
+// 「北方官话」那组的 5 / 20 是 2026-09-23 拿四个样本去腾讯朱雀实测标定出来的（见上面那张表）。
+// 「汉末三国」这组【没有实测数据】——这个题材的口语密度上限本来就低于现代白话，
+// 硬套 20/千字 是逼着书往假里写。这里的 3 / 12 是暂定值，唯一依据是全书探底的分布，
+// 【用它下结论之前，请先拿两三章去朱雀跑一次再把数定死】。跑之前它只配当相对指标：
+// 比的是"这一章比全书中位数差多少"，不是"够不够 12"。
+//
+// display / examples 是【给写作模板用的】：src/skill.mjs 把它们渲进 AGENTS.md/CLAUDE.md，
+// 也就是 agy/codex/claude 真正读到的规范。放在这里是为了不让两边漂开——
+// 闸换了表而模型没换，这本书只会被一直判红而永远改不动。
+export const ORAL_MARKER_SETS = {
+  '北方官话': {
+    markers: ORAL_MARKERS, hardFloor: 5, minPerK: 20, calibrated: '2026-09-23 朱雀四样本',
+    display: '', examples: [],   // 空 = 用模板里原有那一段（豫北是默认，措辞已被 register-standard 测试钉死）
+  },
+  '汉末三国': {
+    markers: ORAL_MARKERS_SANGUO, hardFloor: 3, minPerK: 12, calibrated: false,
+    display: '俺、咱们、某家、这厮、那厮、竖子、匹夫、甚么、作甚、怎地、怎的、怎生、难不成、'
+      + '也罢、罢了、就是了、莫要、休要、不济、不打紧、犯不着、省得、免得、索性、偏生、委实、'
+      + '兀自、好生、眼下、只顾、横竖、当真、里头、外头、后头、底下、没准、末了、晓得、寻思、'
+      + '打量、瞧、瞅、拾掇、撒手、拎、呸、……么？、不成？',
+    examples: [
+      '「你可知罪？」→「你晓得自己犯了甚么事么？」',
+      '「此人不足为惧。」→「这厮不济事，怕他作甚。」',
+      '「我并未见过他。」→「某家压根没见过这人。」',
+      '「不必多言，依计行事。」→「莫要多说，照着办就是了。」',
+    ],
+  },
+};
+export const DEFAULT_ORAL_SET = '北方官话';
+
+export function scanRegister(text, { minPerK, maxMeanSent = 22, hardFloor, markers, oralSet } = {}) {
   const t = String(text || '');
+  const set = ORAL_MARKER_SETS[oralSet] || ORAL_MARKER_SETS[DEFAULT_ORAL_SET];
+  const table = markers && markers.length ? markers : set.markers;
+  const floor = hardFloor ?? set.hardFloor;
+  const pass = minPerK ?? set.minPerK;
   const chars = (t.match(/[一-鿿]/g) || []).length || 1;
   let hits = 0;
   const found = [];
-  for (const w of ORAL_MARKERS) {
+  for (const w of table) {
     const m = t.match(new RegExp(w, 'g'));
     if (m) { hits += m.length; found.push(w.replace(/\[\^[^\]]+\][^ ]*/, '…') + '×' + m.length); }
   }
@@ -315,18 +397,21 @@ export function scanRegister(text, { minPerK = 20, maxMeanSent = 22 } = {}) {
   const sents = t.split(/[。！？…\n]+/).map(x => x.trim()).filter(Boolean);
   const meanSent = sents.length ? +(sents.reduce((a, b) => a + b.length, 0) / sents.length).toFixed(1) : 0;
   const problems = [];
-  // 低于 5/千字的，实测人类率一律是 0——这条是硬伤，不是提醒
-  if (perK < 5) problems.push(`口语标记只有 ${perK}/千字（实测低于 5 的样本人类率一律为 0，整章是书面腔）`);
-  else if (perK < minPerK) problems.push(`口语标记 ${perK}/千字，低于 ${minPerK}（只换词那版 19.3 也才拿到"弱人类创作"）`);
+  // 未标定的表不许把话说得像实测过一样——报出来的口气也要跟着降级
+  const why = set.calibrated
+    ? `实测低于 ${floor} 的样本人类率一律为 0，整章是书面腔`
+    : `低于暂定值 ${floor}；${oralSet || DEFAULT_ORAL_SET}表未经朱雀标定`;
+  if (perK < floor) problems.push(`口语标记只有 ${perK}/千字（${why}）`);
+  else if (perK < pass) problems.push(`口语标记 ${perK}/千字，低于 ${pass}（${set.calibrated ? '只换词那版 19.3 也才拿到"弱人类创作"' : '暂定值，未经朱雀标定'}）`);
   if (meanSent > maxMeanSent) problems.push(`均句长 ${meanSent} 字，超过 ${maxMeanSent}（句子太长是书面腔的另一半）`);
-  return { perK, hits, meanSent, found: found.slice(0, 20), problems, ok: problems.length === 0 };
+  return { perK, hits, meanSent, found: found.slice(0, 20), problems, ok: problems.length === 0, oralSet: oralSet || DEFAULT_ORAL_SET, calibrated: set.calibrated };
 }
 
-export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false } = {}) {
+export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false, oralSet, oralMarkers } = {}) {
   const slop = scanSlop(text, slopOff);
   const stereo = stereoOff ? { problems: [], ok: true, said: 0, mood: 0, dialogues: 0, ratio: 0 } : scanStereotype(text);
   const rhythm = rhythmOff ? { problems: [], ok: true, paraCV: 0, longSentRatio: 0, oneSentRatio: 0 } : scanRhythm(text);
-  const register = registerOff ? { problems: [], ok: true, perK: 0, meanSent: 0, hits: 0, found: [] } : scanRegister(text);
+  const register = registerOff ? { problems: [], ok: true, perK: 0, meanSent: 0, hits: 0, found: [] } : scanRegister(text, { oralSet, markers: oralMarkers });
   const ban = scanBanned(text, banned);
   const expo = expoOff ? { hits: [], count: 0 } : scanExposition(text);
   const hook = (prevText && !hookOff) ? checkHookContinuity(prevText, text, names, { history }) : { raised: [], dropped: [], late: [], ok: true };
