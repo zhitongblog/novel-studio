@@ -335,6 +335,7 @@ function openWrite(book) {
   $('#writeTokens').textContent = 'tokens ' + fmtTok(book.tokens || 0);
   hideReviewBar(); showReviewBar();   // 若有待确认审稿，恢复动作条
   renderBoard(book.slug);   // 创作看板：我在哪 / 健康体检 / 下一步
+  ovhPoll();                // 改造流水线在跑就把进度卡亮出来（没跑过就不显示）
   if (running) openStream(book.slug);
 }
 // 「此刻」卡：一本书的处境 + 该处理的异常 + 一个主行动。
@@ -1914,6 +1915,94 @@ $('#btnSignDiag')?.addEventListener('click', async () => {
   } catch (e) { toast('签约诊断启动失败：' + e.message); }
   finally { setTimeout(() => { btn.disabled = false; btn.textContent = old; }, 3000); }
 });
+// 「诊断这本书」——不连番茄也能问"这书哪儿不行"：指标 + 换个模型当责编读黄金三章。只读。
+$('#btnDiagnose')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  if (!confirm('诊断会：\n· 量一遍段落长度、套话、形容词堆砌、比喻这些指标\n· 让另一个模型当责编读黄金三章和抽样章\n· 出一份带章号的必办清单（reviews/改造诊断.md）\n\n只读，不改正文。约 3–6 分钟。开始？')) return;
+  const btn = $('#btnDiagnose'); const old = btn.textContent; btn.disabled = true; btn.textContent = '诊断中…';
+  try {
+    await api('/api/book/diagnose', 'POST', { book: CUR.slug });
+    openStream(CUR.slug);
+    toast('已开始诊断——完成后报告在 reviews/改造诊断.md，「改造这本书」会直接拿它当必办清单');
+  } catch (e) { toast('诊断启动失败：' + e.message); }
+  finally { setTimeout(() => { btn.disabled = false; btn.textContent = old; }, 3000); }
+});
+
+// 「让它读一遍挑毛病」——阅读复核单独可跑（以前只能跟在改造流水线最后，引擎一断就没了）
+$('#btnReadReview')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const b2 = getBookBySlug(CUR.slug) || CUR;
+  const maxCh = b2.stats?.chapters || 0;
+  const range = prompt(`读哪些章？（格式：起-止，留空=全书）
+
+换一个模型只读不量，专挑：空钩子、逻辑断裂、人物失格、情绪落空。`, maxCh ? `1-${Math.min(maxCh, 20)}` : '');
+  if (range === null) return;
+  const m2 = String(range).trim().match(/^(d+)s*[-–]s*(d+)$/);
+  try {
+    await api('/api/book/read-review', 'POST', { book: CUR.slug, from: m2 ? +m2[1] : 1, to: m2 ? +m2[2] : 0 });
+    openStream(CUR.slug);
+    toast('已开始阅读复核——完成后结果在 reviews/阅读复核-*.md');
+  } catch (e) { toast('阅读复核启动失败：' + e.message); }
+});
+// 「改造这本书」——救书流水线：分批改 → 质检 → 返工 → 阅读复核。会覆盖正文，所以在危险区。
+$('#btnOverhaul')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const b = getBookBySlug(CUR.slug) || CUR;
+  const maxCh = b.stats?.chapters || 0;
+  const range = prompt(`改造哪些章？（格式：起-止，留空=全书 1-${maxCh || '末章'}）\n\n每 10 章一批，改完自动质检（套话/堆砌/比喻/字数保留/感官细节），不达标自动返工；\n撞模型额度会等恢复再接着跑；中途停了也能续跑。`, maxCh ? `1-${Math.min(maxCh, 30)}` : '');
+  if (range === null) return;
+  const m = String(range).trim().match(/^(\d+)\s*[-–]\s*(\d+)$/);
+  const from = m ? +m[1] : 1, to = m ? +m[2] : 0;
+  // 两种模式差别很大：精修一个字剧情都不动；结构改造允许按必办清单改情节
+  //（诊断说"承诺没兑现/设定前后打架/爽点迟到"时，非用结构改造不可——精修的硬约束会把这些挡在门外）
+  const rebuild = !confirm(`要改造《${b.title}》第 ${from}–${to || '末'} 章，选哪种？\n\n确定 = 文风精修：只调语言，剧情一个字不动\n取消 = 结构改造：允许按必办清单改剧情（改事件结果、提前爽点、补设定交代）\n\n两种都不会新增章节，每批自动 git 存档可回退。`);
+  if (!confirm(`确认：对《${b.title}》第 ${from}–${to || '末'} 章做【${rebuild ? '结构改造（会改剧情）' : '文风精修（不改剧情）'}】。\n\n必办清单取自 reviews/改造诊断.md 或 签约诊断.md——没有的话建议先点「诊断这本书」。\n\n开始？`)) return;
+  try {
+    const r = await api('/api/book/overhaul/start', 'POST', { book: CUR.slug, from, to, batchSize: 10, readCheck: true, mode: rebuild ? 'rebuild' : 'polish' });
+    openStream(CUR.slug);
+    toast(r.already ? '这本书已经在改造中' : `已开始改造（必办清单 ${r.mustFix || 0} 条）——进度看下方卡片和日志`);
+    ovhPoll(true);
+  } catch (e) { toast('改造启动失败：' + e.message); }
+});
+$('#btnOverhaulStop')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const force = confirm('确定 = 本批做完就停（推荐，不会丢半章）\n取消 = 立刻停，连窗口一起收');
+  try { await api('/api/book/overhaul/stop', 'POST', { book: CUR.slug, force: !force }); toast(force ? '本批做完就停' : '已立刻停止'); } catch (e) { toast('停止失败：' + e.message); }
+});
+
+// 「按复核意见定点修」——把阅读复核挑出的问题逐批落实（只改被点名的地方）
+$('#btnApplyReadReview')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const range = prompt('修哪些章？（格式：起-止，留空=报告里全部）', '');
+  if (range === null) return;
+  const m3 = String(range).trim().match(/^(d+)s*[-–]s*(d+)$/);
+  if (!confirm('会按 reviews/阅读复核-*.md 的意见改这些章的正文（自动 git 存档，可回退）。开始？')) return;
+  try {
+    const r = await api('/api/book/apply-read-review', 'POST', { book: CUR.slug, from: m3 ? +m3[1] : 0, to: m3 ? +m3[2] : 0 });
+    openStream(CUR.slug);
+    toast(`已开始定点修（${r.items} 条意见）`);
+    ovhPoll(true);
+  } catch (e) { toast('定点修启动失败：' + e.message); }
+});
+// 改造进度轮询：跑着的时候 10 秒一次，停了就不再问（别给引擎添无谓负担）
+let ovhTimer = null;
+async function ovhPoll(force = false) {
+  const box = $('#ovhBox'); if (!box || !CUR) return;
+  let r; try { r = await api('/api/book/overhaul/status?book=' + encodeURIComponent(CUR.slug)); } catch { return; }
+  const st = r.state;
+  if (!st && !force) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  const label = { running: '改造中', 'waiting-quota': '等模型额度恢复', done: '已完成', stopped: '已停止', error: '出错了' }[st?.status] || '未开始';
+  $('#ovhTitle').textContent = `改造进度 · ${label}`;
+  $('#ovhFill').style.width = (r.percent || 0) + '%';
+  const wait = st?.status === 'waiting-quota' && st.waitUntil ? `，预计 ${new Date(st.waitUntil).toLocaleTimeString('zh-CN')} 恢复` : '';
+  $('#ovhMsg').textContent = `第 ${st?.from || 1}–${st?.to || '?'} 章：${r.done}/${r.total} 批完成${wait}`
+    + (r.changed?.length ? `　｜ 待重发 ${r.changed.length} 章` : '');
+  $('#ovhIssues').textContent = (st?.issues || []).slice(0, 3).join('；');
+  if (ovhTimer) clearTimeout(ovhTimer);
+  if (r.running || st?.status === 'waiting-quota') ovhTimer = setTimeout(ovhPoll, 10000);
+}
+
 $('#olApply').addEventListener('click', async () => {
   if (!CUR) return;
   const scope = $('#olScope').value;

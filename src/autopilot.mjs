@@ -9,7 +9,12 @@ import { parseTokens } from './usage.mjs';
 
 const CR = '\r';
 // 模型用量/速率上限 / 配额耗尽的信号 —— 命中就停，别再无谓重试
-const LIMIT_RE = /(usage limit|rate[\s_-]?limit|too many requests|429|quota|insufficient[_\s]quota|out of (credits|tokens)|reached your (usage )?limit|you'?ve hit your (usage )?limit|plan limit|monthly limit|resets? (at|in)|try again later|请求过于频繁|额度.{0,6}(用完|耗尽|不足)|用量.{0,4}上限|配额.{0,4}(用完|耗尽|不足)|速率限制|稍后(再|重)试)/i;
+// ⚠️【裸的 429 绝对不能留】2026-09-21 实证：agent 正在写的正文里有一句
+//   「429 +我把这串编号，跟我压在四层壳底下那十六个字节比了一遍。」
+// ——小说里出现数字 429 而已，却被判成 HTTP 429，autopilot 当场终止、收窗、清会话，
+// 作者看到的是"莫名其妙撞了额度"。同理其它信号也必须带上英文语境，不能只认一个词。
+// 判据只看【英文报错措辞】和【明确的中文额度用语】，不看孤立数字。
+const LIMIT_RE = /(usage limit|rate[\s_-]?limit|too many requests|(?:http|status(?: code)?)\s*429\b|429\s*(?:too many|rate|error)|quota (?:reached|exceeded|exhausted)|insufficient[_\s]quota|out of (credits|tokens)|reached your (usage )?limit|you'?ve hit your (usage )?limit|plan limit|monthly limit|limit will reset|resets? (?:at|in)\s*\d|try again later|请求过于频繁|额度.{0,6}(用完|耗尽|不足)|用量.{0,4}上限|配额.{0,4}(用完|耗尽|不足)|速率限制|稍后(再|重)试)/i;
 
 export class Autopilot {
   constructor(mcp, paneId, opts = {}) {
@@ -71,6 +76,12 @@ export class Autopilot {
   static TERMINAL = /(用量|速率上限|额度|配额|agent 已退出|agent 未能启动|已完本|窗口\/pane 已关闭|agent 进程已退出)/;
   // 屏幕上出现这些=agent 自己报的环境级失败（连不上/没资格/要登录）。连着出现两次就判终止。
   static ENV_FAIL = /(eligibility check failed|userinfo": EOF|failed to authenticate|401 unauthorized|could not reach|network is unreachable|连接失败|无法连接到)/i;
+  // 【临时故障 ≠ 环境坏了】断连、超时、上游 5xx 都是催一下就能接着干的。
+  // 2026-09-20 实证：claude 分析完 12 分钟、打出"现在动笔"，紧接着
+  // 「API Error: Connection lost mid-response」——一个字没写就停在提示符前，
+  // 而当时引擎正好也没了，没人重催，它就空等了三个小时。
+  // 这类错要【立刻重催并说清原因】，别混进 ENV_FAIL 被判终止，也别只靠空闲检测慢慢兜。
+  static TRANSIENT = /(api error|connection lost mid-response|request timed out|econnreset|502 bad gateway|503 service|overloaded_error|internal server error)/i;
 
   stop(reason) {
     if (!this.running) return;
@@ -150,6 +161,22 @@ export class Autopilot {
       }
     } else if (this._envFail) { this._envFail = 0; }
 
+    // 【断连立刻重催】屏幕最后是"API Error / Connection lost"这类临时故障：催一句就能接着写。
+    // 连着催 6 次还是同一句，才当成环境问题停下——否则就是无限重试烧 token。
+    // 【别打断人家自己的重试】claude 撞到网络错会自己重试，屏幕上是
+    //   「✻ API error · Retrying in 0s · attempt 1/10」——它在干活，不是卡住。
+    // 2026-09-21 我第一版没排除这种，当场就误催了一次。只有【它已经不再重试、且停在提示符前】才轮到我们催。
+    const retrying = /retrying|attempt\s*\d+\s*\/\s*\d+|重试中/i.test(lastNonEmpty(screen, 6));
+    if (Autopilot.TRANSIENT.test(lastNonEmpty(screen, 6)) && !screenChanged && !retrying && this.looksIdleWaiting(screen)) {
+      this._transient = (this._transient || 0) + 1;
+      if (this._transient > 6) { this.stop('反复断连（API Error/超时），催了六次都没接上'); return; }
+      const line = (lastNonEmpty(screen, 6).split(String.fromCharCode(10)).find(l => Autopilot.TRANSIENT.test(l)) || '').trim().slice(0, 100);
+      this.log(`agent 撞上临时故障（${line}）→ 第 ${this._transient} 次重催`, 'warn');
+      try { await this.mcp.submitText(this.paneId, this.opt.continueText || '继续'); } catch {}
+      return;
+    }
+    if (this._transient && screenChanged) this._transient = 0;
+
     // 【陈旧 working】——agent.status 是 claude 侧 hook 上报的，hook 一旦挂了，状态就【永远停在 working】。
     // 现场（《走进修仙》pane 7）：写完 104–106 章后 Stop 钩子报错（屏幕上一串 Hookify error），
     // agent.status 报 state=working、forSecs=37577（10.4 小时），而 session.idle 明说 idle=true、
@@ -198,7 +225,13 @@ export class Autopilot {
     // 模型用量/速率上限 → 立即停止，不再重试（要去抖一次，避免误判）
     if (this.opt.stopOnLimit !== false && LIMIT_RE.test(tail)) {
       this._limitStreak = (this._limitStreak || 0) + 1;
-      if (this._limitStreak >= 2) { this.stop('检测到模型用量/速率上限，已停止（不再重试，等额度恢复后手动继续）'); return; }
+      if (this._limitStreak >= 2) {
+        // 【把屏幕上那句原话带出去】上层要靠它算"什么时候恢复"（claude 写 reset at 10pm、agy 写 Resets in 6m8s）。
+        // 2026-09-21 实测：不带出去的话，等上层想去读屏幕时窗口早关了，只能盲目退避、每次白开一个窗口。
+        const raw = (tail.split('\n').filter(l => LIMIT_RE.test(l)).pop() || '').trim().replace(/\s+/g, ' ').slice(0, 160);
+        this.stop(`检测到模型用量/速率上限，已停止（不再重试，等额度恢复后手动继续）${raw ? '｜窗口原话：' + raw : ''}`);
+        return;
+      }
     } else { this._limitStreak = 0; }
 
     // 解析并上报 token 用量（agent TUI footer 的累计值）

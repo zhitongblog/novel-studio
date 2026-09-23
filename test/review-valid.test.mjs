@@ -129,9 +129,11 @@ test('重写开的窗口只应答、干完就收——不许自动续写新章',
   // 其他一次性任务端点开窗都带 autopilotConfirmOnly，唯独重写漏了：改完之后 autopilot 空闲时
   // 照常发「继续下一批…写下一批正文」，一个"改前 19 章"的任务就变成"改完再多写 3 章"，
   // 新写的还是改稿前那套老毛病。整本重立项是要从头写的，照旧走完整 autopilot。
+  // 2026-09-20：启动逻辑抽成了 startRewrite()（改造流水线每批都要走同一条路），保护搬了家但必须还在
   const src = fs.readFileSync(new URL('../src/server.mjs', import.meta.url), 'utf8');
-  const i = src.indexOf("p === '/api/book/rewrite'");
-  const seg = src.slice(i, src.indexOf("p === '/api/book/apply-review'", i));
+  const i = src.indexOf('async function startRewrite');
+  assert.ok(i > 0, 'startRewrite 应该存在（rewrite 与改造流水线共用）');
+  const seg = src.slice(i, i + 2500);
   assert.ok(/autopilotConfirmOnly: !isRe/.test(seg), '重写要 confirmOnly；重立项（isRe）除外');
 });
 

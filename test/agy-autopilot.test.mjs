@@ -17,6 +17,7 @@
 import assert from 'node:assert';
 import test from 'node:test';
 import { Autopilot, optionChoice, cursorRe } from '../src/autopilot.mjs';
+import fs from 'node:fs';
 
 const ap = new Autopilot({}, 1, { confirmOnly: true });
 const tailOf = (s) => s.split(/\r?\n/).filter(l => l.trim()).slice(-40).join('\n');
@@ -160,4 +161,59 @@ test('环境级失败要算【终止性】停止——补挂一个新的 autopil
 test('正常写作的屏幕不会被误判成环境失败', () => {
   const ok = ['● Edit(chapters/卷02/031_承明请缨.txt)', '写完 3 章，已更新索引与台账。', '>', '? for shortcuts'].join(String.fromCharCode(10));
   assert.ok(!Autopilot.ENV_FAIL.test(ok));
+});
+
+test('断连/超时属于临时故障：要立刻重催，而不是判死也不是干等', () => {
+  // 2026-09-20 实证：claude 打出"现在动笔"后撞上 API Error: Connection lost mid-response，
+  // 一个字没写就停在提示符前，空等了三个小时。
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  const re = Autopilot.TRANSIENT;
+  assert.ok(re, '要有 TRANSIENT 模式');
+  assert.ok(re.test('API Error: Connection lost mid-response'), '断连要认出来');
+  assert.ok(re.test('Request timed out'), '超时要认出来');
+  assert.ok(!re.test('Eligibility check failed'), '环境级失败归 ENV_FAIL，别混进来');
+  assert.ok(Autopilot.ENV_FAIL.test('Eligibility check failed'), 'ENV_FAIL 照旧管环境级失败');
+  // 不能无限重催
+  assert.match(src, /_transient > 6/, '催不动就得停，否则白烧 token');
+  assert.ok(src.includes('次重催'), '日志要说清这是第几次重催');
+});
+
+test('撞额度要把窗口原话带进停止原因——不带的话上层根本算不出什么时候恢复', () => {
+  // 2026-09-21 实测：上层想去读屏幕时窗口早被收了，只能盲目退避，每次白开一个窗口白撞一次。
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  const i = src.indexOf('_limitStreak >= 2');
+  assert.ok(i > 0);
+  const seg = src.slice(i, i + 800);
+  assert.match(seg, /窗口原话/, '停止原因里要带上屏幕上那句 reset 提示');
+  assert.match(seg, /LIMIT_RE\.test\(l\)/, '原话要从命中那一行取');
+});
+
+test('claude 自己在重试时不许插嘴——那是它在干活，不是卡住', () => {
+  // 2026-09-21 现场：日志里出现「✻ API error · Retrying in 0s · attempt 1/10」，
+  // 我的断连重催把它当成卡住去催了一句，反而可能打断人家的重试。
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  const i = src.indexOf('const retrying =');
+  assert.ok(i > 0, '要先判断是不是正在重试');
+  const seg = src.slice(i, i + 500);
+  assert.match(seg, /retrying|attempt/i);
+  assert.match(seg, /!retrying/, '正在重试就不催');
+  assert.match(seg, /looksIdleWaiting\(screen\)/, '还要确实停在提示符前才催');
+});
+
+test('额度判据不许认孤立数字——正文里写个 429，写作就被掐断了', () => {
+  // 2026-09-21 实证（靠"窗口原话"才暴露出来）：agent 正在写的正文是
+  //   「429 +我把这串编号，跟我压在四层壳底下那十六个字节比了一遍。」
+  // 裸的 429 命中了额度判据 → autopilot 当场终止、收窗、清会话，作者看到的是"莫名其妙撞了额度"。
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  const re = eval(src.match(/const LIMIT_RE = (\/.*\/i);/)[1]);
+  // 正文：一个都不许命中
+  assert.ok(!re.test('429 +我把这串编号，跟我压在四层壳底下那十六个字节比了一遍。'));
+  assert.ok(!re.test('那台机器的编号是 4290，功率 429 瓦。'));
+  assert.ok(!re.test('他盯着屏幕上的配额分配表看了很久。'));
+  // 真额度：一个都不许漏
+  assert.ok(re.test('API Error: 429 Too Many Requests'));
+  assert.ok(re.test('status code 429 returned'));
+  assert.ok(re.test('Claude usage limit reached · your limit will reset at 10pm'));
+  assert.ok(re.test('Individual quota reached. Resets in 6m8s'));
+  assert.ok(re.test('当前额度已用完，请稍后再试'));
 });

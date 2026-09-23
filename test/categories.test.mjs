@@ -113,10 +113,11 @@ console.log('\n全部通过 ✅  分类在立项就定，男女频各认各的�
 
 test('开标签弹窗必须用页面自己的合成事件，不能用 CDP 可信点击', () => {
   const fq = fs.readFileSync(new URL('../src/fanqie.mjs', import.meta.url), 'utf8');
-  const i = fq.indexOf('选择主分类');
-  // 【必须从 i 之后再找终点】'立即创建' 在文件前面的注释里就出现过（第 265 行），
-  // 直接 indexOf 会拿到那个位置 → 切片为空 → 测试空跑着假装通过/假装失败。
-  const seg = fq.slice(i, fq.indexOf('立即创建', i));
+  // 2026-09-20：标签三件套提到了模块级 tagHelpers（建书与"改分类"共用一套），保护搬了家但必须还在
+  const i = fq.indexOf('function tagHelpers');
+  assert.ok(i > 0, 'tagHelpers 应该存在');
+  const seg = fq.slice(i, fq.indexOf('// ===== 在番茄【创建一本新书】', i));
+  assert.ok(seg.length > 500, '切片不能为空——空切片会让断言空跑着假装通过');
   assert.ok(/__fire\(sv\)/.test(seg),
     '对 .select-view 用 cdpClick 实测【纹丝不动】，派发 pointerdown/…/click 一次就开');
   // 查的是【真的调用】client.cdpClick(...)，不是这个词——注释里要讲清楚为什么弃用它，
@@ -127,10 +128,11 @@ test('开标签弹窗必须用页面自己的合成事件，不能用 CDP 可信
 
 test('每一步都要验证：开没开、选没选上、确认后弹窗关没关', () => {
   const fq = fs.readFileSync(new URL('../src/fanqie.mjs', import.meta.url), 'utf8');
-  const i = fq.indexOf('选择主分类');
-  // 【必须从 i 之后再找终点】'立即创建' 在文件前面的注释里就出现过（第 265 行），
-  // 直接 indexOf 会拿到那个位置 → 切片为空 → 测试空跑着假装通过/假装失败。
-  const seg = fq.slice(i, fq.indexOf('立即创建', i));
+  // 2026-09-20：标签三件套提到了模块级 tagHelpers（建书与"改分类"共用一套），保护搬了家但必须还在
+  const i = fq.indexOf('function tagHelpers');
+  assert.ok(i > 0, 'tagHelpers 应该存在');
+  const seg = fq.slice(i, fq.indexOf('// ===== 在番茄【创建一本新书】', i));
+  assert.ok(seg.length > 500, '切片不能为空——空切片会让断言空跑着假装通过');
   assert.ok(/重试第 \$\{i \+ 1\} 次/.test(seg), '开弹窗要验证+重试——同样的代码有时开有时不开');
   assert.ok(/classList\.contains\('active'\)/.test(seg), '要验证卡片真的选上了');
   assert.ok(/弹窗没关/.test(seg), '确认后弹窗该关，没关就是没存进去');

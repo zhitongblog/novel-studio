@@ -137,6 +137,8 @@
                   <button class="btn span2" id="btnOutline" title="换一个模型当主编，审这一卷的大纲，逐条挑要不要改。">📋 让主编看这卷大纲</button>
                   <button class="btn span2" id="btnRebuildOutline" title="据已写正文逆向重建 设定圣经 + 各卷分章大纲（不写新正文）。导入的番茄书/半成品书第一次用它补齐规划。">🧭 从正文补回设定和大纲</button>
                   <button class="btn" id="btnSignDiag" title="签约被拒/准备申请签约时用：读番茄签约进度、查定时发布有没有乱序、按签约编辑的标准评估已发布章节，给出带章号的修改清单。只读，不改番茄上任何东西。">📋 签约诊断</button>
+                  <button class="btn" id="btnDiagnose" title="不用连番茄也能查：换一个模型当责编读黄金三章+抽样章，加上量出来的指标，给出带章号的必办清单（reviews/改造诊断.md）。只读，不改正文。">🩺 诊断这本书</button>
+                  <button class="btn" id="btnReadReview" title="换一个模型【只读不量】，专挑指标查不出的问题：章末是不是空钩子、逻辑接不接得上、人物有没有失格、该爽的地方爽没爽到。结果写进 reviews/阅读复核.md。只读，不改正文。">👓 让它读一遍挑毛病</button>
                 </div>
               </div>
             </details>
@@ -173,6 +175,17 @@
                   <button class="btn danger-out" id="btnPublish" title="把已写章节发到番茄。读者立刻可见，撤不回来。">📤 发布到番茄</button>
                   <button class="btn danger-out" id="btnFinale" title="收尾完本。系统会逐项核对完本产物（尾声/完本感言、全书完标注、设定已完结），缺了会退回来让它补。">🏁 完本</button>
                   <button class="btn danger-out span2" id="btnRewrite" title="推倒重写指定范围的章节——会覆盖已写正文（动手前自动 git 存档，可回退）。">♻️ 重写已写的章节</button>
+                  <button class="btn danger-out span2" id="btnOverhaul" title="改造这本书：按诊断的必办清单分批改写，每批自动质检（套话/堆砌/比喻/字数保留/感官细节），不达标自动返工；撞模型额度会等恢复再续；跑完再让另一个模型读一遍挑空钩子和人物问题。会覆盖已写正文（每批自动 git 存档，可回退）。">🛠️ 改造这本书</button>
+                  <button class="btn danger-out span2" id="btnApplyReadReview" title="按「阅读复核」挑出的意见逐批定点修：只改被点名的那些章那些地方（空钩子改成具体的事、补上逻辑、让人物有反应），改完照样过文风闸。会覆盖这些章的正文（自动 git 存档，可回退）。">🩹 按复核意见定点修</button>
+                </div>
+                <div id="ovhBox" class="hidden" style="margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:8px">
+                  <div style="display:flex;align-items:center;gap:8px;justify-content:space-between">
+                    <b id="ovhTitle">改造进度</b>
+                    <button class="btn btn-sm" id="btnOverhaulStop" title="本批做完就停，进度会保存，下次接着跑">停止改造</button>
+                  </div>
+                  <div id="ovhBar" style="height:6px;background:var(--line);border-radius:3px;margin:6px 0"><div id="ovhFill" style="height:6px;width:0;background:var(--accent);border-radius:3px"></div></div>
+                  <div id="ovhMsg" class="muted" style="font-size:12px">未开始</div>
+                  <div id="ovhIssues" class="muted" style="font-size:12px;margin-top:4px"></div>
                 </div>
               </div>
             </details>
