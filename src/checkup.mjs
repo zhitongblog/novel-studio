@@ -27,7 +27,14 @@ import { bookVolNum, cleanVolSub, outlineVolSubtitle, bibleVolSubtitle } from '.
 
 const chapNumOf = (name) => parseInt((String(name).match(/^(\d{1,4})/) || [])[1] || '0', 10);
 
-// 扫出全书所有章号（按文件名前缀）
+// 扫出全书所有章号（按文件名前缀）。
+//
+// ⚠️ 这是个递归 walk，会走进 chapters/ 底下的每一层。2026-09-23 踩过：
+// 把原稿备份成 chapters/卷01/.orig/（同名的 8 个 .txt），体检立刻报「第 1–8 章有重复」。
+// 作者自己放一个 _废稿/ 或 .bak/ 也是一样的下场。备份与废稿是正常需求，不该让它误判，
+// 所以【点号和下划线开头的目录一律跳过】——这跟 publish.mjs 里 `!/^_/` 跳过下划线文件是同一条约定。
+const SKIP_DIR = (name) => name.startsWith('.') || name.startsWith('_');
+
 function chapterNumbers(dir) {
   const out = [];
   const walk = (d) => {
@@ -35,8 +42,9 @@ function chapterNumbers(dir) {
     try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
     for (const e of ents) {
       const p = path.join(d, e.name);
-      if (e.isDirectory()) { walk(p); continue; }
+      if (e.isDirectory()) { if (!SKIP_DIR(e.name)) walk(p); continue; }
       if (!e.name.toLowerCase().endsWith('.txt')) continue;
+      if (e.name.startsWith('_') || e.name.startsWith('.')) continue;   // 同理：_旧稿.txt 这类不算章节
       const n = chapNumOf(e.name);
       if (n > 0) out.push(n);
     }

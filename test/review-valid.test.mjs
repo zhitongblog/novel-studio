@@ -149,7 +149,11 @@ test('Windows 启动脚本里，prompt 的英文双引号要换掉——PowerShe
 test('终止收尾不能把"为什么停"连同日志一起删掉', () => {
   const src = fs.readFileSync(new URL('../src/server.mjs', import.meta.url), 'utf8');
   const i = src.indexOf('function mkTerminalStop');
-  const seg = src.slice(i, src.indexOf('\n}\n', i));
+  // 用正则找函数体的收尾大括号，别写死 '\n}\n'——仓库里 CRLF 和 LF 两种换行都有，
+  // 写死 \n 的话遇到 CRLF 文件 indexOf 会返回 -1，slice(i,-1) 就把整个文件后半段
+  // 当成了这个函数的函数体，于是别处的 rt.delete(slug) 被误判成它的。
+  const m = /\r?\n\}\r?\n/.exec(src.slice(i));
+  const seg = src.slice(i, i + (m ? m.index : src.length - i));
   assert.ok(!/rt\.delete\(slug\)/.test(seg),
     'rt.delete 会把刚写的原因当场抹掉，还让下面的 broadcast 找不到连着的界面——作者什么都看不到');
 });

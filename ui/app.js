@@ -42,6 +42,135 @@ function toast(msg) {
   clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add('hidden'), 2600);
 }
 
+// ---------- 统一任务条（顶栏常驻）----------
+// 病根：三个「停止」各管各的（btnStop 写作 / rbStop 待拍板 / pbStop 发布）。长任务跑起来，
+// 作者得先认出是哪个在跑才知道点哪个。这里做一个【当前任务状态中心】：谁起长任务谁登记
+// （在跑什么 kind / 标题 / 进度 / 怎么停），任务条上只有一个停止，按 kind 委托回各自的停法。
+// 旧的三个按钮【保留不删】，只是改成委托到同一套停止逻辑，免得漏接别处的调用。
+//
+// 任务条 DOM 由 index.html 提供：容器 .taskbar/#taskBar（空闲加 .idle），
+// 里面 .tb-what（在跑什么）/.tb-progress（进度）/.tb-stop（停止）。
+// DOM 可能还没到位 → 所有取用都做存在性判断，拿不到就静默跳过，绝不抛异常。
+const TASK = { kind: null, label: '', progress: '', pct: null, onStop: null, busy: false, meta: null };
+let WRITING = false;   // 写作 autopilot 是否在跑（收掉短任务时要据此把条还给「写作中」）
+
+function taskEls() {
+  if (typeof document === 'undefined') return null;
+  const bar = document.getElementById('taskBar') || document.querySelector('.taskbar');
+  if (!bar) return null;
+  return {
+    bar,
+    what: bar.querySelector('.tb-what'),
+    progress: bar.querySelector('.tb-progress'),
+    stop: bar.querySelector('.tb-stop'),
+  };
+}
+
+function taskRender() {
+  const e = taskEls(); if (!e) return;
+  const on = !!TASK.kind;
+  e.bar.classList.toggle('idle', !on);
+  if (on && TASK.kind) e.bar.dataset.taskKind = TASK.kind; else delete e.bar.dataset.taskKind;
+  // 进度条宽度交给 CSS：拿 --tb-pct 画即可（没有百分比时是 0%）
+  try { e.bar.style.setProperty('--tb-pct', (TASK.pct == null ? 0 : TASK.pct) + '%'); } catch {}
+  if (e.what) e.what.textContent = on ? (TASK.label || '任务进行中') : '空闲';
+  if (e.progress) {
+    const pct = TASK.pct == null ? '' : Math.round(TASK.pct) + '%';
+    e.progress.textContent = on ? [pct, TASK.progress].filter(Boolean).join(' · ') : '';
+  }
+  if (e.stop) {
+    e.stop.disabled = !on || TASK.busy || !TASK.onStop;
+    e.stop.onclick = taskStopClick;   // 幂等：DOM 后到也能补上
+  }
+}
+
+function taskStart(opt) {
+  const o = opt || {};
+  TASK.kind = o.kind || 'task';
+  TASK.label = o.label || '任务进行中';
+  TASK.progress = o.text || '';
+  TASK.pct = (o.pct == null || !Number.isFinite(Number(o.pct))) ? null : Number(o.pct);
+  TASK.onStop = typeof o.onStop === 'function' ? o.onStop : null;
+  TASK.busy = false;
+  TASK.meta = o.meta == null ? null : o.meta;   // 谁起的任务（如发布的书 slug），收条时好对上
+  taskRender();
+}
+
+function taskProgress(opt) {
+  if (!TASK.kind) return;
+  const o = opt || {};
+  if (o.text != null) TASK.progress = String(o.text).replace(/\s+/g, ' ').slice(0, 80);
+  if (o.pct != null && Number.isFinite(Number(o.pct))) TASK.pct = Math.max(0, Math.min(100, Number(o.pct)));
+  if (o.label != null) TASK.label = String(o.label);
+  taskRender();
+}
+
+// taskEnd() 收当前任务；taskEnd('write') 只收指定 kind——
+// 免得一个先结束的任务把后起的那个从条上抹掉。
+function taskEnd(kind) {
+  if (kind && TASK.kind && TASK.kind !== kind) return;
+  const was = TASK.kind;
+  TASK.kind = null; TASK.label = ''; TASK.progress = ''; TASK.pct = null; TASK.onStop = null; TASK.busy = false; TASK.meta = null;
+  // 写作还在跑、条却被发布/导入/拍板这些短任务临时占着：收掉它之后把条还给「写作中」，
+  // 否则一次发布结束会把仍在跑的写作从条上抹掉，作者又找不到停止了。
+  if (was && was !== 'write' && WRITING) { taskStartWrite(); return; }
+  taskRender();
+}
+
+async function taskStopClick() {
+  if (!TASK.kind || TASK.busy) return;
+  const fn = TASK.onStop;
+  if (!fn) return;
+  TASK.busy = true; TASK.progress = '停止中…'; taskRender();
+  try { await fn(); }
+  catch (e) { toast('停止失败：' + ((e && e.message) || e)); }
+  finally { TASK.busy = false; taskRender(); }
+}
+
+// 旧的三个停止按钮走这里：在跑的正是自己这档任务就走统一逻辑（带 busy 锁和"停止中"提示），
+// 否则退回直接调各自的停法（别处可能在任务条登记之外触发）。
+function taskStopVia(kind, fallback) {
+  if (TASK.kind === kind && TASK.onStop) return taskStopClick();
+  // 退路：这档任务没登记在条上（别处直接起的）→ 直接调各自的停法。
+  // 各自的停法都会自己报错，这里只吞掉 promise，别留未处理拒绝。
+  try { return Promise.resolve(fallback()).catch(() => {}); } catch { return undefined; }
+}
+
+// ---------- 弹窗结果区：跑完不关窗 ----------
+// index.html 每个弹窗里有一个 <div class="modal-result" id="<前缀>Result">（默认隐藏，加 .show 才显示）。
+// 跑完把结果写进去、弹窗留着，作者能对着结果决定下一步；容器不在就返回 false，调用处退回原行为。
+function modalResultEl(prefix) {
+  if (!prefix || typeof document === 'undefined') return null;
+  return document.getElementById(prefix + 'Result');
+}
+function showModalResult(prefix, html, opts) {
+  const box = modalResultEl(prefix); if (!box) return false;
+  const o = opts || {};
+  if (o.append) box.insertAdjacentHTML('beforeend', html == null ? '' : String(html));
+  else box.innerHTML = html == null ? '' : String(html);
+  box.classList.add('show'); box.classList.remove('hidden');
+  if (o.scroll) box.scrollTop = box.scrollHeight;
+  return true;
+}
+// 纯文本结果（预览清单 / 进度日志都是带换行的纯文本）：塞进一个 <pre> 里，保留换行。
+function showModalResultText(prefix, text) {
+  return showModalResult(prefix, '<pre class="mr-pre">' + esc(text) + '</pre>');
+}
+function appendModalResultText(prefix, text) {
+  const box = modalResultEl(prefix); if (!box) return false;
+  let pre = box.querySelector('pre.mr-pre');
+  if (!pre) { pre = document.createElement('pre'); pre.className = 'mr-pre'; box.appendChild(pre); }
+  pre.textContent += text;
+  box.classList.add('show'); box.classList.remove('hidden');
+  box.scrollTop = box.scrollHeight;
+  return true;
+}
+function clearModalResult(prefix) {
+  const box = modalResultEl(prefix); if (!box) return false;
+  box.innerHTML = ''; box.classList.remove('show'); box.classList.add('hidden');
+  return true;
+}
+
 // ---------- 导航 ----------
 document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', () => showView(b.dataset.view)));
 function showView(name) {
@@ -168,9 +297,26 @@ async function paintShelfStatus() {
 function modelName(id) { return (STATE.models.find(m => m.id === id) || {}).name || id; }
 
 // ---------- 写作工作台 ----------
+// 详情页页头的封面缩略图。带 mtime 做 cache-buster，否则换完封面还显示旧图。
+// 点它直接开封面管理——没封面时点占位块也能进去做一个。
+function renderHeadCover(book) {
+  const img = $('#writeCover'), none = $('#writeCoverNone');
+  if (!img || !none) return;
+  const has = !!book?.stats?.cover;
+  if (has) {
+    img.src = `${API}/api/book/cover?book=${encodeURIComponent(book.slug)}&t=${book.stats.coverMtime || 0}`;
+    img.classList.remove('hidden'); none.classList.add('hidden');
+  } else {
+    img.classList.add('hidden'); none.classList.remove('hidden');
+  }
+}
+$('#writeCover')?.addEventListener('click', () => openCover());
+$('#writeCoverNone')?.addEventListener('click', () => openCover());
+
 function openWrite(book) {
   CUR = book; showWriteView();
   $('#writeTitle').textContent = '《' + book.title + '》';
+  renderHeadCover(book);
   $('#writeModel').value = book.model || STATE.config.defaultModel;
   syncWebProfileUI();   // 若默认/上次是网页版模型 → 显示并填充网页账号选择器
   // 探索式(freehand)没有大纲：不能让 AI 自己"续写下一批"——没有作者的情节就该停下等
@@ -246,7 +392,11 @@ async function renderBoard(slug) {
 
   const wan = (d.words / 10000);
   const wanTxt = wan >= 1 ? wan.toFixed(1) + '万字' : Math.round(d.words) + '字';
-  const volTxt = d.curVol ? '卷' + d.curVol + (d.plannedVolumes ? '/' + d.plannedVolumes : '') : '筹备中';
+  // 卷名带上。它一直是有的（AI 生成后写回 bible 的「卷名清单」），可之前没有一条路通到界面，
+  // 作者看到的只有「卷1/12」——自己书的卷叫什么名字得去翻 bible 才知道。
+  const volTxt = d.curVol
+    ? '卷' + d.curVol + (d.plannedVolumes ? '/' + d.plannedVolumes : '') + (d.curVolName ? `《${d.curVolName}》` : '')
+    : '筹备中';
   const pct = d.plannedChapters ? d.progress : null;
 
   // 一句话说清处境——把状态、写到哪、多少字合成人话，而不是四个孤立的数字格子
@@ -291,12 +441,24 @@ function showWriteView() {
   $('#view-write').classList.remove('hidden');
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
 }
+function taskStartWrite() {
+  taskStart({
+    kind: 'write',
+    label: '写作中' + (CUR && CUR.title ? ' ·《' + CUR.title + '》' : ''),
+    onStop: stopWriting,
+  });
+}
 function setWriting(on) {
   if (on) { STOP_DRAINING = false; $('#btnStop').textContent = '■ 停止'; }
+  WRITING = !!on;
+  if (on) taskStartWrite(); else taskEnd('write');
   $('#btnStart').disabled = on; $('#btnStop').disabled = !on;
   $('#writeStatus').textContent = on ? '写作中' : '未开始';
   $('#writeStatus').classList.toggle('on', on);
   $('#mirrorDot').style.display = on ? '' : 'none';
+  // 镜像面板平时折叠（那块地方让给功能），一开写就自动展开——否则用户看不见 AI 在干什么。
+  // 只在「开始」时强制展开，停下来不自动收：写完了人通常还要回头翻镜像里的最后几段。
+  if (on) { const mp = $('#mirrorPanel'); if (mp && !mp.open) mp.open = true; }
 }
 
 // —— 网页版写作：账号选择器（只在选中「网页版」模型时出现）——
@@ -414,19 +576,22 @@ $('#writeMode').addEventListener('change', async () => {
     toast(mode === 'review' ? '已切到逐批审核：下一批写完会停下等你' : '已切到全自动：连续写作不再停顿');
   } catch (e) { toast('切换失败：' + e.message); }
 });
-$('#btnStop').addEventListener('click', async () => {
+// 停写作：第一次点=优雅停止（写完当前批次），再点一次=立即停。任务条和 #btnStop 走同一个。
+async function stopWriting() {
   if (!CUR) return;
   try {
     const r = await api('/api/stop', 'POST', { book: CUR.slug, force: STOP_DRAINING });
     if (r.mode === 'draining') {
       STOP_DRAINING = true; $('#btnStop').textContent = '■ 立即停止';
+      taskProgress({ text: '优雅停止中：写完当前批次（再点一次=立即停）' });
       toast('已请求优雅停止：写完当前批次后自动关闭（再点一次=立即停止）');
     } else {
       STOP_DRAINING = false; $('#btnStop').textContent = '■ 停止';
       setWriting(false); closeStream(); toast('已停止并关闭窗口');
     }
   } catch (e) { toast(e.message); }
-});
+}
+$('#btnStop').addEventListener('click', () => taskStopVia('write', stopWriting));
 // 切换模型即持久化到 book.model（卡片/下次默认值/续写都跟上）。运行中的旧窗口换不了模型，提示需重开。
 $('#writeModel').addEventListener('change', async () => {
   if (!CUR) return;
@@ -717,17 +882,20 @@ $('#btnOpenDir').addEventListener('click', async () => {
 });
 
 // ---------- 重写 ----------
-$('#btnRewrite').addEventListener('click', () => {
-  if (!CUR) return;
+// 「重写」有两个弹窗（rewriteModal/rwGo 与 chRewriteModal/crGo），界面优化里要合并掉一个。
+// 所以这一段的每处取用都做存在性判断：另一个被摘掉时静默跳过，别在这儿抛异常把整页 JS 打断。
+$('#btnRewrite')?.addEventListener('click', () => {
+  if (!CUR || !$('#rewriteModal')) return;
   $('#rwErr').textContent = ''; $('#rwMode').value = 'range'; $('#rwRange').value = ''; $('#rwNote').value = '';
-  $('#rwRangeWrap').classList.remove('hidden');
+  clearModalResult('rw');
+  $('#rwRangeWrap')?.classList.remove('hidden');
   $('#rewriteModal').classList.remove('hidden');
 });
-$('#rwMode').addEventListener('change', () => { $('#rwRangeWrap').classList.toggle('hidden', $('#rwMode').value !== 'range'); });
-$('#rwClose').addEventListener('click', () => $('#rewriteModal').classList.add('hidden'));
-$('#rwCancel').addEventListener('click', () => $('#rewriteModal').classList.add('hidden'));
+$('#rwMode')?.addEventListener('change', () => { $('#rwRangeWrap')?.classList.toggle('hidden', $('#rwMode').value !== 'range'); });
+$('#rwClose')?.addEventListener('click', () => $('#rewriteModal')?.classList.add('hidden'));
+$('#rwCancel')?.addEventListener('click', () => $('#rewriteModal')?.classList.add('hidden'));
 // [已禁用点背景关闭：功能弹窗只能点关闭/取消按钮结束，避免误触丢失操作] $('#rewriteModal').addEventListener('click', (e) => { if (e.target === $('#rewriteModal')) $('#rewriteModal').classList.add('hidden'); });
-$('#rwGo').addEventListener('click', async () => {
+$('#rwGo')?.addEventListener('click', async () => {
   if (!CUR) return;
   const mode = $('#rwMode').value;
   const range = $('#rwRange').value.trim();
@@ -741,17 +909,23 @@ $('#rwGo').addEventListener('click', async () => {
   }
   if (mode === 'range' && !range && !confirm('范围留空：将由 AI 通读复检报告，自己找出仍未解决的问题章节并整章重写（一次最多 10 章，开始前自动 git 存档）。确定？')) return;
   if (mode === 'reproject' && !confirm('整本重立项会让作者从头重写 bible+大纲+全部正文（旧内容已 git 存档可回退）。确定？')) return;
-  $('#rwGo').disabled = true; $('#rwErr').textContent = '准备中…';
+  const rwGoBtn = $('#rwGo'); if (rwGoBtn) rwGoBtn.disabled = true;
+  $('#rwErr').textContent = '准备中…';
   try {
     const url = mode === 'reproject' ? '/api/book/reproject' : '/api/book/rewrite';
     // useReviews：让重写指令自己去 reviews/ 里找本范围相关的条目当必办清单。
     // 之前这条链是断的——复检把问题写进报告，重写却不知道报告存在，只能靠人复制粘贴。
     const r = await api(url, 'POST', { book: CUR.slug, range, note, useReviews });
-    $('#rewriteModal').classList.add('hidden');
+    const msg = (r.mode === 'inserted' ? '已穿插重写指令' : '已开窗重写') + (r.snapshot ? '（已 git 存档 ' + r.snapshot + '）' : '');
+    // 跑完不关窗：结论留在结果区，作者能看见存档号再自己关。没有结果区（老结构）才退回原来的"关窗"。
+    if (!showModalResultText('rw', msg + (range ? '\n范围：' + range : '') + '\n进度见写作台的日志与实时镜像。')) {
+      $('#rewriteModal')?.classList.add('hidden');
+    }
+    $('#rwErr').textContent = '';
     if (r.mode === 'started') { setWriting(true); openStream(CUR.slug); }
-    toast((r.mode === 'inserted' ? '已穿插重写指令' : '已开窗重写') + (r.snapshot ? '（存档 ' + r.snapshot + '）' : ''));
+    toast(msg);
   } catch (e) { $('#rwErr').textContent = e.message; }
-  finally { $('#rwGo').disabled = false; }
+  finally { const g = $('#rwGo'); if (g) g.disabled = false; }
 });
 
 // ---------- 改书名 ----------
@@ -774,6 +948,7 @@ $('#rnSave').addEventListener('click', async () => {
     const r = await api('/api/book/rename', 'POST', { book: CUR.slug, title: t });
     CUR.title = r.title; const b = STATE.books.find(x => x.slug === CUR.slug); if (b) b.title = r.title;
     $('#writeTitle').textContent = '《' + r.title + '》';
+    renderHeadCover(CUR);
     $('#renameModal').classList.add('hidden');
     toast(`已改名为《${r.title}》（改写 ${r.touched} 个文件，全书生效）`);
     refresh();
@@ -837,7 +1012,8 @@ function pbRenderProfiles(saved) {
 async function openPublish(book) {
   book = book || CUR; if (!book) return;
   CUR = book;
-  $('#pbErr').textContent = ''; $('#pbPreviewOut').style.display = 'none';
+  $('#pbErr').textContent = '';
+  clearModalResult('pb');   // 换书重开弹窗 → 结果区先清空，别把上一本的清单留在这儿
   $('#pbGo').disabled = true; $('#pbGo').textContent = '🔍 请先点「预览将发」';   // 发布前必须先预览
   const b = STATE.books.find(x => x.slug === book.slug) || book;
   pbFill(b);
@@ -1162,9 +1338,10 @@ $('#pbPreview').addEventListener('click', async () => {
     // 导致预览其实成功了、发布按钮却没亮（用户看到"预览之后没有发布按钮"）。
     const r = await pbRace(api('/api/book/publish-preview', 'POST', { book: CUR.slug }), 150000, '预览番茄超时（读取番茄太慢，请重试或检查网络/代理）');
     PB_PREVIEW = { slug: CUR.slug, data: r };   // 供 pbPublish 判断是否要弹「覆盖已发布章」二次确认
-    const out = $('#pbPreviewOut'); out.style.display = '';
+    let txt = '';
     if (r.blocked) {
-      out.textContent = `⛔ 无法确认番茄当前章号，已阻止发布：\n${r.reason}\n\n请确认该 Unzoo 账号的浏览器能正常打开番茄章节管理页（检查代理/网络/登录），再重新预览。`;
+      txt = `⛔ 无法确认番茄当前章号，已阻止发布：\n${r.reason}\n\n请确认该 Unzoo 账号的浏览器能正常打开番茄章节管理页（检查代理/网络/登录），再重新预览。`;
+      showModalResultText('pb', txt);
       $('#pbGo').disabled = true; $('#pbGo').textContent = '📤 发布全部新章 ▶';
       return;
     }
@@ -1202,16 +1379,21 @@ $('#pbPreview').addEventListener('click', async () => {
     // 按卷发布仅在【读取卷失败】时禁止发布；缺卷会自动新建，不再禁用
     const volBlocked = r.matchVolumes && r.volumes && r.volumes.error;
     if (r.newCount > 0) {
-      out.textContent = `番茄已发到第 ${r.fanqieMax} 章${r.approx ? '(近似)' : ''}，本地已写到第 ${r.localMax} 章。\n将发布 ${r.newCount} 个新章：第 ${r.from}–${r.to} 章\n` + (r.titles || []).map(t => '  · ' + t).join('\n') + (r.newCount > 5 ? '\n  …' : '') + rw + vol + sched;
+      txt = `番茄已发到第 ${r.fanqieMax} 章${r.approx ? '(近似)' : ''}，本地已写到第 ${r.localMax} 章。\n将发布 ${r.newCount} 个新章：第 ${r.from}–${r.to} 章\n` + (r.titles || []).map(t => '  · ' + t).join('\n') + (r.newCount > 5 ? '\n  …' : '') + rw + vol + sched;
       $('#pbGo').disabled = !!volBlocked; $('#pbGo').textContent = volBlocked ? '⛔ 番茄卷读取失败，重试预览' : `📤 发布全部 ${r.newCount} 个新章 ▶`;
     } else {
-      out.textContent = `番茄已发到第 ${r.fanqieMax} 章${r.approx ? '(近似)' : ''}，本地第 ${r.localMax} 章 —— 无新章可发。` + rw + vol + sched;
+      txt = `番茄已发到第 ${r.fanqieMax} 章${r.approx ? '(近似)' : ''}，本地第 ${r.localMax} 章 —— 无新章可发。` + rw + vol + sched;
       // 没有新章、但有要 edit 覆盖的章（重写章 / 未记账章，各自的开关已开）：也允许发布
       const nEdit = pbEditCountOf(r);
       $('#pbGo').disabled = !nEdit;
       $('#pbGo').textContent = nEdit ? `📤 edit 覆盖 ${nEdit} 章 ▶` : '📤 发布全部新章 ▶';
     }
-  } catch (e) { $('#pbErr').textContent = '预览失败：' + e.message; }
+    // 预览结论留在结果区：弹窗不关，作者对着这张清单再决定试发/发布
+    showModalResultText('pb', txt);
+  } catch (e) {
+    $('#pbErr').textContent = '预览失败：' + e.message;
+    showModalResultText('pb', '⛔ 预览失败：' + e.message);
+  }
   finally { stopTick(); btn.disabled = false; btn.textContent = old; }
 });
 let PB_PREVIEW = null;     // 最近一次「预览将发」的结果 {slug,data}：发布时据此决定要不要覆盖确认
@@ -1220,6 +1402,9 @@ let PB_STREAM_SLUG = null; // 当前 SSE 属于哪本书（用于弹窗重开时
 function pbCloseStream() { if (PB_STREAM) { try { PB_STREAM.close(); } catch {} PB_STREAM = null; PB_STREAM_SLUG = null; } }
 // 发布进入/结束时切换「停止发布」「发布中」等按钮态；发布中禁用发布类按钮，露出停止按钮。
 function pbSetPublishingUI(on) {
+  // 发布也登进统一任务条：跑起来之后作者不用再去弹窗里找「停止发布」
+  if (on) taskStart({ kind: 'publish', label: '发布到番茄' + (CUR && CUR.title ? ' ·《' + CUR.title + '》' : ''), onStop: pbStopPublish, meta: CUR && CUR.slug });
+  else taskEnd('publish');
   const stop = $('#pbStop');
   if (stop) { stop.style.display = on ? '' : 'none'; stop.disabled = !on; stop.textContent = '⏹ 停止发布'; }
   $('#pbTest').disabled = !!on; $('#pbPreview').disabled = !!on;
@@ -1246,12 +1431,14 @@ function pbMarkDone(slug) {
   PUBLISHING.delete(slug);
   pbCloseStream();
   if (CUR && CUR.slug === slug) pbSetPublishingUI(false);
+  // 发布中换了书（CUR 已经不是它了）→ 上面那行不会走，任务条会一直挂着；按 slug 对上就收掉
+  else if (TASK.kind === 'publish' && TASK.meta === slug) taskEnd('publish');
   renderShelf();
 }
-// 挂 SSE：把番茄发布日志滚进 pbPreviewOut，命中结束词时收尾。
+// 挂 SSE：把番茄发布日志滚进结果区 #pbResult，命中结束词时收尾。
+// （原先同时还往 #pbPreviewOut 写一份，两个框都显示 → 同样的日志出现两遍。已退役那个框。）
 function pbAttachStream(slug, header) {
-  const out = $('#pbPreviewOut'); out.style.display = '';
-  if (header) out.textContent = header;
+  if (header) showModalResultText('pb', header);   // 结果区同步一份：跑完弹窗不关，进度和结论都留着
   pbCloseStream();
   PB_STREAM_SLUG = slug;
   PB_STREAM = new EventSource(`${API}/api/stream?book=${encodeURIComponent(slug)}`);
@@ -1261,10 +1448,13 @@ function pbAttachStream(slug, header) {
     const tag = e.level === 'error' ? '✖' : e.level === 'act' ? '▶' : '·';
     out.textContent += `${tag} ${e.msg}\n`;
     out.scrollTop = out.scrollHeight;
+    appendModalResultText('pb', `${tag} ${e.msg}\n`);
+    if (TASK.kind === 'publish') taskProgress({ text: e.msg });
     // 发布收尾/停止/异常 → 清状态、复位按钮
     if (/发布结束|重发结束|全部完成|已暂停|已中止|已停止|无新章|发布异常/.test(e.msg)) {
       out.textContent += '\n——（已结束，可关闭。番茄那边稍后刷新可见）——\n';
       out.scrollTop = out.scrollHeight;
+      appendModalResultText('pb', '\n——（已结束，弹窗不自动关；结果留在这儿。番茄那边稍后刷新可见）——\n');
       pbMarkDone(slug);
     }
   });
@@ -1311,14 +1501,16 @@ async function pbPublish(limit) {
     // 标记这本书正在发布（书卡徽标 + 停止按钮 + 关弹窗后可回来）
     PUBLISHING.add(slug); renderShelf();
     pbSetPublishingUI(true);
-    // 不关弹窗——发布进度实时滚在弹窗里
-    pbAttachStream(slug, '⏳ 已开始发布，进度：\n');
+    if (TASK.kind === 'publish') taskProgress({ label: (limit ? '试发 1 章到番茄' : '发布到番茄') + (CUR && CUR.title ? ' ·《' + CUR.title + '》' : '') });
+    // 不关弹窗——发布进度实时滚在弹窗里 + 结果区
+    pbAttachStream(slug, limit ? '🧪 已开始试发 1 章，进度：\n' : '⏳ 已开始发布，进度：\n');
     toast(limit ? '已开始试发 1 章，进度见下方' : '已开始发布，进度见下方');
   } catch (e) {
     // 启动失败：清状态、恢复所有按钮，绝不卡死
     PUBLISHING.delete(slug); renderShelf();
     pbSetPublishingUI(false);
     $('#pbErr').textContent = '发布失败：' + e.message;
+    showModalResultText('pb', '⛔ 发布失败：' + e.message);
   }
 }
 // 🩹 重发修正：用本地正文 edit 覆盖番茄第 from–to 章。后端 /api/book/republish 早就有，
@@ -1336,28 +1528,35 @@ async function pbRepublish(limit) {
     await api('/api/book/republish', 'POST', { book: slug, from, to, limit: limit || 0 });
     PUBLISHING.add(slug); renderShelf();
     pbSetPublishingUI(true);
-    pbAttachStream(slug, '⏳ 已开始重发修正，进度：\n');
+    if (TASK.kind === 'publish') taskProgress({ label: (limit ? '试改第 ' + from + ' 章' : `重发修正 第 ${from}–${to} 章`) + (CUR && CUR.title ? ' ·《' + CUR.title + '》' : '') });
+    pbAttachStream(slug, limit ? `🧪 只改第 ${from} 章试手，进度：\n` : `⏳ 已开始重发修正 第 ${from}–${to} 章，进度：\n`);
     toast(limit ? '已开始试改 1 章，进度见下方' : '已开始覆盖，进度见下方');
   } catch (e) {
     PUBLISHING.delete(slug); renderShelf();
     pbSetPublishingUI(false);
     $('#pbErr').textContent = '重发修正失败：' + e.message;
+    showModalResultText('pb', '⛔ 重发修正失败：' + e.message);
   }
 }
 $('#pbRpTest')?.addEventListener('click', () => pbRepublish(1));
 $('#pbRpGo')?.addEventListener('click', () => pbRepublish(0));
-// ⏹ 停止发布：请求后台停发（发完当前章即停），保留状态直到 SSE 报结束。
-$('#pbStop').addEventListener('click', async () => {
-  if (!CUR) return;
-  const btn = $('#pbStop'); btn.disabled = true; const old = btn.textContent; btn.textContent = '⏹ 停止中…';
+// ⏹ 停止发布：请求后台停发（发完当前章即停），保留状态直到 SSE 报结束。任务条和 #pbStop 共用。
+async function pbStopPublish() {
+  const slug = (TASK.kind === 'publish' && TASK.meta) || (CUR && CUR.slug);
+  if (!slug) return;
+  const btn = $('#pbStop'); const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏹ 停止中…'; }
   try {
-    await pbRace(api('/api/book/publish-stop', 'POST', { book: CUR.slug }), 60000, '停止请求超时');
+    await pbRace(api('/api/book/publish-stop', 'POST', { book: slug }), 60000, '停止请求超时');
+    taskProgress({ text: '已请求停止：发完当前章即停' });
     toast('已请求停止（发完当前章即停）');
   } catch (e) {
-    $('#pbErr').textContent = '停止失败：' + e.message;
-    btn.disabled = false; btn.textContent = old;   // 停止请求本身失败时恢复按钮，让用户能重试
+    const err = $('#pbErr'); if (err) err.textContent = '停止失败：' + e.message;
+    if (btn) { btn.disabled = false; btn.textContent = old; }   // 停止请求本身失败时恢复按钮，让用户能重试
+    throw e;   // 让任务条也知道这次停止没成，好把停止按钮放回来
   }
-});
+}
+$('#pbStop').addEventListener('click', () => taskStopVia('publish', pbStopPublish));
 $('#pbGo').addEventListener('click', () => pbPublish(0));
 $('#pbTest').addEventListener('click', () => pbPublish(1));
 // 关弹窗：若该书仍在发布，保留 SSE 让书卡徽标能在后台发布结束时自动消失；否则收流。
@@ -1372,7 +1571,7 @@ $('#pbCancel').addEventListener('click', pbCloseModal);
 // ---------- 从番茄导入图书到本地 ----------
 let IF_PROFILES = [], IF_BOOKS = [], IF_STREAM = null;
 const IF_BOOKS_CACHE = {};
-function ifCloseStream() { if (IF_STREAM) { try { IF_STREAM.close(); } catch {} IF_STREAM = null; } }
+function ifCloseStream() { if (IF_STREAM) { try { IF_STREAM.close(); } catch {} IF_STREAM = null; } taskEnd('import'); }
 function ifRenderProfiles() {
   const sel = $('#ifProfile');
   if (!IF_PROFILES.length) { sel.innerHTML = '<option value="">（未检测到 Unzoo 账号，请先开浏览器并登录番茄）</option>'; return; }
@@ -1402,6 +1601,7 @@ function ifRenderBooks() {
 }
 $('#btnImportFanqie').addEventListener('click', async () => {
   $('#ifErr').textContent = ''; $('#ifOut').style.display = 'none'; $('#ifOut').textContent = '';
+  clearModalResult('if');   // 重开弹窗 → 结果区先清空，别留上一次的清单/日志
   $('#ifGo').disabled = true; $('#ifTitle').value = '';
   $('#importFanqieModal').classList.remove('hidden');
   $('#ifProfile').innerHTML = '<option value="">（加载账号…）</option>';
@@ -1419,12 +1619,15 @@ $('#ifPreview').addEventListener('click', async () => {
   if (!profilePath || !bookId) { $('#ifErr').textContent = '请选账号和番茄书籍'; return; }
   $('#ifErr').textContent = ''; const btn = $('#ifPreview'); const old = btn.textContent; btn.disabled = true; btn.textContent = '读取番茄中…';
   const out = $('#ifOut'); out.style.display = ''; out.textContent = '⏳ 读取卷与章节目录…';
+  showModalResultText('if', '⏳ 读取卷与章节目录…');
   try {
     const r = await api('/api/fanqie/import-preview', 'POST', { profilePath, bookId });
-    if (!r.ok) { out.textContent = '⛔ ' + (r.error || '预览失败'); $('#ifGo').disabled = true; return; }
+    if (!r.ok) { out.textContent = '⛔ ' + (r.error || '预览失败'); showModalResultText('if', out.textContent); $('#ifGo').disabled = true; return; }
     out.textContent = `将导入 ${r.volumes} 卷 / ${r.chapters} 章：\n` + (r.volNames || []).map(n => '  · ' + n).join('\n');
+    // 预览清单留在结果区：弹窗不关，作者照着它决定试导 3 章还是整本导
+    showModalResultText('if', out.textContent);
     $('#ifGo').disabled = false;
-  } catch (e) { out.textContent = '预览失败：' + e.message; }
+  } catch (e) { out.textContent = '预览失败：' + e.message; showModalResultText('if', '⛔ 预览失败：' + e.message); }
   finally { btn.disabled = false; btn.textContent = old; }
 });
 async function ifImport(limit) {
@@ -1432,27 +1635,38 @@ async function ifImport(limit) {
   if (!profilePath || !bookId) { $('#ifErr').textContent = '请选账号和番茄书籍'; return; }
   if (!limit && !confirm('把这本番茄书整本拉到本地（含全部章节正文）？章数多时需要几分钟。')) return;
   $('#ifErr').textContent = '';
-  const out = $('#ifOut'); out.style.display = ''; out.textContent = '⏳ 已开始导入，进度：\n';
+  const out = $('#ifOut'); out.style.display = '';
+  const head = limit ? `🧪 已开始试导 ${limit} 章，进度：\n` : '⏳ 已开始导入整本，进度：\n';
+  out.textContent = head; showModalResultText('if', head);
   $('#ifGo').disabled = true; $('#ifTest').disabled = true; $('#ifPreview').disabled = true;
   try {
     await api('/api/fanqie/import', 'POST', { profilePath, bookId, title, limit: limit || 0 });
     ifCloseStream();
+    taskStart({ kind: 'import', label: (limit ? '试导 ' + limit + ' 章' : '从番茄导入整本') + (title ? ' ·《' + title + '》' : ''), meta: bookId });
     IF_STREAM = new EventSource(`${API}/api/stream?book=${encodeURIComponent('__import_' + bookId)}`);
     IF_STREAM.addEventListener('log', ev => {
       let e; try { e = JSON.parse(ev.data); } catch { return; }
       if (e.source !== 'import') return;
       const tag = e.level === 'error' ? '✖' : e.level === 'warn' ? '⚠' : e.level === 'act' ? '▶' : '·';
       out.textContent += `${tag} ${e.msg}\n`; out.scrollTop = out.scrollHeight;
+      appendModalResultText('if', `${tag} ${e.msg}\n`);
+      if (TASK.kind === 'import') taskProgress({ text: e.msg });
       if (/从番茄导入结束|从番茄导入异常/.test(e.msg)) {
         ifCloseStream(); $('#ifTest').disabled = false; $('#ifPreview').disabled = false; $('#ifGo').disabled = false;
         out.textContent += '\n——（结束）——\n'; out.scrollTop = out.scrollHeight;
+        appendModalResultText('if', '\n——（结束，弹窗不自动关；结果留在这儿）——\n');
         refresh();
         if (/导入结束/.test(e.msg)) toast('导入完成，已加入书架');
       }
     });
     IF_STREAM.onerror = () => {};
-    toast(limit ? '已开始试导 3 章' : '已开始导入，进度见下方');
-  } catch (e) { $('#ifErr').textContent = '导入失败：' + e.message; $('#ifGo').disabled = false; $('#ifTest').disabled = false; $('#ifPreview').disabled = false; }
+    toast(limit ? `已开始试导 ${limit} 章` : '已开始导入，进度见下方');
+  } catch (e) {
+    taskEnd('import');
+    $('#ifErr').textContent = '导入失败：' + e.message;
+    showModalResultText('if', '⛔ 导入失败：' + e.message);
+    $('#ifGo').disabled = false; $('#ifTest').disabled = false; $('#ifPreview').disabled = false;
+  }
 }
 $('#ifGo').addEventListener('click', () => ifImport(0));
 $('#ifTest').addEventListener('click', () => ifImport(3));
@@ -2420,7 +2634,11 @@ function openStream(slug) {
 }
 function closeStream() { if (STREAM) { STREAM.close(); STREAM = null; } }
 // ---------- 审稿/审核确认门动作条 ----------
-function hideReviewBar() { $('#reviewBar').classList.add('hidden'); }
+function hideReviewBar() {
+  $('#reviewBar').classList.add('hidden');
+  // 拍板条收起来：还在写就把任务条还给「写作中」，真停了才整条收掉
+  if (TASK.kind === 'review') { if (WRITING) taskStartWrite(); else taskEnd('review'); }
+}
 async function showReviewBar() {
   if (!CUR) return;
   try {
@@ -2448,6 +2666,14 @@ async function showReviewBar() {
       $('#rbActionsBatch').classList.add('hidden');
       $('#rbActionsOutline').classList.remove('hidden');
     }
+    // 待拍板也是一档"当前在跑的事"：登进任务条，停止就是 rbStop 那个停。
+    // 大纲确认门没有"停"这一说（只有采纳/跳过），onStop 留空 → 任务条上的停止自动置灰。
+    taskStart({
+      kind: 'review',
+      label: batch ? '待你拍板：本批已写完' : '待你确认：主编审稿意见',
+      text: p.scope || '',
+      onStop: batch ? batchStop : null,
+    });
     $('#reviewBar').classList.remove('hidden');
   } catch {}
 }
@@ -2524,7 +2750,7 @@ async function batchStop() {
 }
 $('#rbContinue').addEventListener('click', () => batchContinue(false));
 $('#rbContinueReq').addEventListener('click', () => batchContinue(true));
-$('#rbStop').addEventListener('click', batchStop);
+$('#rbStop').addEventListener('click', () => taskStopVia('review', batchStop));
 function appendLog(e) {
   if (e.kind === 'pending-review' || e.kind === 'pending-batch') showReviewBar();   // 待确认/待审核 → 弹动作条
   const feed = $('#logFeed');
@@ -2534,6 +2760,8 @@ function appendLog(e) {
   feed.appendChild(line);
   if (e.msg && /token/i.test(e.msg)) {}
   feed.scrollTop = feed.scrollHeight;
+  // 任务条上的"跑到哪"就用最新这行日志；优雅停止中别覆盖掉那句提示
+  if (TASK.kind === 'write' && !STOP_DRAINING && e.msg) taskProgress({ text: e.msg });
   while (feed.childNodes.length > 400) feed.removeChild(feed.firstChild);
   // 顺带刷新 token 徽章
   if (CUR) api('/api/usage').then(u => { const t = u.books?.[CUR.slug]?.total; if (t) $('#writeTokens').textContent = 'tokens ' + fmtTok(t); }).catch(() => {});
@@ -2904,8 +3132,8 @@ $('#crPolish') && $('#crPolish').addEventListener('change', () => {
   $('#crCriticWrap').classList.toggle('hidden', !on);
 });
 // 关弹窗【只关界面，不停任务】——后台照写。轮询留着，写完照样 toast 并刷新目录。
-$('#crClose') && $('#crClose').addEventListener('click', () => $('#chRewriteModal').classList.add('hidden'));
-$('#crCancel') && $('#crCancel').addEventListener('click', () => $('#chRewriteModal').classList.add('hidden'));
+$('#crClose') && $('#crClose').addEventListener('click', () => $('#chRewriteModal')?.classList.add('hidden'));
+$('#crCancel') && $('#crCancel').addEventListener('click', () => $('#chRewriteModal')?.classList.add('hidden'));
 // 重写在【后台】跑：起任务后立刻返回，前端轮询。关掉弹窗、切去别的页面都不会打断它——
 // 之前做成同步请求，中途任何一环断掉（webview 超时/关弹窗/应用重启）整个活就白干且不留痕迹。
 let crPoll = null;
@@ -2916,18 +3144,29 @@ function crStartPoll(book) {
     let s;
     try { s = await api('/api/book/rewrite-chapter-status', 'POST', { book: book.slug }); }
     catch { return; }                       // 网络抖一下不算失败，下一拍再看
-    if (s.status === 'running') { $('#crStatus').textContent = '⏳ ' + (s.msg || '重写中…'); return; }
+    if (s.status === 'running') {
+      const st = $('#crStatus'); if (st) st.textContent = '⏳ ' + (s.msg || '重写中…');
+      if (TASK.kind === 'rewrite-chapter') taskProgress({ text: s.msg || '重写中…' });
+      return;
+    }
     crStopPoll();
-    $('#crGo').disabled = false;
+    taskEnd('rewrite-chapter');
+    const goBtn = $('#crGo'); if (goBtn) goBtn.disabled = false;
     if (s.status === 'done') {
-      $('#chRewriteModal').classList.add('hidden');
-      $('#crStatus').textContent = '';
-      toast(`第 ${s.num} 章已重写（${s.before} → ${s.words} 字）`
-        + (s.title && s.oldTitle && s.title !== s.oldTitle ? `，章名 → 《${s.title}》` : ''));
+      const msg = `第 ${s.num} 章已重写（${s.before} → ${s.words} 字）`
+        + (s.title && s.oldTitle && s.title !== s.oldTitle ? `，章名 → 《${s.title}》` : '');
+      const st = $('#crStatus'); if (st) st.textContent = '';
+      toast(msg);
       try { await openReaderAt(book, s.rel); } catch {}   // 章名可能变了→刷新目录并停在新文件上
+      // 跑完不关窗：结论留在结果区（阅读台已在弹窗后面跳到这一章，关掉就能看）。
+      // 没有结果区（老结构）才退回原来的"关窗"行为。
+      if (!showModalResultText('cr', '✅ ' + msg + '\n阅读台已跳到这一章，关掉这个弹窗就能看；不满意可以改改参数再跑一次。')) {
+        $('#chRewriteModal')?.classList.add('hidden');
+      }
     } else if (s.status === 'error') {
-      $('#crStatus').textContent = '';
+      const st = $('#crStatus'); if (st) st.textContent = '';
       $('#crErr').textContent = s.error || '重写失败';
+      showModalResultText('cr', '⛔ 重写失败：' + (s.error || '未知'));
     }
   }, 3000);
 }
@@ -2936,6 +3175,7 @@ $('#crGo') && $('#crGo').addEventListener('click', async () => {
   if (!RD_BOOK || !RD_REL) return;
   const book = RD_BOOK, model = $('#crModel').value;
   $('#crGo').disabled = true; $('#crErr').textContent = '';
+  clearModalResult('cr');   // 再跑一次 → 先清掉上一轮的结论
   const pol = $('#crPolish').checked;
   $('#crStatus').textContent = '⏳ 正在重写…'
     + (model === 'api-local' ? '（本地模型约 3–6 分钟）' : '（约 1–8 分钟）')
@@ -2949,11 +3189,16 @@ $('#crGo') && $('#crGo').addEventListener('click', async () => {
       slant: crPickedSlants(), romance: $('#crRomance').value || null,
       polish: $('#crPolish').checked, critic: $('#crCritic').value || '',
     });
+    // 重写单章在后台跑（关弹窗也不断）→ 登进任务条，作者切去别处也看得见它还在跑。
+    // 后端没有"停单章重写"的接口，onStop 留空 → 任务条上的停止自动置灰。
+    taskStart({ kind: 'rewrite-chapter', label: '重写本章' + (book.title ? ' ·《' + book.title + '》' : ''), text: '已起任务，后台跑' });
     crStartPoll(book);                       // 起好了就开始轮询，不再占着这个请求
   } catch (e) {
+    taskEnd('rewrite-chapter');
     $('#crStatus').textContent = '';
     $('#crErr').textContent = e.message;
     $('#crGo').disabled = false;
+    showModalResultText('cr', '⛔ 起任务失败：' + e.message);
   }
 });
 
@@ -3490,3 +3735,10 @@ function initDrawers() {
   }
 }
 initDrawers();
+
+// 任务条初始态：空闲（.idle）。DOM 若还没到位（index.html 那边正在加），
+// DOMContentLoaded 再补一次；两次都拿不到就静默算了，不影响其余功能。
+taskRender();
+if (typeof document !== 'undefined' && document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', taskRender, { once: true });
+}

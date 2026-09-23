@@ -92,10 +92,42 @@ body {
 .card-btn { flex: 1; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 0; font-size: 12.5px; cursor: pointer; transition: .15s; }
 .card-btn:hover { border-color: var(--accent); color: var(--accent-2); }
 
-/* 工作台 */
-.workbench { display: grid; grid-template-columns: 380px 1fr; gap: 18px; height: calc(100vh - 130px); }
-.wb-left { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
-.wb-right { display: flex; flex-direction: column; min-height: 0; }
+/* 工作台
+   【为什么是上下而不是左右】原来是 grid 380px + 1fr：29 个功能按钮、全部表单和日志
+   挤在 380px 里（占 23%），而右边 1230px 只放一个实时镜像——不写作时那 77% 始终空着，
+   显示的是"（开始写作后，这里实时显示 AI 写作过程）"。
+   现在把宽度和高度都还给功能：功能吃满整个工作区，镜像收到底部按需展开。 */
+.workbench { display: flex; flex-direction: column; gap: 14px; height: calc(100vh - 130px); }
+.wb-main { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 4px; }
+
+/* 五组功能横向铺开。auto-fit + minmax(300px)：1600px 宽正好排 5 列（五组各占一列），
+   1300px 排 4 列，1000px 排 3 列，窄屏一路降到 1 列。
+   【为什么是 300 不是 340】实测 340 排 4 列时第五组被挤到第二行，全部展开要滚 152px；
+   300 排 5 列后总高从 833px 降到 546px，五组同时展开也放得下，而列宽 315px 仍够——
+   最长的按钮「🤝 我来主笔 · 共创」需要 289px，正好放得进去，实测 0 换行 0 裁切。
+   align-items:start 很关键——否则同一行的抽屉会被拉成等高，收起的那个会留一大片空白。 */
+.dw-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; align-items: start; }
+
+/* 底部镜像面板：折叠时只占一行标题，展开时吃掉 36vh（镜像 + 日志并排）。 */
+.wb-mirror { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.wb-mirror > summary { cursor: pointer; list-style: none; padding: 9px 13px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.wb-mirror > summary::-webkit-details-marker { display: none; }
+.wb-mirror > summary::before { content: '▸'; font-size: 10px; transition: transform .15s ease; }
+.wb-mirror[open] > summary::before { transform: rotate(90deg); }
+.wb-mirror > summary:hover { background: rgba(255,255,255,.03); border-radius: 10px 10px 0 0; }
+/* ⚠️ <details> 的非 summary 内容在 Chrome 里被塞进一个隐式 slot，
+   它既不是 flex item 也不是 grid item——父元素上写 flex:1 / grid-template-rows 全都管不到它
+   （实测面板 340px，内容区只有 61px，镜像被压成 49px，两行都显示不下）。
+   唯一可靠的办法是【直接给内容区算高度】，不依赖父容器的弹性分配。 */
+.wb-mirror[open] { height: 36vh; }
+.wb-mirror .mirror-wrap { height: calc(36vh - 58px); min-height: 0; display: grid; grid-template-columns: 1fr 360px; gap: 10px; padding: 0 12px 12px; }
+/* .mirror 和 .log-feed 原本靠 flex:1 撑高，进了 grid 容器就失效了（只剩内容高 80px）——
+   在 grid 里要显式 height:100% + min-height:0，才会填满面板并在内部滚动。 */
+.wb-mirror .mirror-wrap > .mirror,
+.wb-mirror .mirror-wrap > .log-feed { height: 100%; min-height: 0; margin: 0; }
+@media (max-width: 1100px) { .wb-mirror .mirror-wrap { grid-template-columns: 1fr; grid-template-rows: 1fr auto; } }
+.wb-mirror:not([open]) .mirror-wrap { display: none; }
+.mx-hint { margin-left: auto; font-size: 11px; opacity: .55; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--muted); }
 .field span { font-weight: 500; }
 .ws-row { display: flex; gap: 8px; align-items: center; }
@@ -113,22 +145,75 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 textarea { resize: vertical; line-height: 1.5; }
 .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .btn-row.end { justify-content: flex-end; margin-top: 8px; }
+
+/* 抽屉里的按钮排成等宽两列。
+   【为什么不用 flex-wrap】原来按钮宽度由文字长短决定，于是同一组里出现
+   「📖 阅读 172px + 🔍 复检已写的内容 172px」「📋 让主编看这卷大纲 354px 独占一行」
+   「🖋️ 文风范本 110 + 🎨 文风 86 + 📚 对标别人的书 137」这种参差排列——
+   文字一个都没换行，挤压感全来自宽度忽宽忽窄、每行个数忽多忽少。
+   等宽网格之后，同一组的按钮左右对齐，长按钮用 .span2 跨满一行。 */
+.drawer .btn-row:not(.end) { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: stretch; }
+.drawer .btn-row:not(.end) > .btn { width: 100%; flex: none; justify-content: center; text-align: center; }
+.drawer .btn-row:not(.end) > .btn.big,
+.drawer .btn-row:not(.end) > .btn.span2 { grid-column: 1 / -1; }
+/* ── 按钮三档 ────────────────────────────────────────────
+   以前 153 个按钮权重全一样：.btn 和 .btn.ghost 只差一层几乎看不出的底色，
+   扫一眼找不到重点。对标起点写作页——整页只有「发布」一个实心按钮，
+   撤销/重做/查找替换/快速起名/作家的话/历史版本六个工具零个实心。
+   三档从强到弱，靠【填充 → 描边 → 无框】拉开，不靠大小和 emoji：
+     ① .btn.primary  主操作：实心极光青 + 深字 + 辉光。同屏只应出现一个。
+     ② .btn          次操作：描边。底色压到半透明，让边框而不是色块立身。
+     ③ .btn.ghost    工具操作：无边框、字色降到 muted，hover 才浮出来。
+   .danger / .danger-out / .tiny / .big / .span2 / .icon 是【正交修饰】，
+   与任意一档叠加都成立（如 .btn.ghost.tiny 阅读页工具条、.btn.primary.big 共创）。 */
 .btn {
-  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border-2); background: color-mix(in srgb, var(--panel-2) 62%, transparent); color: var(--text);
   padding: 10px 16px; border-radius: 9px; font-size: 13.5px; cursor: pointer; transition: .15s; flex: 1;
   white-space: nowrap;
 }
-.btn:hover { border-color: var(--border-2); background: var(--panel); }
-.btn.primary { background: linear-gradient(180deg, var(--accent-2), var(--accent)); color: var(--accent-ink); border: 0; font-weight: 700; box-shadow: var(--glow); }
-.btn.primary:hover { filter: brightness(1.06); }
-.btn.danger { color: var(--red); }
-.btn.ghost { background: transparent; flex: 0; }
+.btn:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-2)); background: var(--panel-2); }
+.btn:active { transform: translateY(1px); }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(52,214,166,.22); }
+
+/* ① 主操作。border-color:transparent 而不是 border:0——保持和同排次按钮
+   一样的盒高，不然一行里实心按钮会矮 2px。 */
+.btn.primary { background: linear-gradient(180deg, var(--accent-2), var(--accent)); color: var(--accent-ink); border-color: transparent; font-weight: 700; box-shadow: var(--glow); }
+.btn.primary:hover { filter: brightness(1.06); background: linear-gradient(180deg, var(--accent-2), var(--accent)); border-color: transparent; }
+
+/* ③ 工具操作。去掉边框是这一档和次操作唯一可靠的区分点（深色底上底色差
+   几乎看不见），字色降到 muted，指过去才给一层微亮底。 */
+.btn.ghost { background: transparent; border-color: transparent; color: var(--muted); flex: 0; }
+.btn.ghost:hover { background: rgba(255,255,255,.06); border-color: transparent; color: var(--text); }
+
+/* 正交修饰：危险色。描边档染红边，无框档只染字，不给它凭空加回边框。 */
+.btn.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--border-2)); }
+.btn.danger:hover { color: #ffd9de; border-color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
+.btn.ghost.danger { border-color: transparent; color: #f0a0ab; }
+.btn.ghost.danger:hover { border-color: transparent; color: #ffd9de; background: color-mix(in srgb, var(--red) 12%, transparent); }
+
+/* 正交修饰：纯图标按钮（✏️ 📖 📂 这类）。padding 收成近方形，不占一个词的宽。 */
+.btn.icon { flex: 0 0 auto; padding: 8px 10px; font-size: 15px; line-height: 1; }
+
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .check-row { display: flex; gap: 16px; flex-wrap: wrap; }
-.cover-wrap { display: flex; gap: 18px; }
-.cover-left { flex: 1; display: flex; flex-direction: column; gap: 12px; }
-.cover-preview { flex: 0 0 auto; }
-.cover-preview canvas { width: 225px; height: 300px; border-radius: 8px; border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+/* 封面管理弹窗。
+   2026-09-23 修：作者报「封面管理看不到封面」。根因是 flex 的 min-width:auto——
+   .cover-left 设了 flex:1 却没有 min-width:0，于是它拒绝收缩到内容宽度以下（实测占 697px），
+   把右边的预览画布顶到了 x=1382，而弹窗卡片右边界只到 1280。画布一直在、也一直"可见"，
+   只是被推到了卡片外面，卡片 overflow-x:auto 把它变成了要横向滚动才看得到的东西。
+   三条一起改：① 卡片给够宽度 ② .cover-left 允许收缩 ③ 预览粘住——
+   控件列高 1092px 而弹窗最高 92vh(≈869px)，不粘住的话一往下滚封面就出视野了。 */
+#coverModal .modal-card { width: 940px; }
+.cover-wrap { display: flex; gap: 18px; align-items: flex-start; }
+.cover-left { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.cover-preview { flex: 0 0 225px; position: sticky; top: 0; align-self: flex-start; }
+.cover-preview canvas { width: 225px; height: 300px; border-radius: 8px; border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0,0,0,.5); display: block; }
+/* 窄屏：改成上下排，预览放到最上面（先看见封面，再调参数） */
+@media (max-width: 1000px) {
+  #coverModal .modal-card { width: auto; }
+  .cover-wrap { flex-direction: column-reverse; }
+  .cover-preview { position: static; align-self: center; }
+}
 .ai-cover-box { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; background: rgba(255,255,255,.02); }
 .ai-prompt { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 12px; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
 .pick-row { display: flex; gap: 8px; }
@@ -399,7 +484,13 @@ textarea { resize: vertical; line-height: 1.5; }
    替代原来的数字看板。原看板给的是 523章/4245KB/tokens 四个孤立数字，
    不给结论；而结论软件其实都有（next/nextLabel 早就算出来了，前端一次没用过）。
    这里的规矩：每条信息都带着它的动作，一屏只有一个主行动。 */
-.now-card { display: flex; flex-direction: column; gap: 10px; }
+/* 「此刻」卡：窄栏时代它竖着排（状态一行、结论一行、按钮一行，占 133px 高）。
+   现在工作区有 1600+px 宽，这三样完全排得下一行——把省下的 70px 还给下面的功能区。
+   窄屏（<1100px）再落回竖排，那时候确实排不开。 */
+.now-card { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.now-card > .now-line { margin-right: auto; }
+.now-card > .now-foot { margin-top: 0; }
+@media (max-width: 1100px) { .now-card { flex-direction: column; align-items: stretch; gap: 10px; } .now-card > .now-line { margin-right: 0; } }
 .now-line { font-size: 13.5px; color: var(--fg); letter-spacing: .2px; }
 
 .now-issues { display: flex; flex-direction: column; gap: 6px; }
@@ -481,6 +572,89 @@ textarea { resize: vertical; line-height: 1.5; }
 .pill.issues.bad { border-color: rgba(233,90,109,.45); color: #f0a0ab; }
 .pill.issues.bad:hover { border-color: #e95a6d; background: rgba(233,90,109,.12); }
 
+/* ── 弹窗底部动作条 ───────────────────────────────────────
+   20 个弹窗以前各发明一套按钮排布：有的取消在右、有的在左，试跑和正式并排
+   同级、只靠 🧪 区分，跑完就关窗、结果什么也没留下。统一成一条规矩：
+     取消永远在左下 · 试跑固定在主操作左边一格 · 主操作永远在右下 · 跑完不关窗。
+   用法：
+     <div class="modal-foot">
+       <div class="mf-left"><button class="btn ghost">取消</button></div>
+       <div class="mf-right"><button class="btn">试一下</button><button class="btn primary">执行 ▶</button></div>
+     </div>
+   没有取消时 .mf-left 可以整个省掉，.mf-right 的 margin-left:auto 会把它顶到右边。 */
+.modal-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  flex-wrap: wrap; margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--border);
+}
+.mf-left { display: flex; align-items: center; gap: 8px; margin-right: auto; }
+/* 试跑和主操作之间要看得出是两件事，所以间距比左侧大一档 */
+.mf-right { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-left: auto; flex-wrap: wrap; }
+/* .btn 默认 flex:1，进了底部动作条会被拉成等宽——按钮宽度该由文字决定 */
+.modal-foot .btn { flex: 0 0 auto; }
+
+/* 结果区：跑完停在这儿，不自动关窗（对标起点「草稿箱 → 发布」两态——
+   预览/试跑的结果是个状态，不是一次性动作）。默认收起，加 .show 才占位。 */
+.modal-result { display: none; }
+.modal-result.show {
+  display: flex; flex-direction: column; gap: 7px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 12px; font-size: 12.5px; line-height: 1.6; color: var(--text);
+  max-height: 34vh; overflow: auto;
+}
+.modal-result.ok { border-color: color-mix(in srgb, var(--accent) 38%, var(--border)); }
+.modal-result.bad { border-color: color-mix(in srgb, var(--red) 40%, var(--border)); }
+.modal-result .mr-title { font-size: 12px; color: var(--muted); font-weight: 600; }
+.modal-result.ok .mr-title { color: var(--accent-2); }
+.modal-result.bad .mr-title { color: #f0a0ab; }
+.modal-result pre {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font: 12px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace; color: #c9d1e0;
+}
+.modal-result ul { margin: 0; padding-left: 1.4em; }
+.modal-result li { margin: 2px 0; }
+
+/* ── 顶栏任务条 ──────────────────────────────────────────
+   三个「停止」（写作 btnStop / 待拍板 rbStop / 发布 pbStop）长得都不一样、
+   位置也不一样，长任务在跑时作者得先找出是哪个在跑。收成一条常驻的任务条：
+   在跑什么 · 跑到哪 · 一个停止。占的是起点「✓ 保存于 17:53:32」那块位置——
+   气质也照它：低调、不抢眼、但一直在，所以尺寸/配色都跟 .badge 对齐，
+   不做成醒目的横幅。 */
+.taskbar {
+  display: flex; align-items: center; gap: 9px; flex: 0 1 auto; min-width: 0; max-width: 420px;
+  padding: 4px 11px; border: 1px solid var(--border); border-radius: 20px;
+  background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+  font-size: 11.5px; color: var(--muted); transition: opacity .2s, border-color .2s;
+}
+/* 状态灯自带，不用在 HTML 里再放一个点 */
+.taskbar::before {
+  content: ""; flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.6s infinite;
+}
+/* min-width 给一个下限：窄屏时任务条会被顶栏挤，纯 min-width:0 会让文字整段
+   塌成 0 宽直接消失——留 5em 保证至少还能读到「共创 · 正在写…」 */
+.tb-what { flex: 1 1 auto; min-width: 5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.tb-progress { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 进度也可以画成细条：<span class="tb-progress bar"><i style="width:42%"></i></span> */
+.tb-progress.bar { width: 74px; height: 3px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+.tb-progress.bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s ease; }
+/* 选择符写成 .taskbar .tb-stop 是为了压过 .btn.ghost——这样无论写成
+   <button class="tb-stop"> 还是 <button class="btn ghost tiny tb-stop"> 都长一个样 */
+.taskbar .tb-stop {
+  flex: 0 0 auto; font: inherit; font-size: 11px; line-height: 1; padding: 4px 10px;
+  border-radius: 14px; cursor: pointer; transition: .15s;
+  border: 1px solid color-mix(in srgb, var(--red) 38%, var(--border)); background: transparent; color: #f0a0ab;
+}
+.taskbar .tb-stop:hover { border-color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); color: #ffd9de; }
+.taskbar .tb-stop:disabled { opacity: .35; cursor: not-allowed; }
+/* 空闲态：整体退到背景里——边框化掉、灯不再跳、没什么可停的就不摆停止按钮。
+   但不隐藏，位置一直在，扫一眼就知道「现在没有任务在跑」。 */
+.taskbar.idle { opacity: .5; border-color: transparent; background: transparent; }
+.taskbar.idle:hover { opacity: .8; }
+.taskbar.idle::before { background: var(--muted); box-shadow: none; animation: none; }
+.taskbar.idle .tb-what { color: var(--muted); }
+.taskbar.idle .tb-stop { display: none; }
+@media (max-width: 1100px) { .taskbar { max-width: 260px; } }
+
 /* 主按钮一个、次动作退成图标：一张卡上四个等宽按钮＝四个都不重要。
    11 本书就是 44 个同样醒目的按钮，等于没有推荐动作。 */
 .card-actions { display: flex; align-items: center; gap: 8px; }
@@ -489,3 +663,12 @@ textarea { resize: vertical; line-height: 1.5; }
 .card-more { display: flex; gap: 4px; flex: none; }
 .card-btn.icon { padding: 5px 8px; min-width: 0; font-size: 13px; opacity: .72; }
 .card-btn.icon:hover { opacity: 1; }
+
+/* 详情页（工作台）页头的封面缩略图。2026-09-23 加：作者报「书籍详情页看不到封面」——
+   这一页原先只有抽屉里一个「🖼️ 封面」按钮，看不到封面本身。点缩略图直接开封面管理。 */
+.head-cover { width: 40px; height: 54px; flex: 0 0 auto; border-radius: 4px; object-fit: cover;
+  border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,.4); cursor: pointer; }
+.head-cover:hover { border-color: var(--accent, #6ee7b7); }
+.head-cover.none { display: flex; align-items: center; justify-content: center; background: var(--panel-2);
+  color: var(--muted); font-size: 9px; text-align: center; line-height: 1.25; }
+.head-cover.hidden { display: none; }

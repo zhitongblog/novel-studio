@@ -43,7 +43,8 @@ import { gitSnapshot } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction, parseReviewItems, critiqueOf } from './editor.mjs';
 import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
-import { previewPublish, publishToFanqie, republishRange } from './publish.mjs';
+import { previewPublish, publishToFanqie, republishRange,
+         bookVolNum, cleanVolSub, outlineVolSubtitle, bibleVolSubtitle } from './publish.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
 import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment, updateFanqieBookInfo } from './fanqie.mjs';
 import { getCompletionReport, runFinaleClosure, locateCompletion, buildCompletionNote } from './finale.mjs';
@@ -482,7 +483,11 @@ async function api(p, req, res, u) {
         else if (planned > 0 && st.chapters >= planned) { status = '已达目标'; next = 'finale'; nextLabel = '可以完本/发行了'; }
         return json(res, 200, {
           ok: true, title: book.title, status, chapters: st.chapters, words, kb: st.kb, tokens,
-          curVol: currentVolume(book), plannedVolumes: plannedVolumes(book), plannedChapters: planned, progress,
+          // curVolName：当前卷的卷名。它本来就存在（AI 生成后写回 bible 的「卷名清单」，
+          // 也可能写在目录名或大纲文件名里），可一直没有一条路通到界面上——
+          // 作者看到的只有「卷1/12」，生成出来的名字自己都不知道叫什么。2026-09-23 补。
+          curVol: currentVolume(book), curVolName: volNameOf(book, currentVolume(book)),
+          plannedVolumes: plannedVolumes(book), plannedChapters: planned, progress,
           health: { ledger, lastReview, crit, warn }, next, nextLabel, participation: participationOf(book),
         });
       } catch (e) { return json(res, 500, { error: e.message }); }
@@ -2348,6 +2353,24 @@ function stripMaskedKeys(patch) {
     }
   }
   return out;
+}
+
+// 取某卷的卷名。【与发布到番茄建卷用的是同一条优先级】：目录名副标题 → 大纲文件名 → bible 卷名清单。
+// 两处必须一致——否则界面上显示一个名字、发到平台上是另一个，作者无从察觉。
+function volNameOf(book, vol) {
+  if (!book?.dir || !(vol >= 1)) return '';
+  try {
+    // ① 目录名带副标题：chapters/卷03_静海旧火
+    const dirs = fs.readdirSync(path.join(book.dir, 'chapters'), { withFileTypes: true })
+      .filter(e => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_'))
+      .map(e => e.name);
+    for (const d of dirs) {
+      if (bookVolNum(d) !== vol) continue;
+      const sub = cleanVolSub(String(d).replace(/^卷\s*\d+/, '').replace(/^[_\-．.、:：\s]+/, ''));
+      if (sub) return sub;
+    }
+  } catch {}
+  try { return outlineVolSubtitle(book, vol) || bibleVolSubtitle(book, vol) || ''; } catch { return ''; }
 }
 
 function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); }

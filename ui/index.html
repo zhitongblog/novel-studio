@@ -60,6 +60,11 @@
       <section class="view hidden" id="view-write">
         <header class="view-head">
           <button class="btn ghost" id="btnBack">← 书架</button>
+          <!-- 封面缩略图：作者报「书籍详情页看不到封面」——这页原先一个封面元素都没有，
+               只有抽屉里一个「🖼️ 封面」按钮。管着一本书的封面却看不见它是什么样，说不过去。
+               点它直接开封面管理；没封面时显示占位，也能点进去做。 -->
+          <img class="head-cover hidden" id="writeCover" alt="封面" title="点开封面管理">
+          <div class="head-cover none hidden" id="writeCoverNone" title="还没有封面 · 点开做一个">无<br>封面</div>
           <h1 id="writeTitle">写作</h1>
           <button class="btn ghost icon" id="btnRename" title="改书名（全书生效）">✏️</button>
           <button class="btn ghost icon" id="btnReadFromWrite" title="阅读已写内容">📖</button>
@@ -68,8 +73,11 @@
           <span class="badge" id="writeTokens">tokens 0</span>
           <span class="badge" id="writeStatus">未开始</span>
         </header>
+        <!-- 布局：功能吃满整个工作区，镜像收到底部按需展开。
+             原先是 380px 功能区 + 1230px 镜像——29 个功能挤在 23% 的宽度里，
+             而那 77% 在不写作时始终是空的（"（开始写作后，这里实时显示…）"）。 -->
         <div class="workbench">
-          <div class="wb-left">
+          <div class="wb-main">
             <!-- 「此刻」：处境 + 该处理的异常 + 一个主行动 -->
             <div class="board" id="wbBoard"></div>
 
@@ -89,6 +97,10 @@
                 <button class="btn ghost danger" id="rbStop">■ 停止</button>
               </div>
             </div>
+
+            <!-- 五组功能横向铺开（auto-fit 网格，宽屏 3–4 列、窄屏自动降到 1 列）。
+                 原先它们竖着排在 380px 里，全展开正好 815px 填满整栏，开两个以上就得滚。 -->
+            <div class="dw-grid">
 
             <!-- ① 接着写：日常主路径，默认展开 -->
             <details class="drawer" id="dwWrite" open>
@@ -122,8 +134,8 @@
                 <div class="btn-row">
                   <button class="btn" id="btnRead" title="阅读全书已写章节：左边选章、右边舒适阅读。共创/写作后可随时在这里读当前创作的章节。">📖 阅读</button>
                   <button class="btn" id="btnReview" title="让 AI 复核并修正已写内容：逻辑/设定矛盾就地改、文风就地润色、节奏给提速方案。">🔍 复检已写的内容</button>
-                  <button class="btn" id="btnOutline" title="换一个模型当主编，审这一卷的大纲，逐条挑要不要改。">📋 让主编看这卷大纲</button>
-                  <button class="btn" id="btnRebuildOutline" title="据已写正文逆向重建 设定圣经 + 各卷分章大纲（不写新正文）。导入的番茄书/半成品书第一次用它补齐规划。">🧭 从正文补回设定和大纲</button>
+                  <button class="btn span2" id="btnOutline" title="换一个模型当主编，审这一卷的大纲，逐条挑要不要改。">📋 让主编看这卷大纲</button>
+                  <button class="btn span2" id="btnRebuildOutline" title="据已写正文逆向重建 设定圣经 + 各卷分章大纲（不写新正文）。导入的番茄书/半成品书第一次用它补齐规划。">🧭 从正文补回设定和大纲</button>
                   <button class="btn" id="btnSignDiag" title="签约被拒/准备申请签约时用：读番茄签约进度、查定时发布有没有乱序、按签约编辑的标准评估已发布章节，给出带章号的修改清单。只读，不改番茄上任何东西。">📋 签约诊断</button>
                 </div>
               </div>
@@ -137,7 +149,7 @@
                   <button class="btn" id="btnVoice" title="本书文风的唯一来源：挂范本、看手法卡">🖋️ 文风范本</button>
                   <button class="btn" id="btnStyle">🎨 文风</button>
                   <button class="btn" id="btnRefStyle" title="对标书风格学习：贴一段对标作品正文，AI 分析出文风指南，保存后写作自动照这个腔写。只学腔、不抄内容。">📚 对标别人的书</button>
-                  <button class="btn" id="btnCover">🖼️ 封面</button>
+                  <button class="btn span2" id="btnCover">🖼️ 封面</button>
                 </div>
                 <div class="synopsis-box">
                   <div class="syn-head">
@@ -160,7 +172,7 @@
                 <div class="btn-row">
                   <button class="btn danger-out" id="btnPublish" title="把已写章节发到番茄。读者立刻可见，撤不回来。">📤 发布到番茄</button>
                   <button class="btn danger-out" id="btnFinale" title="收尾完本。系统会逐项核对完本产物（尾声/完本感言、全书完标注、设定已完结），缺了会退回来让它补。">🏁 完本</button>
-                  <button class="btn danger-out" id="btnRewrite" title="推倒重写指定范围的章节——会覆盖已写正文（动手前自动 git 存档，可回退）。">♻️ 重写已写的章节</button>
+                  <button class="btn danger-out span2" id="btnRewrite" title="推倒重写指定范围的章节——会覆盖已写正文（动手前自动 git 存档，可回退）。">♻️ 重写已写的章节</button>
                 </div>
               </div>
             </details>
@@ -197,12 +209,18 @@
               </div>
             </details>
 
-            <div class="log-feed" id="logFeed"></div>
+            </div><!-- /.dw-grid -->
           </div>
-          <div class="wb-right">
-            <div class="mirror-head"><span class="dot live" id="mirrorDot"></span> 实时镜像 · Unterm 窗口</div>
-            <pre class="mirror" id="mirror">（开始写作后，这里实时显示 AI 写作过程）</pre>
-          </div>
+
+          <!-- 镜像与日志：只在写作时才有内容，所以收在底部、默认折叠；
+               开始写作时由 app.js 自动展开（setMirrorLive）。 -->
+          <details class="wb-mirror" id="mirrorPanel">
+            <summary><span class="dot live" id="mirrorDot"></span> 实时镜像 · Unterm 窗口<span class="mx-hint">写作开始时自动展开</span></summary>
+            <div class="mirror-wrap">
+              <pre class="mirror" id="mirror">（开始写作后，这里实时显示 AI 写作过程）</pre>
+              <div class="log-feed" id="logFeed"></div>
+            </div>
+          </details>
         </div>
       </section>
 
@@ -305,9 +323,10 @@
           <div class="btn-row end"><button class="btn" id="nbrsAnalyze">🔍 分析并采用为本书文风</button></div>
           <div id="nbrsStatus" class="modal-hint"></div>
         </div>
-        <div class="btn-row end">
-          <button class="btn ghost" id="nbCancel">取消</button>
-          <button class="btn primary" id="nbPropose">AI 立项 →</button>
+        <div class="modal-result hidden" id="nbResult"></div>
+        <div class="modal-foot">
+          <div class="mf-left"><button class="btn ghost" id="nbCancel">取消</button></div>
+          <div class="mf-right"><button class="btn primary" id="nbPropose">AI 立项 ▶</button></div>
         </div>
         <div class="modal-err" id="nbErr"></div>
         <div class="adv-toggle" id="nbSelfNameLink">✍️ 我自己起名（跳过 AI 建议，直接立项）</div>
@@ -318,7 +337,7 @@
           </label>
           <label class="field"><span>书名（留空=用文件夹名）</span><input id="nbImpTitle" placeholder="可留空" /></label>
           <label class="field"><span>模型</span><select id="nbImpModel"></select></label>
-          <div class="btn-row end"><button class="btn primary" id="nbImpBtn">导入并继续写 ▶</button></div>
+          <div class="btn-row end"><button class="btn" id="nbImpBtn">导入并继续写 ▶</button></div>
           <div class="modal-hint">会读已写章节、恢复设定与剧情，补全缺失的大纲/索引，然后从最新章节接着写。不会改动已写的章节。</div>
           <div class="modal-err" id="nbImpErr"></div>
         </div>
@@ -363,17 +382,20 @@
           </div>
           <div id="nbVoiceCands"></div>
         </div>
-        <div class="btn-row end">
-          <button class="btn ghost" id="nbBack2">← 返回</button>
-          <button class="btn" id="nbRegen">换一批建议</button>
-          <button class="btn primary" id="nbLaunch" disabled>确认并开写 ▶</button>
+        <div class="modal-result hidden" id="nb2Result"></div>
+        <div class="modal-foot">
+          <div class="mf-left"><button class="btn ghost" id="nbBack2">← 返回</button></div>
+          <div class="mf-right">
+            <button class="btn" id="nbRegen">换一批建议</button>
+            <button class="btn primary" id="nbLaunch" disabled>确认并开写 ▶</button>
+          </div>
         </div>
         <div class="modal-err" id="nbErr2"></div>
       </div>
     </div>
   </div>
 
-  <!-- 复检弹窗 -->
+  <!-- 共创弹窗 -->
   <div class="modal hidden" id="cowriteModal">
     <div class="modal-card" style="max-width:820px">
       <button class="modal-close" id="cwClose" title="关闭 (Esc)">✕</button>
@@ -402,15 +424,19 @@
       <label class="cw-check" style="display:flex;gap:6px;align-items:center;font-size:13px;margin:-2px 0 8px">
         <input type="checkbox" id="cwUseLast" checked /> 带上一章结尾衔接（保持文笔连续）
       </label>
-      <div class="btn-row">
-        <button class="btn primary" id="cwBatchBtn" title="你给一段故事情节，AI 自己判断该拆成几章（3–5 章），连着写完落盘。适合没有大纲、剧情你自己一段段给的写法。">📚 按这段情节连写 3–5 章</button>
-        <button class="btn primary" id="cwWriteBtn">✍️ 让 AI 写这一章</button>
-        <button class="btn" id="cwRedoBtn" disabled title="删掉刚写的这章，按你（可能改过的）要求重写同一章">🔄 重写这一章</button>
-        <button class="btn" id="cwReadBtn" disabled title="在舒适的阅读器里读刚写好的这一章（大字号、好读）">📖 舒适阅读本章</button>
-        <span class="dim-note" id="cwErr" style="align-self:center;color:#e57"></span>
-      </div>
+      <span class="dim-note" id="cwErr" style="display:block;color:#e57"></span>
       <div id="cwOut" class="cw-box hidden" style="max-height:340px;overflow:auto;white-space:pre-wrap;background:rgba(127,127,127,.06);border-radius:8px;padding:12px;font-size:14px;line-height:1.75;margin-top:10px"></div>
       <div class="dim-note" id="cwSaved" style="margin-top:6px"></div>
+      <div class="modal-result hidden" id="cwResult"></div>
+      <div class="modal-foot">
+        <div class="mf-left"></div>
+        <div class="mf-right">
+          <button class="btn" id="cwReadBtn" disabled title="在舒适的阅读器里读刚写好的这一章（大字号、好读）">舒适阅读本章</button>
+          <button class="btn" id="cwRedoBtn" disabled title="删掉刚写的这章，按你（可能改过的）要求重写同一章">重写本章</button>
+          <button class="btn" id="cwBatchBtn" title="你给一段故事情节，AI 自己判断该拆成几章（3–5 章），连着写完落盘。适合没有大纲、剧情你自己一段段给的写法。">按这段情节连写 3–5 章</button>
+          <button class="btn primary" id="cwWriteBtn">让 AI 写这一章</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -443,15 +469,16 @@
         </div>
       </div>
       <label class="field"><span>重点要求（只想处理报告里的某几条时填，可空）</span><textarea id="rvNote" rows="3" placeholder="例如：只处理 reviews/复检-全书.md 里 2.1 结丹写了三遍这一条，按报告给的方案合并，其余一律不动"></textarea></label>
-      <div class="btn-row end">
-        <button class="btn ghost" id="rvCancel">取消</button>
-        <button class="btn primary" id="rvStart">开始复检 ▶</button>
+      <div class="modal-result hidden" id="rvResult"></div>
+      <div class="modal-foot">
+        <div class="mf-left"><button class="btn ghost" id="rvCancel">取消</button></div>
+        <div class="mf-right"><button class="btn primary" id="rvStart">开始复检 ▶</button></div>
       </div>
       <div class="modal-err" id="rvErr"></div>
     </div>
   </div>
 
-  <!-- 重写弹窗 -->
+  <!-- 文风范本弹窗 -->
   <div class="modal hidden" id="voiceModal">
     <div class="modal-card" style="max-width:760px">
       <button class="modal-close" id="vcClose" title="关闭 (Esc)">✕</button>
@@ -469,7 +496,7 @@
         <label class="field"><span>起个名字</span><input id="vcName" placeholder="例如：某某书第三章"></label>
         <label class="field"><span>正文（越完整越好，节奏和结构才学得到）</span>
           <textarea id="vcText" rows="8" placeholder="把你认可的整章正文贴进来…"></textarea></label>
-        <div class="btn-row end"><button class="btn primary" id="vcAdd">挂上去</button></div>
+        <div class="btn-row end"><button class="btn" id="vcAdd">挂上去</button></div>
       </details>
 
       <details class="field" style="border:1px solid var(--border,#333);border-radius:8px;padding:8px 10px">
@@ -482,62 +509,74 @@
       </details>
 
       <div class="field"><span>手法卡（模型读范本后自己总结的，写作时与范本一同注入）</span>
-        <div class="btn-row" style="margin:2px 0 6px"><button class="btn ghost" id="vcCard">从范本重新提炼手法卡</button></div>
         <pre id="vcCardText" class="rd-empty" style="white-space:pre-wrap;max-height:240px;overflow:auto"></pre>
+      </div>
+      <div class="modal-result hidden" id="vcResult"></div>
+      <div class="modal-foot">
+        <div class="mf-left"></div>
+        <div class="mf-right"><button class="btn" id="vcCard">从范本重新提炼手法卡</button></div>
       </div>
       <div class="modal-err" id="vcErr"></div>
     </div>
   </div>
-  <div class="modal hidden" id="chRewriteModal">
-    <div class="modal-card">
-      <button class="modal-close" id="crClose" title="关闭 (Esc)">✕</button>
-      <h2>♻️ 重写本章</h2>
-      <p class="modal-hint" id="crWhich"></p>
-      <p class="modal-hint">只重写这一章，其余全不动。<b>原文会自动备份成同名 .bak</b>，不满意可取回。</p>
-      <label class="field"><span>用哪个模型重写</span><select id="crModel"></select></label>
-      <div class="modal-hint" id="crModelTip" style="margin:-4px 0 8px"></div>
-      <div class="field"><span>这一章侧重什么（<b>可多选</b>，会告诉 AI 怎么配比、互相咬合）</span>
-        <div id="crSlants" class="chip-grid"></div>
-      </div>
-      <label class="field"><span>本章感情线尺度（留空 = 用本书的基线档）</span>
-        <select id="crRomance"></select>
-      </label>
-      <label class="field"><span>章名</span>
-        <select id="crTitleMode">
-          <option value="keep">保持原章名</option>
-          <option value="auto">让 AI 按重写后的内容重起一个（会避开全书已用章名）</option>
-          <option value="manual">我自己指定</option>
-        </select>
-      </label>
-      <label class="field hidden" id="crTitleWrap"><span>新章名</span><input id="crTitle" type="text" placeholder="填你想要的章名"></label>
-      <label class="field"><span>这一章的情节（<b>留空 = 保持原情节只改文笔</b>；写了就按你说的重来）</span>
-        <textarea id="crPlot" rows="4" placeholder="例如：改成他当场就动了手，打完才发现认错了人——把误会留到下一章揭开"></textarea></label>
-      <label class="field"><span>补充要求（可空）</span>
-        <textarea id="crNote" rows="2" placeholder="例如：对话再少一点、多写动作；结尾停在钩子上"></textarea></label>
-      <label class="chip" style="margin:2px 0 6px"><input type="checkbox" id="crPolish">
-        <span>连续性审计</span><span class="chip-tip">写完对照连续性档案核一遍并最小改动修（多花 2 次调用）</span></label>
-      <label class="field hidden" id="crCriticWrap"><span>让谁来挑刺（换个模型比自评有效得多）</span>
-        <select id="crCritic"></select></label>
-      <div class="btn-row end"><button class="btn ghost" id="crCancel">取消</button><button class="btn primary" id="crGo">♻️ 开始重写 ▶</button></div>
-      <div class="modal-hint" id="crStatus" style="margin-top:8px"></div>
-      <div class="modal-err" id="crErr"></div>
-    </div>
-  </div>
+  <!-- 重写弹窗（合并原「重写本章 chRewriteModal」与「范围重写 rewriteModal」；范围改成窗内参数） -->
   <div class="modal hidden" id="rewriteModal">
     <div class="modal-card">
       <button class="modal-close" id="rwClose" title="关闭 (Esc)">✕</button>
       <h2>♻️ 重写</h2>
-      <p class="modal-hint">【推倒重写】不是润色。开始前会<b>自动 git 存档</b>，不满意可在书目录 <code>git reset --hard</code> 回退。写作中需先停止。</p>
-      <label class="field"><span>方式</span>
+      <p class="modal-hint">【推倒重写】不是润色。动手前自动存档：<b>本章</b>另存同名 .bak；<b>区间/整卷/整本</b>做 git 存档，不满意可在书目录 <code>git reset --hard</code> 回退。写作中需先停止。</p>
+      <label class="field"><span>重写范围</span>
         <select id="rwMode">
-          <option value="range">范围重写（重写指定章节/卷，其余保留）</option>
+          <option value="chapter">本章（阅读页当前打开的这一章）</option>
+          <option value="range" selected>指定区间 / 整卷（其余保留）</option>
           <option value="reproject">整本重立项（重写 bible + 大纲 + 全部正文）</option>
         </select>
       </label>
-      <label class="field" id="rwRangeWrap"><span>重写范围（<b>留空 = 让它自己从复检报告里找出该重写哪些章</b>）</span><input id="rwRange" type="text" placeholder="留空 = 按报告自动定范围；也可手动填 001-008 或 卷01"></label>
-      <label class="field"><span>重点要求（怎么改得更好，可空）</span><textarea id="rwNote" rows="3" placeholder="例如：开篇让主角身份+国术+时代尽早上场、压缩探案支线…"></textarea></label>
-      <label class="check"><input type="checkbox" id="rwUseReviews" checked> 按复检报告重写（默认开：先去 <code>reviews/</code> 里检索与这个范围相关的硬伤/隐患/未决项，列成必办清单再动笔；报告与正文冲突时以正文为准）</label>
-      <div class="btn-row end"><button class="btn ghost" id="rwCancel">取消</button><button class="btn danger" id="rwGo">♻️ 开始重写 ▶</button></div>
+
+      <!-- 范围 = 本章 -->
+      <div id="rwChapterPane" class="hidden">
+        <p class="modal-hint" id="crWhich"></p>
+        <p class="modal-hint">只重写这一章，其余全不动。<b>原文会自动备份成同名 .bak</b>，不满意可取回。</p>
+        <label class="field"><span>用哪个模型重写</span><select id="crModel"></select></label>
+        <div class="modal-hint" id="crModelTip" style="margin:-4px 0 8px"></div>
+        <div class="field"><span>这一章侧重什么（<b>可多选</b>，会告诉 AI 怎么配比、互相咬合）</span>
+          <div id="crSlants" class="chip-grid"></div>
+        </div>
+        <label class="field"><span>本章感情线尺度（留空 = 用本书的基线档）</span>
+          <select id="crRomance"></select>
+        </label>
+        <label class="field"><span>章名</span>
+          <select id="crTitleMode">
+            <option value="keep">保持原章名</option>
+            <option value="auto">让 AI 按重写后的内容重起一个（会避开全书已用章名）</option>
+            <option value="manual">我自己指定</option>
+          </select>
+        </label>
+        <label class="field hidden" id="crTitleWrap"><span>新章名</span><input id="crTitle" type="text" placeholder="填你想要的章名"></label>
+        <label class="field"><span>这一章的情节（<b>留空 = 保持原情节只改文笔</b>；写了就按你说的重来）</span>
+          <textarea id="crPlot" rows="4" placeholder="例如：改成他当场就动了手，打完才发现认错了人——把误会留到下一章揭开"></textarea></label>
+        <label class="field"><span>补充要求（可空）</span>
+          <textarea id="crNote" rows="2" placeholder="例如：对话再少一点、多写动作；结尾停在钩子上"></textarea></label>
+        <label class="chip" style="margin:2px 0 6px"><input type="checkbox" id="crPolish">
+          <span>连续性审计</span><span class="chip-tip">写完对照连续性档案核一遍并最小改动修（多花 2 次调用）</span></label>
+        <label class="field hidden" id="crCriticWrap"><span>让谁来挑刺（换个模型比自评有效得多）</span>
+          <select id="crCritic"></select></label>
+        <div class="modal-hint" id="crStatus" style="margin-top:8px"></div>
+        <div class="modal-err" id="crErr"></div>
+      </div>
+
+      <!-- 范围 = 指定区间 / 整卷 / 整本重立项 -->
+      <div id="rwRangePane">
+        <label class="field" id="rwRangeWrap"><span>重写范围（<b>留空 = 让它自己从复检报告里找出该重写哪些章</b>）</span><input id="rwRange" type="text" placeholder="留空 = 按报告自动定范围；也可手动填 001-008 或 卷01"></label>
+        <label class="field"><span>重点要求（怎么改得更好，可空）</span><textarea id="rwNote" rows="3" placeholder="例如：开篇让主角身份+国术+时代尽早上场、压缩探案支线…"></textarea></label>
+        <label class="check"><input type="checkbox" id="rwUseReviews" checked> 按复检报告重写（默认开：先去 <code>reviews/</code> 里检索与这个范围相关的硬伤/隐患/未决项，列成必办清单再动笔；报告与正文冲突时以正文为准）</label>
+      </div>
+
+      <div class="modal-result hidden" id="rwResult"></div>
+      <div class="modal-foot">
+        <div class="mf-left"><button class="btn ghost" id="rwCancel">取消</button></div>
+        <div class="mf-right"><button class="btn danger" id="rwGo">重写 ▶</button></div>
+      </div>
       <div class="modal-err" id="rwErr"></div>
     </div>
   </div>
@@ -579,7 +618,7 @@
           <label class="field"><span>主角名1（≤5字，可空）</span><input id="cbHero" type="text" maxlength="5" placeholder="如 朱由检"></label>
           <label class="field"><span>主角名2（≤5字，可空）</span><input id="cbHero2" type="text" maxlength="5" placeholder="可空"></label>
         </div>
-        <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="cbCreate">📕 在番茄创建作品 ▶</button></div>
+        <div class="btn-row" style="margin-top:8px"><button class="btn" id="cbCreate">📕 在番茄创建作品 ▶</button></div>
         <div id="cbHint" class="modal-hint" style="margin-top:6px"></div>
       </details>
       <details class="pb-volmgr" style="margin-top:10px">
@@ -600,12 +639,17 @@
         <div class="btn-row"><button class="btn" id="pbVolLoad">🔄 读取番茄卷</button></div>
         <div id="pbVolList" class="pb-vol-list" style="margin-top:8px"></div>
       </details>
-      <pre class="rb-critique" id="pbPreviewOut" style="display:none"></pre>
-      <div class="btn-row end" style="margin-top:8px">
-        <button class="btn ghost" id="pbCancel">关闭</button>
-        <button class="btn ghost" id="pbTest" title="只发第一章做联调验证">🧪 试发1章</button>
-        <button class="btn danger" id="pbStop" style="display:none" title="发完当前章即停止发布">⏹ 停止发布</button>
-        <button class="btn primary" id="pbGo" disabled>📤 发布全部新章 ▶</button>
+      <!-- 原先这里还有个 id="pbPreviewOut" 的 pre：预览和发布日志先写进它，再整段拷进下面的
+           #pbResult，而两个框是相邻兄弟、同时可见——于是同一份内容在弹窗里显示两遍。
+           它只是个中转缓冲，没有独立用途，直接退役；输出统一走 #pbResult（其余弹窗也都用这个）。 -->
+      <div class="modal-result hidden" id="pbResult"></div>
+      <div class="modal-foot">
+        <div class="mf-left"><button class="btn ghost" id="pbCancel">取消</button></div>
+        <div class="mf-right">
+          <button class="btn danger" id="pbStop" style="display:none" title="发完当前章即停止发布">⏹ 停止发布</button>
+          <button class="btn" id="pbTest" title="只发第一章做联调验证">试发 1 章</button>
+          <button class="btn primary" id="pbGo" disabled>📤 发布全部新章 ▶</button>
+        </div>
       </div>
       <div class="modal-err" id="pbErr"></div>
     </div>
@@ -626,10 +670,13 @@
         <button class="btn" id="ifPreview">🔍 预览（看多少卷/章）</button>
       </div>
       <pre class="rb-critique" id="ifOut" style="display:none"></pre>
-      <div class="btn-row end" style="margin-top:8px">
-        <button class="btn ghost" id="ifCancel">关闭</button>
-        <button class="btn ghost" id="ifTest" title="只导前3章做联调验证">🧪 试导3章</button>
-        <button class="btn primary" id="ifGo" disabled>📥 导入整本 ▶</button>
+      <div class="modal-result hidden" id="ifResult"></div>
+      <div class="modal-foot">
+        <div class="mf-left"><button class="btn ghost" id="ifCancel">取消</button></div>
+        <div class="mf-right">
+          <button class="btn" id="ifTest" title="只导前3章做联调验证">试导 3 章</button>
+          <button class="btn primary" id="ifGo" disabled>导入整本 ▶</button>
+        </div>
       </div>
       <div class="modal-err" id="ifErr"></div>
     </div>
@@ -642,9 +689,10 @@
       <h2>✏️ 改书名</h2>
       <p class="modal-hint">改名会全书生效：更新设定圣经、章节索引、连贯性台账、各卷大纲、简介与三模型上下文里的《书名》。已写正文不变（正文里本就不含书名）。封面上的书名文字需重新生成封面才更新。写作中需先停止。</p>
       <label class="field"><span>新书名</span><input id="rnInput" type="text" maxlength="40" placeholder="输入新书名…"></label>
-      <div class="btn-row end">
-        <button class="btn ghost" id="rnCancel">取消</button>
-        <button class="btn primary" id="rnSave">保存并全书生效 ▶</button>
+      <div class="modal-result hidden" id="rnResult"></div>
+      <div class="modal-foot">
+        <div class="mf-left"><button class="btn ghost" id="rnCancel">取消</button></div>
+        <div class="mf-right"><button class="btn primary" id="rnSave">保存并全书生效 ▶</button></div>
       </div>
       <div class="modal-err" id="rnErr"></div>
     </div>
@@ -658,8 +706,6 @@
       <p class="modal-hint">收尾冲刺：autopilot 改发"收束令"，逼向大高潮+结局、对照台账逐条回收伏笔、给人物结局。作者收完输出「【完本待审】」后，主编核对<b>完本清单</b>（主线/伏笔/人物/卖点/有无烂尾），通过才标"已完本"并干净停止；不过则退回补写。</p>
       <div class="dim-note" id="flStatus"></div>
       <div class="btn-row" style="flex-wrap:wrap;gap:8px;margin-top:8px">
-        <button class="btn primary" id="flEnter">🏁 进入收尾冲刺</button>
-        <button class="btn" id="flReview">📋 完本审稿（试评）</button>
         <button class="btn" id="flAfterword" title="让作者补写一章《完本感言/作者的话》或简短尾声。有写作会话就穿插，没会话就开窗。">✍️ 写完本感言</button>
         <button class="btn ghost" id="flUndo">↩ 撤销收尾 / 连载中</button>
         <button class="btn ghost" id="flMark">✅ 直接标记已完本</button>
@@ -667,15 +713,22 @@
       <p class="modal-hint" style="margin-top:10px;border-top:1px solid rgba(255,255,255,.08);padding-top:8px"><b>完结收口</b>（内部完本 → 番茄平台完结）：把收尾新增章发齐到番茄、对账平台状态。番茄签约/征文书完结需<b>编辑审批</b>，软件不替你按下不可逆的提交。</p>
       <div class="btn-row" style="flex-wrap:wrap;gap:8px">
         <button class="btn" id="flReport">📊 完结就绪报告（含番茄对账）</button>
-        <button class="btn primary" id="flClosure">🏁 完结收口（发齐+对账）</button>
+        <button class="btn" id="flClosure">🏁 完结收口（发齐+对账）</button>
         <button class="btn ghost" id="flLocate">🔎 定位番茄申请完结入口</button>
       </div>
       <pre class="rb-critique" id="flClosureOut" style="display:none"></pre>
-      <div class="modal-err" id="flErr"></div>
-      <div class="ol-result hidden" id="flResult">
+      <div class="ol-result modal-result hidden" id="flResult">
         <div class="dim-note" id="flMeta"></div><pre id="flCritique"></pre>
-        <div class="btn-row end"><button class="btn primary" id="flApply">✅ 让作者按此补写结局 ▶</button></div>
+        <div class="btn-row end"><button class="btn" id="flApply">✅ 让作者按此补写结局 ▶</button></div>
       </div>
+      <div class="modal-foot">
+        <div class="mf-left"></div>
+        <div class="mf-right">
+          <button class="btn" id="flReview">完本审稿（试评）</button>
+          <button class="btn primary" id="flEnter">进入收尾冲刺 ▶</button>
+        </div>
+      </div>
+      <div class="modal-err" id="flErr"></div>
     </div>
   </div>
 
@@ -689,22 +742,22 @@
         <select id="olScope"><option value="立项">立项 / 全书大纲</option></select>
       </label>
       <label class="chk" style="margin:6px 0"><input type="checkbox" id="olInject"> 若正在写作，把修订意见顺手穿插给作者</label>
-      <div class="btn-row end">
-        <button class="btn ghost" id="olCancel">取消</button>
-        <button class="btn primary" id="olStart">开始审稿 ▶</button>
-      </div>
       <div class="ai-cover-box" style="margin-top:10px">
         <div class="dim-note" style="margin-bottom:6px">已有的审稿报告（reviews/ 下）——不用重新审，直接拿来逐条挑、自动改大纲：</div>
         <select id="olExisting"><option value="">（加载中…）</option></select>
         <button class="btn" id="olLoadExisting" style="width:100%;margin-top:6px">📂 载入这份报告，逐条挑 ▶</button>
         <div class="modal-hint">审稿门的"逐条挑"本来只在卷边界那一刻出现，引擎一重启就没了；而报告是文件、一直在。这里把它重新摆回待挑状态，挑完照样自动改大纲。</div>
       </div>
-      <div class="modal-err" id="olErr"></div>
-      <div class="ol-result hidden" id="olResult">
+      <div class="ol-result modal-result hidden" id="olResult">
         <div class="dim-note" id="olMeta"></div>
         <pre id="olCritique"></pre>
-        <div class="btn-row end"><button class="btn primary" id="olApply">✅ 让作者按此修订大纲 ▶</button></div>
+        <div class="btn-row end"><button class="btn" id="olApply">✅ 让作者按此修订大纲 ▶</button></div>
       </div>
+      <div class="modal-foot">
+        <div class="mf-left"><button class="btn ghost" id="olCancel">取消</button></div>
+        <div class="mf-right"><button class="btn primary" id="olStart">开始审稿 ▶</button></div>
+      </div>
+      <div class="modal-err" id="olErr"></div>
     </div>
   </div>
 
@@ -825,7 +878,9 @@
 
   <!-- 封面弹窗 -->
   <div class="modal hidden" id="coverModal">
-    <div class="modal-card" style="width: 640px;">
+    <!-- 宽度交给 style.css 的 #coverModal .modal-card 管（原先写死的内联 width:640px 压过样式表，
+         窄屏的 @media 改不动它，而 640px 装不下「控件 + 225px 预览」，预览会被顶到卡片外面） -->
+    <div class="modal-card">
       <button class="modal-close" id="cvClose" title="关闭 (Esc)">✕</button>
       <h2>🖼️ 生成封面</h2>
       <div class="cover-wrap">
