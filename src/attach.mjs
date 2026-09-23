@@ -110,7 +110,7 @@ export async function streamBook(slug, cfg, onFrame, { intervalMs = 1000 } = {})
 
 // 把 autopilot 挂到一个已在运行的会话上（启动它的进程退出后仍可恢复监控）。
 // 返回 { autopilot, mcp, stop() }。
-export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestart = null, onTerminalStop = null) {
+export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestart = null, onTerminalStop = null, untilChapter = 0) {
   const sess = getSession(slug);
   if (!sess) throw new Error('没有该书的运行中会话：' + slug);
   const mcp = await connect(sess, cfg);
@@ -162,7 +162,13 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestar
     freshFallbackBatches: cfg.autopilot?.freshFallbackBatches || 0,
     onFreshRestart: typeof onFreshRestart === 'function' ? onFreshRestart : undefined,
     isPending: () => hasPending(slug),
-    shouldStopContinue: () => { const b = getBook(slug); const t = b?.targetChapters || 0; return t > 0 && bookStats(b).chapters >= t; },
+    // untilChapter 同 writer.mjs：本轮写到第 N 章就停。任务 prompt 里写「只写一章」拦不住 autopilot
+    // ——那是两套逻辑，它只看这里。
+    shouldStopContinue: () => {
+      const b = getBook(slug);
+      if (untilChapter > 0 && bookStats(b).maxChapter >= untilChapter) return true;
+      const t = b?.targetChapters || 0; return t > 0 && bookStats(b).chapters >= t;
+    },
     onReachedTarget: () => { try { maybeAutoPublish(getBook(slug), { cfg, onLog: (e) => onLog({ ...e }) }); } catch {} },
   });
   ap.start();

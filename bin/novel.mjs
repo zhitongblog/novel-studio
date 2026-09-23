@@ -42,7 +42,8 @@ Novel Studio · 网文工作室  (Unterm × Codex/Claude/Gemini)
   novel models                查看 codex/claude/gemini 可用性
   novel book new --title 书名 [--genre .. --model codex --words .. --volumes .. --cpv .. --batch 5]
   novel book list             列出所有书
-  novel write --book 书名 [--model codex] [--task "续写5章并自检"] [--dry]
+  novel write --book 书名 [--model codex] [--task "续写5章并自检"] [--until 9] [--dry]
+                              --until N：本轮写到第 N 章就停（任务里写"只写一章"拦不住 autopilot）
                               开新实例+开代理+启动模型+注入指令+autopilot 监控应答
   novel sessions              列出运行中的写作会话
   novel send --book 书名 --task "穿插的指令"   中途插入一条指令到正在写作的窗口

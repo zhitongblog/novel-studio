@@ -230,7 +230,7 @@ export function writeLaunchScript(book, model, instruction, cfg) {
 
 // 主流程。返回 { instance, mcp, autopilot, paneId }。
 // autopilotConfirmOnly：只挂"自动确认提问"的极简 autopilot，绝不自动续写（共创窗口模式用）。
-export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true, autopilotConfirmOnly = false, onFreshRestart = null, onTerminalStop = null }) {
+export async function startWriting({ book, model, instruction, cfg, onLog = () => {}, attachAutopilot = true, autopilotConfirmOnly = false, onFreshRestart = null, onTerminalStop = null, untilChapter = 0 }) {
   const m = getModel(model);
   if (!m) throw new Error('未知模型：' + model);
   assertCliModel(m, model);
@@ -535,6 +535,12 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       // 启用完本：不靠章数硬停，交给收尾流程收束；已完本则停。未启用完本时沿用旧的"到目标章数即停"。
       shouldStopContinue: () => {
         const b = getBook(slug) || book;
+        // 【本轮停止点】untilChapter：只写到第 N 章就收手，不动书的持久设置。
+        // 由来（2026-09-23）：任务里写「只写第 009 章一章，写完就停」，agy 照样写到了 013。
+        // 因为那句话只是【给模型的初始 prompt】，而 autopilot 是另一套逻辑——模型一空闲就发「继续」，
+        // 它只看 maxAutoContinue(默认40) 和书级 targetChapters。这本书 targetChapters 没设，
+        // 于是一路续到第 40 次上限才会停。想只写一章，光在 prompt 里说没用，得有这道闸。
+        if (untilChapter > 0 && bookStats(b).maxChapter >= untilChapter) return true;
         if (b.status === '已完本') return true;
         if (finaleOn) return false;
         const t = b.targetChapters || 0; return t > 0 && bookStats(b).chapters >= t;

@@ -296,6 +296,9 @@ async function writeCmd(f, cfg) {
   const book = getBook(id);
   if (!book) { console.log(c.red('找不到书：' + id)); process.exitCode = 1; return; }
   const model = f.model || book.model || cfg.defaultModel;
+  // --until N：本轮写到第 N 章就停（不改书的 targetChapters）。光在 --task 里写「只写一章」没用，
+  // 那只是给模型的 prompt，autopilot 照样会在它空闲时发「继续」。
+  const untilChapter = Math.max(0, parseInt(f.until || '0', 10) || 0);
   const instruction = f.task || f.instruction ||
     `请阅读本项目的 AGENTS.md/CLAUDE.md 写作规范与 novel_bible.md，然后续写下一批 ${book.standards?.batchSize || 5} 章并在结束后自检。`;
 
@@ -310,10 +313,17 @@ async function writeCmd(f, cfg) {
   }
 
   console.log(c.bold(`\n✍️  开始写作《${book.title}》  模型=${getModel(model).name}`));
-  console.log(c.gray('   指令：' + instruction) + '\n' + hr());
+  console.log(c.gray('   指令：' + instruction));
+  // 把本轮停止点打出来：没有这一行，作者不知道这一轮会写到哪。
+  // 【任务 prompt 里写「只写一章」是拦不住 autopilot 的】——那是给模型的话，
+  // autopilot 只看 untilChapter / targetChapters / 续写次数上限这三个数。
+  console.log(c.gray(untilChapter
+    ? `   本轮停止点：写到第 ${untilChapter} 章即停`
+    : `   本轮停止点：未设 —— 会一直续写到书的目标章数或第 ${cfg.autopilot?.maxAutoContinue || 40} 次续写为止（--until N 可限定）`));
+  console.log(hr());
   const onLog = (e) => console.log('  ' + logLine(e));
   try {
-    const sess = await startWriting({ book, model, instruction, cfg, onLog });
+    const sess = await startWriting({ book, model, instruction, cfg, onLog, untilChapter });
     console.log(hr());
     console.log(c.green(`✔ 已在新窗口启动，autopilot ${cfg.autopilot.enabled ? '运行中' : '已关闭'}。实例=${sess.instance.id} pane=${sess.paneId}`));
     console.log(c.gray('  在弹出的 Unterm 窗口里实时观看写作；Ctrl+C 退出本监控（窗口继续运行）。\n'));
