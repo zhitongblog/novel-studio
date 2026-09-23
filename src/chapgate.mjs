@@ -229,13 +229,33 @@ export function scanRhythm(text, { minParaCV = 0.5, minSentCV = 0.55, minLongSen
 export function namesFromLedger(ledgerText) {
   const snap = String(ledgerText || '').split('LEDGER_HISTORY_BELOW')[0];
   const out = new Set();
-  for (const m of snap.matchAll(/\*\*([^*]{1,12})\*\*/g)) {
-    const n = m[1].trim()
-      .replace(/（[^）]*）/g, '')      // 去掉「岳和（父）」里的括注
-      .replace(/[：:，,。.]/g, '')
-      .trim();
-    // 只要像名字的：2–6 字、不含空格、不是整句话
-    if (n && n.length >= 2 && n.length <= 6 && !/[的了是在和与把被]/.test(n)) out.add(n);
+  const take = (raw) => {
+    const cleaned = String(raw)
+      .replace(/（[^）]*）|\([^)]*\)/g, '')   // 去掉「岳和（父）」「刘协（汉献帝）」里的括注
+      .replace(/\*\*/g, '')
+      .replace(/[：:。.]/g, '');
+    // 一条里可能并列几个人：「- 张辽、马超：各领精骑两翼」
+    for (const part of cleaned.split(/[、,，\/]/)) {
+      const n = part.trim();
+      // 只要像名字的：2–6 字、不含空格、不是整句话
+      if (n && n.length >= 2 && n.length <= 6 && !/[的了是在和与把被]/.test(n)) out.add(n);
+    }
+  };
+  for (const m of snap.matchAll(/\*\*([^*]{1,12})\*\*/g)) take(m[1]);
+
+  // 【为什么还要认「- 吕布：」这种写法】2026-09-23 拿这道闸去查《重生三国，我吕布杀出一片天》，
+  // 开头印的是「专名表 0 个」——113 章的书一个人名都没长出来，钩子闸整本空转。
+  // 根因：上面只认粗体，而这本的台账人物现状写的是「- 吕布：以车骑将军…」，没有星号。
+  // 本机十本书里有三本是这个写法（吕布 / 大乾女帝 / 重生美利坚），即三本书的钩子闸一直是哑的。
+  // 只在【人物现状】那一节里认这种写法：别的节（未回收伏笔 / 欠债与承诺）条目开头是事件不是人名。
+  const lines = snap.split(/\r?\n/);
+  let inChars = false;
+  for (const line of lines) {
+    const h = /^#{2,6}\s*(.+)$/.exec(line);
+    if (h) { inChars = /人物/.test(h[1]); continue; }
+    if (!inChars) continue;
+    const item = /^\s*[-*+]\s*(.+?)[：:]/.exec(line);
+    if (item) take(item[1]);
   }
   return [...out];
 }
