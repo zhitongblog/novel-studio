@@ -50,6 +50,9 @@ Novel Studio · 网文工作室  (Unterm × Codex/Claude/Gemini)
   novel stop --book 书名        停止并关闭该书的 Unterm 窗口
   novel autopilot --book 书名   给已运行的会话挂上自动监控应答
   novel usage [--book 书名]     Token 用量统计（每本书累计，来自 agent TUI）
+  novel gate --book 书名 [--vol 卷01]
+                              章节审校闸：套话／禁用词／上一章钩子没接／普法旁白／别名冲突
+                              （指标量形式，这道闸量逻辑；配置放书目录 gate.json）
   novel config [set ...]      查看/修改配置（workspace/model/proxy/autopilot）
   novel reference             透传 unterm-cli reference（MCP方法/CLI/键位清单）
   novel mcp                   以 MCP stdio server 运行（供 Claude Code 调用）

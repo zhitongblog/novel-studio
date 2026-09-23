@@ -40,6 +40,7 @@ export async function runCli(argv) {
     case 'write': return writeCmd(f, cfg);
     case 'stateless': return statelessCmd(f, cfg);
     case 'ledger': return ledgerCmd(f, cfg);
+    case 'gate': return gateCmd(f, cfg);
     case 'sessions': return sessionsCmd(cfg);
     case 'send': return sendCmd(f, cfg);
     case 'watch': return watchCmd(f, cfg);
@@ -332,6 +333,88 @@ async function writeCmd(f, cfg) {
 // novel ledger [--book 书名] [--migrate] [--model codex]
 // 台账当前态快照的体检 / 迁移。没有快照结构的书，写作时每批只喂得进台账的一小截（且是最早那截），
 // 这个命令让这件事看得见、也能当场补上，而不是只能等下一次写作时顺带跑。
+// 章节审校闸：把【人眼才看得出的毛病】捞出来（套话/禁用词/钩子没接/普法旁白/别名冲突）。
+// 用法：novel gate --book 书名 [--vol 卷01] [--fix-hint]
+// 每本书的禁用词与别名对放在书目录下 gate.json；没有这个文件也能跑，只是少了那两道闸。
+// 为什么要有它：2026-09-20 写岳飞新书前六章，字数/段落/对话/省略号全绿、抽样也好看，
+// 逐行通读却查出三轮七类问题（详见 src/chapgate.mjs 顶部）。指标量形式，这道闸量逻辑。
+async function gateCmd(f, cfg) {
+  const { gateChapter, checkAliases, namesFromLedger, loadVolumeChapters } = await import('./chapgate.mjs');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const id = f.book || f._[0];
+  const book = id ? getBook(id) : null;
+  if (!book) { console.log(c.red(id ? '找不到书：' + id : '用法：novel gate --book "书名" [--vol 卷01]')); process.exitCode = 1; return; }
+
+  const readSafe = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
+  const conf = (() => { try { return JSON.parse(readSafe(path.join(book.dir, 'gate.json')) || '{}'); } catch { return {}; } })();
+  const banned = conf.banned || [];
+  const aliases = conf.aliases || [];
+  const names = [...new Set([...(conf.names || []), ...namesFromLedger(readSafe(path.join(book.dir, 'continuity_ledger.md')))])];
+
+  let vols = f.vol ? [String(f.vol)] : [];
+  if (!vols.length) {
+    try { vols = fs.readdirSync(path.join(book.dir, 'chapters'), { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name).sort(); } catch {}
+  }
+
+  console.log(c.bold(`\n🚦 章节审校闸 · 《${book.title}》\n`) + hr());
+  console.log(c.gray(`  专名表 ${names.length} 个（台账 + gate.json）｜禁用词 ${banned.length} 条｜别名对 ${aliases.length} 组\n`));
+
+  let bad = 0, total = 0, noted = 0;
+  const allTexts = [];
+  for (const vol of vols) {
+    const chs = loadVolumeChapters(book.dir, vol);
+    if (!chs.length) continue;
+    for (let i = 0; i < chs.length; i++) {
+      const cur = chs[i];
+      allTexts.push(cur.text);
+      total++;
+      const r = gateChapter({
+        text: cur.text, prevText: i ? chs[i - 1].text : '',
+        history: chs.slice(0, Math.max(0, i - 1)).map(x => x.text).join('\n'),   // 此前各章：用来认出常驻角色
+        names, banned,
+        slopOff: { ignoreKinds: conf.slopOff?.kinds || [], ignoreWords: conf.slopOff?.words || [] },
+        expoOff: !!conf.expoOff, hookOff: !!conf.hookOff, stereoOff: !!conf.stereoOff, rhythmOff: !!conf.rhythmOff,
+      });
+      if (r.ok) {
+        // 单处套话只作提示，不算事故——要卡的是密度不是总数（见 chapgate.scanSlop 顶部）
+        if (r.notes.length && !f.quiet) {
+          console.log(`  ${c.cyan('✔')} ${cur.file}  ${c.gray('· ' + r.notes.join('；'))}`);
+          for (const h of r.slop.hits) console.log(`      ${c.gray(`提示 第${h.line}行「${h.word}」(${h.kind})`)}`);
+          noted++;
+        } else console.log(`  ${c.cyan('✔')} ${cur.file}`);
+        continue;
+      }
+      bad++;
+      console.log(`  ${c.red('✘')} ${c.bold(cur.file)}  ${c.red(r.problems.join('；'))}`);
+      for (const h of r.banned.hits) console.log(`      ${c.red('禁用词')} 第${h.line}行「${h.word}」${h.why ? c.gray('—— ' + h.why) : ''}`);
+      for (const h of r.slop.hits) console.log(`      ${c.gray('套话')} 第${h.line}行「${h.word}」(${h.kind})`);
+      for (const n of r.hook.dropped) console.log(`      ${c.red('钩子断')} 上一章结尾抛出「${n}」，这一章整章没出现`);
+      for (const h of r.exposition.hits) console.log(`      ${c.gray('普法旁白')} 第${h.line}行：${h.text}…`);
+      for (const p of (r.stereo?.problems || [])) console.log(`      ${c.red('句式扎堆')} ${p}`);
+      for (const p of (r.rhythm?.problems || [])) console.log(`      ${c.red('节奏规整')} ${p}`);
+    }
+  }
+
+  if (aliases.length) {
+    const al = checkAliases(allTexts, aliases);
+    if (!al.ok) {
+      bad += al.conflicts.length;
+      console.log('\n  ' + c.red('别名冲突（同一个人/同一个数被写成两种）'));
+      for (const x of al.conflicts) console.log(`      「${x.a}」出现在第 ${x.aAt.join('、')} 章，「${x.b}」出现在第 ${x.bAt.join('、')} 章 ${x.why ? c.gray('—— ' + x.why) : ''}`);
+    }
+  }
+
+  console.log('\n' + hr());
+  console.log(bad ? c.red(`  ${total} 章里 ${bad} 章要改`) : c.cyan(`  ${total} 章全部通过`) + (noted ? c.gray(`（另有 ${noted} 章各有一处套话，只作提示——要卡的是密度不是总数）`) : ''));
+  if (!banned.length && !aliases.length) {
+    console.log(c.gray(`  提示：在 ${path.join(book.dir, 'gate.json')} 里配 banned / aliases，能多两道最便宜的闸`));
+    console.log(c.gray('        {"banned":[{"word":"赵四","why":"死者是周德昌"}],"aliases":[["王荣","张保","同一个里正"]]}'));
+  }
+  console.log('');
+  process.exitCode = bad ? 1 : 0;
+}
+
 async function ledgerCmd(f, cfg) {
   const { inspect: inspectLedger, needsSeed } = await import('./ledgersnap.mjs');
   const { bookStats } = await import('./books.mjs');
