@@ -82,3 +82,52 @@ test('节奏闸量不到 AI 味——这条是实测结论，别再把 CV 当反
   assert.match(src, /句长CV 不是主因/);
   assert.match(src, /006/);
 });
+
+// ── 公文豁免 ──────────────────────────────────────────────────────────
+// 2026-09-24 加。008《知见人》是公堂章，整章 19.5/千字，差一点点。
+// 但那一章有 34% 的篇幅是宋代验状、供状、榜文原文——要把整章顶到 20，
+// 就得去改一份验状的措辞，那是错的：公文本来就该是公文腔。
+// 逐章量了一遍才定这条规则：15 章里公文占比 0%–24% 的有 14 章，只有 008 到 34%，
+// 而它剥掉公文后的叙述是 23.6，本身过线。所以只在「公文多 且 叙述达标」时放行。
+
+// 造夹具：sents 句、每句 fill 个无标记的字，其中 oralSents 句带一个口语词。
+// 这样能把口语密度调到真章的区间（17–26/千字），而不是几百——夹具不真实，
+// 测出来的阈值也不作数。
+const MK = ['里头', '自个儿', '末了', '这会儿', '老半天', '没准'];
+const mkNarr = (sents, oralSents, fill = 20) => Array.from({ length: sents },
+  (_, i) => (i < oralSents ? MK[i % MK.length] : '') + '甲'.repeat(fill)).join('。') + '。';
+// 公文段：宋代定式词齐全，一个口语标记都没有
+const mkDoc = (n) => Array.from({ length: n },
+  () => '验状载周德昌顶后脑骨遭方角坚木自后猛扑骨陷长一寸四分依律晓谕四乡' + '乙'.repeat(8)).join('。') + '。';
+
+test('公文占比高、但叙述本身够口语 → 放行（008 公堂章）', () => {
+  const r = scanRegister(mkNarr(30, 14) + '\n' + mkDoc(10));
+  assert.ok(r.docRatio > 0.25, `公文占比应超过 25%，实际 ${r.docRatio}`);
+  assert.ok(r.narrPerK >= 20, `叙述口语度应达标，实际 ${r.narrPerK}`);
+  assert.ok(r.perK < 20 && r.perK > 5, `整章应被公文拖到 5~20 之间，实际 ${r.perK}`);
+  assert.equal(r.docExempt, true);
+  assert.ok(!r.problems.some((p) => p.includes('口语标记')), `不该再报口语密度不足：${r.problems}`);
+});
+
+test('公文多、但叙述本身也不口语 → 照样拦，并且说明是叙述的问题', () => {
+  const r = scanRegister(mkNarr(30, 7) + '\n' + mkDoc(10));
+  assert.ok(r.docRatio > 0.25, `公文占比 ${r.docRatio}`);
+  assert.ok(r.narrPerK > 5 && r.narrPerK < 20, `叙述应在 5~20 之间，实际 ${r.narrPerK}`);
+  assert.equal(r.docExempt, false);
+  assert.ok(!r.ok, '叙述本身不口语就不能因为有公文而放行');
+  const msg = r.problems.find((p) => p.includes('口语标记'));
+  assert.ok(msg && msg.includes('叙述本身不够口语'), `应点明是叙述的问题，实际：${msg}`);
+});
+
+test('公文少的章不走豁免（防止规则被滥用）', () => {
+  const r = scanRegister(mkNarr(40, 8) + '\n验状一纸，依律晓谕。');
+  assert.ok(r.docRatio <= 0.25, `公文占比 ${r.docRatio} 不该触发豁免`);
+  assert.equal(r.docExempt, false);
+  assert.ok(!r.ok, '公文不够多就该照常拦');
+});
+
+test('判别只认公文定式，不认对白里的称谓（否则半章对话会被误判成公文）', () => {
+  const dialog = '“回老大人，小民是同村乡邻。”\n“小人不敢欺瞒老大人。”\n“大老爷明鉴，小人冤枉啊！”';
+  const r = scanRegister(dialog);
+  assert.equal(r.docRatio, 0, `「老大人」「小人」不该算公文，实际占比 ${r.docRatio}`);
+});

@@ -276,30 +276,83 @@ export function namesFromLedger(ledgerText) {
 // 北方官话口语/语气标记。本书背景是相州汤阴（豫北，近河北），用这一路的词。
 // 换书换背景时【连这张表一起换】——吴语背景的书堆北方词，是另一种假。
 export const ORAL_MARKERS = [
-  '上头', '里头', '后头', '外头', '自个儿', '俩', '仨', '打哪', '末了', '家什',
-  '囫囵', '出溜', '杵着', '瞧', '搁', '头一个', '一溜', '没准', '味儿', '这地方',
-  '就算完', '不作数', '啥', '咋', '那就是说', '这就是说', '挺[久好多大远]',
-  '跟[^，。！？]{1,8}似的', '[^一-鿿]呢。', '了吧',
+  // 方位·指代
+  '上头', '里头', '后头', '外头', '这会儿', '那会儿', '这地方', '这号', '那号',
+  // 人称·计数
+  '自个儿', '俩', '仨', '统共', '拢共',
+  // 动作·状态（北方官话里替代书面词的那些）
+  '出溜', '杵着', '瞧', '搁', '寻思', '合计', '蔫', '攥', '拎',
+  // 语气·转折
+  '末了', '头一个', '一溜', '没准', '保不齐', '指不定', '横竖', '左不过',
+  '偏生', '愣是', '生生', '硬是', '索性', '干脆',
+  // 评价·否定
+  '犯不上', '值当', '架不住', '禁不住', '不中用', '顶用', '不作数', '就算完',
+  // 名物
+  '家什', '囫囵', '味儿', '婆娘', '浑家', '后生', '娃子',
+  // 时间
+  '半晌', '老半天', '一气儿', '打哪', '赶明儿',
+  // 疑问·句末
+  '啥', '咋', '那就是说', '这就是说', '挺[久好多大远快慢]',
+  '跟[^，。！？]{1,8}似的', '[^一-鿿]呢。', '了吧', '这么着', '那么着',
 ];
 
-export function scanRegister(text, { minPerK = 20, maxMeanSent = 22 } = {}) {
+// 宋代公文定式词。只用来把「引述的公文」从口语度统计里摘出去（见 scanRegister 里的公文豁免），
+// 所以宁可漏判也不能误判：不收「小人」「老大人」这类对白里也会出现的称谓。
+const DOC_FORMULA = /验状|验骨|格目|尸格|供状|原供|榜文|大榜|批复|批回|抄录|骨陷|自后猛扑|坚木|依律|晓谕|钧令|申状|架阁|公条|画押|秋后处决|录问|别勘/;
+
+export function scanRegister(text, { minPerK = 20, maxMeanSent = 22, maxShare = 0.22, maxDocRatio = 0.25 } = {}) {
   const t = String(text || '');
   const chars = (t.match(/[一-鿿]/g) || []).length || 1;
   let hits = 0;
   const found = [];
+  const byWord = [];
   for (const w of ORAL_MARKERS) {
     const m = t.match(new RegExp(w, 'g'));
-    if (m) { hits += m.length; found.push(w.replace(/\[\^[^\]]+\][^ ]*/, '…') + '×' + m.length); }
+    if (m) {
+      hits += m.length;
+      byWord.push([w, m.length]);
+      found.push(w.replace(/[^[^]]+][^ ]*/, '…') + '×' + m.length);
+    }
   }
   const perK = +(hits / chars * 1000).toFixed(1);
   const sents = t.split(/[。！？…\n]+/).map(x => x.trim()).filter(Boolean);
   const meanSent = sents.length ? +(sents.reduce((a, b) => a + b.length, 0) / sents.length).toFixed(1) : 0;
+  byWord.sort((a, b) => b[1] - a[1]);
+  const top = byWord[0] || ['', 0];
+  const share = hits ? +(top[1] / hits).toFixed(3) : 0;
+  // 【公文豁免】2026-09-24 加。008 公堂章全章只有 19.5，往上推就得去改一份宋代验状的措辞——那是错的。
+  // 逐章量了一遍：15 章里公文占比 0%–12% 的有 12 章，只有 008 到了 34%，它的叙述部分是 23.6，本身过线。
+  // 所以按「叙述口语度」判，而不是按整章。判别只认公文定式词（验状/格目/供状/榜文/骨陷…），
+  // 不认「小人」「老大人」——那些对白里也有，会把半章对话误判成公文（010 试过，误判到 32%）。
+  const lines = t.split(/\n+/).map((x) => x.trim()).filter(Boolean);
+  const docLines = lines.filter((x) => DOC_FORMULA.test(x));
+  const docChars = docLines.join('').length;
+  const allChars = lines.join('').length || 1;
+  const docRatio = +(docChars / allChars).toFixed(3);
+  const narr = lines.filter((x) => !DOC_FORMULA.test(x)).join('\n');
+  const narrChars = (narr.match(/[一-鿿]/g) || []).length || 1;
+  let narrHits = 0;
+  for (const w of ORAL_MARKERS) narrHits += (narr.match(new RegExp(w, 'g')) || []).length;
+  const narrPerK = +(narrHits / narrChars * 1000).toFixed(1);
+
   const problems = [];
-  // 低于 5/千字的，实测人类率一律是 0——这条是硬伤，不是提醒
+  const docExempt = docRatio > maxDocRatio && narrPerK >= minPerK;
   if (perK < 5) problems.push(`口语标记只有 ${perK}/千字（实测低于 5 的样本人类率一律为 0，整章是书面腔）`);
-  else if (perK < minPerK) problems.push(`口语标记 ${perK}/千字，低于 ${minPerK}（只换词那版 19.3 也才拿到"弱人类创作"）`);
+  else if (perK < minPerK && !docExempt) {
+    const tail = docRatio > maxDocRatio
+      ? `；本章公文占 ${Math.round(docRatio * 100)}%，剥掉公文后叙述也只有 ${narrPerK}/千字，是叙述本身不够口语`
+      : '';
+    problems.push(`口语标记 ${perK}/千字，低于 ${minPerK}（只换词那版 19.3 也才拿到"弱人类创作"）${tail}`);
+  }
   if (meanSent > maxMeanSent) problems.push(`均句长 ${meanSent} 字，超过 ${maxMeanSent}（句子太长是书面腔的另一半）`);
-  return { perK, hits, meanSent, found: found.slice(0, 20), problems, ok: problems.length === 0 };
+  // 【分散度】2026-09-24 加：番茄签约被拒，责编原话「"自个儿""杵""瞧"到处出现……一看就是批量替换的痕迹」。
+  // 查下来「里头」一个词占了全书口语标记的三分之一，011 一章 9.5/千字。
+  // 根因是词表太窄——要顶到 20/千字只能反复用同几个词，闸自己逼出了口癖。
+  // 所以密度和分散度必须一起管：单个词不得超过全部标记的 ${Math.round(maxShare*100)}%。
+  if (hits >= 20 && share > maxShare) {
+    problems.push(`「${top[0]}」一个词占了全部口语标记的 ${Math.round(share * 100)}%（${top[1]}/${hits}，上限 ${Math.round(maxShare * 100)}%）——堆同一个词是另一种机械感，换着说`);
+  }
+  return { perK, hits, meanSent, topWord: top[0], topShare: share, docRatio, narrPerK, docExempt, found: found.slice(0, 20), problems, ok: problems.length === 0 };
 }
 
 export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false } = {}) {
