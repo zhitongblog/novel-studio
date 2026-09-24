@@ -229,13 +229,33 @@ export function scanRhythm(text, { minParaCV = 0.5, minSentCV = 0.55, minLongSen
 export function namesFromLedger(ledgerText) {
   const snap = String(ledgerText || '').split('LEDGER_HISTORY_BELOW')[0];
   const out = new Set();
-  for (const m of snap.matchAll(/\*\*([^*]{1,12})\*\*/g)) {
-    const n = m[1].trim()
-      .replace(/（[^）]*）/g, '')      // 去掉「岳和（父）」里的括注
-      .replace(/[：:，,。.]/g, '')
-      .trim();
-    // 只要像名字的：2–6 字、不含空格、不是整句话
-    if (n && n.length >= 2 && n.length <= 6 && !/[的了是在和与把被]/.test(n)) out.add(n);
+  const take = (raw) => {
+    const cleaned = String(raw)
+      .replace(/（[^）]*）|\([^)]*\)/g, '')   // 去掉「岳和（父）」「刘协（汉献帝）」里的括注
+      .replace(/\*\*/g, '')
+      .replace(/[：:。.]/g, '');
+    // 一条里可能并列几个人：「- 张辽、马超：各领精骑两翼」
+    for (const part of cleaned.split(/[、,，\/]/)) {
+      const n = part.trim();
+      // 只要像名字的：2–6 字、不含空格、不是整句话
+      if (n && n.length >= 2 && n.length <= 6 && !/[的了是在和与把被]/.test(n)) out.add(n);
+    }
+  };
+  for (const m of snap.matchAll(/\*\*([^*]{1,12})\*\*/g)) take(m[1]);
+
+  // 【为什么还要认「- 吕布：」这种写法】2026-09-23 拿这道闸去查《重生三国，我吕布杀出一片天》，
+  // 开头印的是「专名表 0 个」——113 章的书一个人名都没长出来，钩子闸整本空转。
+  // 根因：上面只认粗体，而这本的台账人物现状写的是「- 吕布：以车骑将军…」，没有星号。
+  // 本机十本书里有三本是这个写法（吕布 / 大乾女帝 / 重生美利坚），即三本书的钩子闸一直是哑的。
+  // 只在【人物现状】那一节里认这种写法：别的节（未回收伏笔 / 欠债与承诺）条目开头是事件不是人名。
+  const lines = snap.split(/\r?\n/);
+  let inChars = false;
+  for (const line of lines) {
+    const h = /^#{2,6}\s*(.+)$/.exec(line);
+    if (h) { inChars = /人物/.test(h[1]); continue; }
+    if (!inChars) continue;
+    const item = /^\s*[-*+]\s*(.+?)[：:]/.exec(line);
+    if (item) take(item[1]);
   }
   return [...out];
 }
@@ -273,7 +293,7 @@ export function namesFromLedger(ledgerText) {
 // 他没说」——没有情节功能，却让人物立起来了（他知道娘辛苦，所以不说）。
 // 我们之前那个"每一句都在做功"的精准文学腔，既是 AI 指纹，也是番茄读者的门槛。
 
-// 北方官话口语/语气标记。本书背景是相州汤阴（豫北，近河北），用这一路的词。
+// 北方官话口语/语气标记。岳飞那本背景是相州汤阴（豫北，近河北），用这一路的词。
 // 换书换背景时【连这张表一起换】——吴语背景的书堆北方词，是另一种假。
 export const ORAL_MARKERS = [
   // 方位·指代
@@ -296,17 +316,106 @@ export const ORAL_MARKERS = [
   '跟[^，。！？]{1,8}似的', '[^一-鿿]呢。', '了吧', '这么着', '那么着',
 ];
 
-// 宋代公文定式词。只用来把「引述的公文」从口语度统计里摘出去（见 scanRegister 里的公文豁免），
-// 所以宁可漏判也不能误判：不收「小人」「老大人」这类对白里也会出现的称谓。
-const DOC_FORMULA = /验状|验骨|格目|尸格|供状|原供|榜文|大榜|批复|批回|抄录|骨陷|自后猛扑|坚木|依律|晓谕|钧令|申状|架阁|公条|画押|秋后处决|录问|别勘/;
+// 公文定式词。只用来把「引述的公文」从口语度统计里摘出去（见 scanRegister 里的公文豁免）。
+// 宁可漏判也不能误判：不收「小人」「老大人」这类对白里也会出现的称谓——
+// 试过一次，010 一章半数对话被误判成公文，占比冲到 32%。
+// 跟口语表一样按书的背景走（见 ORAL_MARKER_SETS 里的 docFormula）。
+const DOC_FORMULA_SONG = /验状|验骨|格目|尸格|供状|原供|榜文|大榜|批复|批回|抄录|骨陷|自后猛扑|坚木|依律|晓谕|钧令|申状|架阁|公条|画押|秋后处决|录问|别勘/;
+// ⚠️ 汉末这张【没有跑过数据】，是照着宋代那张的思路拟的：收公文体裁名与定式词。
+// 用它下结论之前先拿两三章验一遍误判率，别直接信。
+const DOC_FORMULA_SANGUO = /表曰|奏曰|檄曰|诏曰|敕曰|策曰|上表|奏章|露布|符节|印绶|诏书|明诏|矫诏|军令状|军法从事|按律|有司/;
 
-export function scanRegister(text, { minPerK = 20, maxMeanSent = 22, maxShare = 0.22, maxDocRatio = 0.25 } = {}) {
+// 汉末三国口语标记（半文半白）。
+//
+// 【为什么非得另起一张表】2026-09-23 拿上面那张豫北表去量《重生三国，我吕布杀出一片天》，
+// 113 章全判"整章书面腔"，63 章是 0/千字。数值没错，可结论没法用：
+// 汉末的人不说"自个儿""啥""咋"，往三国书里堆这些词是另一种假，不是修好。
+//
+// 【表是怎么定的】拿 37 万字全书去探底，结果比任何理论都直白——
+// 半文半白的口语骨架【整根缺失】：甚么 / 怎地 / 怎的 / 晓得 / 省得 / 寻思 / 也罢 /
+// 这厮 这八个词，全书 0 次。用到的只有咱们(42) 某家(39) 后头(46)，各自 0.1/千字。
+// 所以这张表收的就是这一路词：演义、水浒那种「人物嘴里说得出口」的白话，
+// 而不是「尔等」「岂敢」这种写在奏章上的文言——后者这本书满篇都是，它正是病灶。
+//
+// 【避坑】单字词一律不收或加约束，否则书面词会被算成口语：
+//   便（便宜从事）、且（况且）、某（某种）、罢（罢免）、休（休整）、莫（莫名）、
+//   厮（厮杀，三国书里满篇都是）、搁（搁置）、鸟（真的鸟）。
+//
+// 【下面每一条带 (?<!…) 的，都是拿 37 万字全书验出来的误伤，删约束前先看例句】
+//   一发   → 千钧「一发」，全是它，直接踢掉
+//   端的   → 「粥是我叫端的」「好端端的」
+//   似的   → 「相似的地方」
+//   他娘的 → 「缩在娘的怀里」「拖他娘的兵」——是母亲不是骂人
+//   攥     → 38 次全是旁白「攥紧」。一个词占掉总量三分之一，而旁白动词恰恰是
+//            这道闸【不该给分】的东西：它量的是人物嘴里的口语，不是叙述腔。踢掉。
+//   咱/咱们 → 不加约束会重复计数（「咱们」被数两次）
+export const ORAL_MARKERS_SANGUO = [
+  // 自称与称谓——口语的那一路
+  '俺', '咱们', '咱(?!们)', '某家', '老子', '这厮', '那厮', '竖子', '匹夫', '鼠辈', '黄口小儿',
+  // 疑问与语气
+  '甚么', '作甚', '做甚', '是甚', '怎地', '怎的', '怎生', '难不成', '莫不是',
+  '也罢', '罢了', '便罢', '就是了', '便是了', '不成[？?！!]', '(?<![什怎那这甚])么[？?]',
+  // 否定与劝止
+  '莫要', '休要', '休得', '不济', '不中用', '不打紧', '犯不着', '用不着', '值当', '省得', '免得',
+  // 白话副词
+  '索性', '偏生', '平白', '委实', '(?<![叫端])端的', '兀自', '好生', '生怕', '眼下', '只顾', '横竖', '当真',
+  // 方位与杂词（跨时代通用口语）
+  '里头', '外头', '上头', '后头', '底下', '没准', '末了', '打哪', '一溜', '这地方',
+  // 动词口语
+  '晓得', '寻思', '打量', '瞧', '瞅', '拾掇', '撒手', '拎',
+  // 感叹与军中粗口
+  '呸', '他娘的(?![兵卒军民怀手身])', '直娘贼', '撮鸟', '鸟人',
+  // 结构与句尾
+  '跟[^，。！？]{1,8}似的', '(?<![相类近])似的', '[^作了休罢]罢[。！]',
+];
+
+// 口语表按书背景切换。gate.json 里写 `"oralSet": "汉末三国"`，
+// 或者直接写 `"oralMarkers": ["…"]` 自带一张表（自带的优先）。
+//
+// ⚠️【两组阈值的分量不一样，别混着读】
+// 「北方官话」那组的 5 / 20 是 2026-09-23 拿四个样本去腾讯朱雀实测标定出来的（见上面那张表）。
+// 「汉末三国」这组【没有实测数据】——这个题材的口语密度上限本来就低于现代白话，
+// 硬套 20/千字 是逼着书往假里写。这里的 3 / 12 是暂定值，唯一依据是全书探底的分布，
+// 【用它下结论之前，请先拿两三章去朱雀跑一次再把数定死】。跑之前它只配当相对指标：
+// 比的是"这一章比全书中位数差多少"，不是"够不够 12"。
+//
+// display / examples 是【给写作模板用的】：src/skill.mjs 把它们渲进 AGENTS.md/CLAUDE.md，
+// 也就是 agy/codex/claude 真正读到的规范。放在这里是为了不让两边漂开——
+// 闸换了表而模型没换，这本书只会被一直判红而永远改不动。
+export const ORAL_MARKER_SETS = {
+  '北方官话': {
+    markers: ORAL_MARKERS, hardFloor: 5, minPerK: 20, calibrated: '2026-09-23 朱雀四样本',
+    docFormula: DOC_FORMULA_SONG,
+    display: '', examples: [],   // 空 = 用模板里原有那一段（豫北是默认，措辞已被 register-standard 测试钉死）
+  },
+  '汉末三国': {
+    markers: ORAL_MARKERS_SANGUO, hardFloor: 3, minPerK: 12, calibrated: false,
+    docFormula: DOC_FORMULA_SANGUO,
+    display: '俺、咱们、某家、这厮、那厮、竖子、匹夫、甚么、作甚、怎地、怎的、怎生、难不成、'
+      + '也罢、罢了、就是了、莫要、休要、不济、不打紧、犯不着、省得、免得、索性、偏生、委实、'
+      + '兀自、好生、眼下、只顾、横竖、当真、里头、外头、后头、底下、没准、末了、晓得、寻思、'
+      + '打量、瞧、瞅、拾掇、撒手、拎、呸、……么？、不成？',
+    examples: [
+      '「你可知罪？」→「你晓得自己犯了甚么事么？」',
+      '「此人不足为惧。」→「这厮不济事，怕他作甚。」',
+      '「我并未见过他。」→「某家压根没见过这人。」',
+      '「不必多言，依计行事。」→「莫要多说，照着办就是了。」',
+    ],
+  },
+};
+export const DEFAULT_ORAL_SET = '北方官话';
+
+export function scanRegister(text, { minPerK, maxMeanSent = 22, hardFloor, markers, oralSet, maxShare = 0.22, maxDocRatio = 0.25 } = {}) {
   const t = String(text || '');
+  const set = ORAL_MARKER_SETS[oralSet] || ORAL_MARKER_SETS[DEFAULT_ORAL_SET];
+  const table = markers && markers.length ? markers : set.markers;
+  const floor = hardFloor ?? set.hardFloor;
+  const pass = minPerK ?? set.minPerK;
   const chars = (t.match(/[一-鿿]/g) || []).length || 1;
   let hits = 0;
   const found = [];
   const byWord = [];
-  for (const w of ORAL_MARKERS) {
+  for (const w of table) {
     const m = t.match(new RegExp(w, 'g'));
     if (m) {
       hits += m.length;
@@ -321,45 +430,57 @@ export function scanRegister(text, { minPerK = 20, maxMeanSent = 22, maxShare = 
   const top = byWord[0] || ['', 0];
   const share = hits ? +(top[1] / hits).toFixed(3) : 0;
   // 【公文豁免】2026-09-24 加。008 公堂章全章只有 19.5，往上推就得去改一份宋代验状的措辞——那是错的。
-  // 逐章量了一遍：15 章里公文占比 0%–12% 的有 12 章，只有 008 到了 34%，它的叙述部分是 23.6，本身过线。
+  // 逐章量了一遍：15 章里公文占比 0%–24% 的有 14 章，只有 008 到了 34%，它的叙述部分是 23.6，本身过线。
   // 所以按「叙述口语度」判，而不是按整章。判别只认公文定式词（验状/格目/供状/榜文/骨陷…），
   // 不认「小人」「老大人」——那些对白里也有，会把半章对话误判成公文（010 试过，误判到 32%）。
   const lines = t.split(/\n+/).map((x) => x.trim()).filter(Boolean);
-  const docLines = lines.filter((x) => DOC_FORMULA.test(x));
+  const docFormula = set.docFormula || DOC_FORMULA_SONG;
+  const docLines = lines.filter((x) => docFormula.test(x));
   const docChars = docLines.join('').length;
   const allChars = lines.join('').length || 1;
   const docRatio = +(docChars / allChars).toFixed(3);
-  const narr = lines.filter((x) => !DOC_FORMULA.test(x)).join('\n');
+  const narr = lines.filter((x) => !docFormula.test(x)).join('\n');
   const narrChars = (narr.match(/[一-鿿]/g) || []).length || 1;
   let narrHits = 0;
-  for (const w of ORAL_MARKERS) narrHits += (narr.match(new RegExp(w, 'g')) || []).length;
+  for (const w of table) narrHits += (narr.match(new RegExp(w, 'g')) || []).length;
   const narrPerK = +(narrHits / narrChars * 1000).toFixed(1);
 
   const problems = [];
-  const docExempt = docRatio > maxDocRatio && narrPerK >= minPerK;
-  if (perK < 5) problems.push(`口语标记只有 ${perK}/千字（实测低于 5 的样本人类率一律为 0，整章是书面腔）`);
-  else if (perK < minPerK && !docExempt) {
+  // 未标定的表不许把话说得像实测过一样——报出来的口气也要跟着降级
+  const why = set.calibrated
+    ? `实测低于 ${floor} 的样本人类率一律为 0，整章是书面腔`
+    : `低于暂定值 ${floor}；${oralSet || DEFAULT_ORAL_SET}表未经朱雀标定`;
+  // 公文多、而剥掉公文之后叙述本身达标 → 放行（见上面那段注释）
+  const docExempt = docRatio > maxDocRatio && narrPerK >= pass;
+  if (perK < floor) problems.push(`口语标记只有 ${perK}/千字（${why}）`);
+  else if (perK < pass && !docExempt) {
     const tail = docRatio > maxDocRatio
       ? `；本章公文占 ${Math.round(docRatio * 100)}%，剥掉公文后叙述也只有 ${narrPerK}/千字，是叙述本身不够口语`
       : '';
-    problems.push(`口语标记 ${perK}/千字，低于 ${minPerK}（只换词那版 19.3 也才拿到"弱人类创作"）${tail}`);
+    const basis = set.calibrated ? '只换词那版 19.3 也才拿到"弱人类创作"' : '暂定值，未经朱雀标定';
+    problems.push(`口语标记 ${perK}/千字，低于 ${pass}（${basis}）${tail}`);
   }
   if (meanSent > maxMeanSent) problems.push(`均句长 ${meanSent} 字，超过 ${maxMeanSent}（句子太长是书面腔的另一半）`);
   // 【分散度】2026-09-24 加：番茄签约被拒，责编原话「"自个儿""杵""瞧"到处出现……一看就是批量替换的痕迹」。
   // 查下来「里头」一个词占了全书口语标记的三分之一，011 一章 9.5/千字。
   // 根因是词表太窄——要顶到 20/千字只能反复用同几个词，闸自己逼出了口癖。
-  // 所以密度和分散度必须一起管：单个词不得超过全部标记的 ${Math.round(maxShare*100)}%。
+  // 所以密度和分散度必须一起管：单个词不得超过全部标记的 22%。
   if (hits >= 20 && share > maxShare) {
     problems.push(`「${top[0]}」一个词占了全部口语标记的 ${Math.round(share * 100)}%（${top[1]}/${hits}，上限 ${Math.round(maxShare * 100)}%）——堆同一个词是另一种机械感，换着说`);
   }
-  return { perK, hits, meanSent, topWord: top[0], topShare: share, docRatio, narrPerK, docExempt, found: found.slice(0, 20), problems, ok: problems.length === 0 };
+  return {
+    perK, hits, meanSent, topWord: top[0], topShare: share,
+    docRatio, narrPerK, docExempt,
+    found: found.slice(0, 20), problems, ok: problems.length === 0,
+    oralSet: oralSet || DEFAULT_ORAL_SET, calibrated: set.calibrated,
+  };
 }
 
-export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false } = {}) {
+export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false, oralSet, oralMarkers } = {}) {
   const slop = scanSlop(text, slopOff);
   const stereo = stereoOff ? { problems: [], ok: true, said: 0, mood: 0, dialogues: 0, ratio: 0 } : scanStereotype(text);
   const rhythm = rhythmOff ? { problems: [], ok: true, paraCV: 0, longSentRatio: 0, oneSentRatio: 0 } : scanRhythm(text);
-  const register = registerOff ? { problems: [], ok: true, perK: 0, meanSent: 0, hits: 0, found: [] } : scanRegister(text);
+  const register = registerOff ? { problems: [], ok: true, perK: 0, meanSent: 0, hits: 0, found: [] } : scanRegister(text, { oralSet, markers: oralMarkers });
   const ban = scanBanned(text, banned);
   const expo = expoOff ? { hits: [], count: 0 } : scanExposition(text);
   const hook = (prevText && !hookOff) ? checkHookContinuity(prevText, text, names, { history }) : { raised: [], dropped: [], late: [], ok: true };

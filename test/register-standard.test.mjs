@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 
 const src = fs.readFileSync(new URL('../src/skill.mjs', import.meta.url), 'utf8');
 
@@ -33,6 +34,18 @@ test('三件事一条都不能少', () => {
   assert.match(src, /每章至少三处/, '闲笔密度');
 });
 
+test('长句必须带天花板——只给下限，模型就冲天花板', () => {
+  // 由来：卷02 二十三章写出 61 句 >80 字、12 句过百、最长 139 字。
+  // 教训本来只写在 chapgate.mjs 的注释里（"给下限，它就冲天花板"），
+  // 而模型读的是这份规范——闸知道、模型不知道，于是新章一直在照写。
+  assert.match(src, /一章最多两句超过八十字/, '上限要写进模型读的规范，不能只留在闸的注释里');
+  assert.match(src, /一句都不许过一百字/, '硬天花板');
+  assert.match(src, /给下限，它就冲天花板/, '这条教训的由来要留着');
+  for (const m of ['分号串起来的三件事', '百科堆砌', '连环动作一句到底']) {
+    assert.ok(src.includes(m), '拆句三法缺了「' + m + '」——只说"要拆"不说"怎么拆"等于没说');
+  }
+});
+
 test('「必须留长句」那一半不能丢——只写「句子放短」会写出短句节拍器', () => {
   assert.match(src, /必须留长句/, '这是我踩过的坑');
   assert.match(src, /短句节拍器/, '坑的名字要留着');
@@ -52,7 +65,48 @@ test('「这不是写差一点去骗检测器」的定性要留着', () => {
 });
 
 test('代码闸与模板说的是同一组阈值', async () => {
+  // 钉运行时的值，不钉源码文本——阈值搬过一次家（挪进 ORAL_MARKER_SETS）时，
+  // 钉文本的写法会在重构里红掉，而它本来想守的东西其实没变。
+  const { ORAL_MARKER_SETS, scanRegister } = await import('../src/chapgate.mjs');
+  assert.equal(ORAL_MARKER_SETS['北方官话'].minPerK, 20, '口语阈值应是 20，与模板一致');
+  assert.equal(ORAL_MARKER_SETS['北方官话'].hardFloor, 5, '硬伤线应是 5，与模板一致');
+  assert.equal(scanRegister('甲').meanSent !== undefined, true);
   const gate = fs.readFileSync(new URL('../src/chapgate.mjs', import.meta.url), 'utf8');
-  assert.match(gate, /minPerK = 20/, 'scanRegister 的口语阈值应是 20，与模板一致');
   assert.match(gate, /maxMeanSent = 22/, 'scanRegister 的句长阈值应是 22，与模板一致');
+});
+
+test('换了口语表的书，模板里的词表也跟着换——闸和模型不许各说各话', async () => {
+  const os = await import('node:os');
+  const { oralSectionFor } = await import('../src/skill.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oral-'));
+  // 没有 gate.json → 仍是北方官话那一段
+  assert.match(oralSectionFor({ dir }), /自个儿/);
+  fs.writeFileSync(path.join(dir, 'gate.json'), JSON.stringify({ oralSet: '汉末三国' }), 'utf8');
+  const sg = oralSectionFor({ dir });
+  assert.match(sg, /甚么/, '三国书要教三国的词');
+  assert.ok(!/自个儿/.test(sg), '三国书的模板里不许再出现豫北词');
+  assert.match(sg, /未经朱雀标定/, '没标定的阈值要在模板里也说清楚');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('禁用词表要渲进规范——只让闸看见，「再也犯不了第二次」就立不住', async () => {
+  const os = await import('node:os');
+  const { bannedSectionFor, skillBody } = await import('../src/skill.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'banned-'));
+  // 没有 gate.json / 空表 → 整节不出现，不给模型看一张空表
+  assert.equal(bannedSectionFor({ dir }), '');
+  fs.writeFileSync(path.join(dir, 'gate.json'), JSON.stringify({ banned: [] }), 'utf8');
+  assert.equal(bannedSectionFor({ dir }), '');
+
+  fs.writeFileSync(path.join(dir, 'gate.json'), JSON.stringify({
+    banned: [{ word: '自个儿', why: '汉末没有这个说法' }, '头一个'],
+  }), 'utf8');
+  const sec = bannedSectionFor({ dir });
+  assert.match(sec, /禁用写法/);
+  assert.match(sec, /自个儿/);
+  assert.match(sec, /汉末没有这个说法/, '理由要带上——只给词不给理由，模型换不对');
+  assert.match(sec, /头一个/, '纯字符串写法也要认');
+  // 真的进了模型读的那份规范
+  assert.match(skillBody({ dir, title: 'T' }), /禁用写法/);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

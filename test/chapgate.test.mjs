@@ -198,6 +198,31 @@ test('专名表从台账自动长出来——漏登记就是 006 写出张保的
   assert.ok(!names.includes('不该被读到的历史区人物'), '历史区不许进专名表');
 });
 
+const NL = String.fromCharCode(10);
+test('专名表也认「- 吕布：」这种不加粗的台账——三本书的钩子闸曾因此整本空转', () => {
+  const ledger = [
+    '## 📌 当前态快照',
+    '- 进度：已写到第 113 章',
+    '### 人物现状（含全部已出场姓名，绝不改名、绝不串名）',
+    '- 吕布：以车骑将军明光玄铠亲临司徒府吊唁王允。',
+    '- 刘协（汉献帝）：十三岁，积郁寒邪倒灌肺窍。',
+    '- 张辽、马超：各领精骑两翼呼应。',
+    '### 未回收伏笔 / 待查',
+    '- 武关解围与南阳战事：三千五百生力铁骑突袭桥蕤。',
+    '<!-- LEDGER_HISTORY_BELOW -->',
+    '### 人物现状',
+    '- 历史区的人：不许进表',
+  ].join(NL);
+  const names = namesFromLedger(ledger);
+  assert.ok(names.includes('吕布'));
+  assert.ok(names.includes('刘协'), '括注要剥掉，留「刘协」');
+  assert.ok(names.includes('张辽') && names.includes('马超'), '一条里并列的几个人要拆开');
+  assert.ok(!names.includes('进度'), '「进度」在人物节之外，不许进表');
+  assert.ok(!names.includes('历史区的人'), '历史区不许进专名表');
+  // 未回收伏笔那一节的条目开头是事件不是人名
+  assert.ok(!names.some(n => n.includes('武关')), '伏笔节不许进表');
+});
+
 test('别名冲突：同一个里正被写成两个名字，只要两边都出现过就报', () => {
   const chapters = ['榜文夹注写着本村里正王荣。', '小人张保，便是本乡里正。'];
   const r = checkAliases(chapters, [['王荣', '张保', '同一个里正']]);

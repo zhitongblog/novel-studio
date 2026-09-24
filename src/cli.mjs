@@ -368,7 +368,15 @@ async function gateCmd(f, cfg) {
   }
 
   console.log(c.bold(`\n🚦 章节审校闸 · 《${book.title}》\n`) + hr());
-  console.log(c.gray(`  专名表 ${names.length} 个（台账 + gate.json）｜禁用词 ${banned.length} 条｜别名对 ${aliases.length} 组\n`));
+  const { ORAL_MARKER_SETS, DEFAULT_ORAL_SET } = await import('./chapgate.mjs');
+  const oralName = conf.oralMarkers?.length ? '自带表' : (conf.oralSet || DEFAULT_ORAL_SET);
+  console.log(c.gray(`  专名表 ${names.length} 个（台账 + gate.json）｜禁用词 ${banned.length} 条｜别名对 ${aliases.length} 组｜口语表「${oralName}」`));
+  if (!conf.oralSet && !conf.oralMarkers?.length) {
+    console.log(c.gray(`        口语表默认是北方官话（豫北）。背景不对的书要在 gate.json 里换：${Object.keys(ORAL_MARKER_SETS).map(k => `"oralSet":"${k}"`).join(' / ')}`));
+  } else if (ORAL_MARKER_SETS[conf.oralSet] && !ORAL_MARKER_SETS[conf.oralSet].calibrated) {
+    console.log(c.yellow(`        ⚠ 「${conf.oralSet}」表的阈值【未经朱雀标定】，是暂定值——口语那一项只当相对指标看，别拿它下死结论`));
+  }
+  console.log('');
 
   let bad = 0, total = 0, noted = 0;
   const allTexts = [];
@@ -385,6 +393,8 @@ async function gateCmd(f, cfg) {
         names, banned,
         slopOff: { ignoreKinds: conf.slopOff?.kinds || [], ignoreWords: conf.slopOff?.words || [] },
         expoOff: !!conf.expoOff, hookOff: !!conf.hookOff, stereoOff: !!conf.stereoOff, rhythmOff: !!conf.rhythmOff,
+        // 口语表按书的背景走：三国书拿豫北表量，113 章会全判"书面腔"，数值没错但结论没法用
+        oralSet: conf.oralSet, oralMarkers: conf.oralMarkers,
       });
       if (r.ok) {
         // 单处套话只作提示，不算事故——要卡的是密度不是总数（见 chapgate.scanSlop 顶部）

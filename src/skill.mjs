@@ -6,10 +6,64 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { styleVoice } from './styles.mjs';
 import { romanceVoice, ROMANCE_REDLINE } from './romance.mjs';
+import { ORAL_MARKER_SETS } from './chapgate.mjs';
 
 export const SKILL_NAME = 'longform-webnovel-writer';
 
 // 写作标准正文（源自 ~/.codex/skills/longform-webnovel-writer/SKILL.md，精炼为可直接执行的项目规范）
+// 读书目录下 gate.json 的 oralSet，渲出「① 词换成口语」那一段。
+// 缺省（北方官话）时原样返回旧文案——它的每一句都被 register-standard 测试钉着。
+const NORTH_SECTION = [
+  '**① 词换成口语。** 目标 **每千字 20 个以上口语标记**。北方官话一路的：',
+  '上头、里头、后头、外头、自个儿、俩、仨、打哪天、末了、家什、囫囵、出溜、杵着、瞧、搁、',
+  '头一个、一溜、没准、味儿、这地方、就算完、不作数、啥、咋、那就是说、跟……似的、挺久/挺好。',
+  '　　· 「意味着府里已经把这个人当成死人了」→「那就是说府里头已经把这人当死的算了」',
+  '　　· 「她整个人往下淌，像一袋没扎紧的米」→「她整个人往下出溜，跟一口袋没扎紧的米似的」',
+  '　　· 「按今天的标准」→「搁今天的标准」；「最后」→「末了」；「两个儿媳」→「俩儿媳妇」',
+  '　　⚠️ **换书换背景时连这张词表一起换。** 吴语、川渝、岭南背景的书堆北方词，是另一种假。',
+].join(String.fromCharCode(10));
+
+export function oralSectionFor(book) {
+  let conf = {};
+  try { conf = JSON.parse(fs.readFileSync(path.join(book && book.dir || '', 'gate.json'), 'utf8')); } catch { conf = {}; }
+  const set = ORAL_MARKER_SETS[conf.oralSet];
+  if (!set || !set.display) return NORTH_SECTION;
+  const NL = String.fromCharCode(10);
+  return [
+    `**① 词换成口语。** 目标 **每千字 ${set.minPerK} 个以上口语标记**。${conf.oralSet}一路的：`,
+    set.display,
+    ...set.examples.map(x => '　　· ' + x),
+    `　　⚠️ **这张表是按本书背景（${conf.oralSet}）换过的**，别往里掺别的方言——`
+      + '把现代北方口语塞进古人嘴里，是另一种假。',
+    set.calibrated ? '' : `　　⚠️ 这一档的 ${set.minPerK}/千字【未经朱雀标定】，是暂定值：往口语走的方向是对的，`
+      + '但不必为了凑数把词硬塞进去——凑出来的口语比书面腔更假。',
+  ].filter(Boolean).join(NL);
+}
+
+// 把 gate.json 的 banned 渲成规范里的一节。空表就整节不出现——
+// 不给模型看一张空表，那只会占篇幅。
+export function bannedSectionFor(book) {
+  let conf = {};
+  try { conf = JSON.parse(fs.readFileSync(path.join(book && book.dir || '', 'gate.json'), 'utf8')); } catch { conf = {}; }
+  const list = Array.isArray(conf.banned) ? conf.banned : [];
+  if (!list.length) return '';
+  const NL = String.fromCharCode(10);
+  const rows = list.map((x) => {
+    const word = typeof x === 'string' ? x : (x && x.word);
+    const why = typeof x === 'string' ? '' : (x && x.why || '');
+    return word ? `- **${word}**${why ? '　—— ' + why : ''}` : '';
+  }).filter(Boolean);
+  return [
+    '## 禁用写法（本书专属·硬红线，写完逐章扫一遍）',
+    '',
+    '下面每一条都是这本书【已经出过的错】，改好之后钉在这里，为的是同类错误再也犯不了第二次。',
+    '**一个都不许出现在正文里。** 不确定该换成什么，就换成具体的动作、物件或后果。',
+    '',
+    ...rows,
+    '',
+  ].join(NL) + NL;
+}
+
 export function skillBody(book) {
   const b = book || {};
   const std = b.standards || {};
@@ -18,6 +72,16 @@ export function skillBody(book) {
   const tgtLo = std.targetCharsLo || 3000;
   const tgtHi = std.targetCharsHi || 3600;
   const sv = styleVoice(b.style || std.style);
+  // 口语词表按书的背景走，跟审校闸读的是【同一张表】（gate.json 的 oralSet）。
+  // 为什么必须同源：2026-09-23 给三国书换了闸的表，模板却还在教"自个儿/啥/咋"——
+  // 那等于一边判它书面腔，一边让它往汉末对白里塞豫北方言，两头都错。
+  const oralSection = oralSectionFor(b);
+  // 禁用词表：每修好一处错误就钉一个写法进 gate.json，从此犯不了第二次。
+  // 【这一步以前是缺的】banned 原来只有审校闸在读，从没进过提示词——
+  // 于是"同类错误再也犯不了第二次"这个立意根本立不住：模型看不见那张表。
+  // 2026-09-23 实证：给三国书换上口语表后，模型被推着往口语走，
+  // 伸手就抓训练里最顺手的现代北方词，「自个儿」在 114–122 章冒出 10 次。
+  const bannedSection = bannedSectionFor(b);
   // 这本书有没有挂范本，决定文风那一节怎么写（范本优先，形容词降级为补充）
   let hasRefs = false;
   try { hasRefs = b.dir ? fs.readdirSync(path.join(b.dir, 'style_refs')).some(f => /\.(txt|md)$/i.test(f)) : false; } catch { hasRefs = false; }
@@ -223,13 +287,7 @@ ${hasRefs ? `## 文风与反 AI 味（最高优先级，逐章自检）
 
 ### 怎么做（三件事，缺一不可）
 
-**① 词换成口语。** 目标 **每千字 20 个以上口语标记**。北方官话一路的：
-上头、里头、后头、外头、自个儿、俩、仨、打哪天、末了、家什、囫囵、出溜、杵着、瞧、搁、
-头一个、一溜、没准、味儿、这地方、就算完、不作数、啥、咋、那就是说、跟……似的、挺久/挺好。
-　　· 「意味着府里已经把这个人当成死人了」→「那就是说府里头已经把这人当死的算了」
-　　· 「她整个人往下淌，像一袋没扎紧的米」→「她整个人往下出溜，跟一口袋没扎紧的米似的」
-　　· 「按今天的标准」→「搁今天的标准」；「最后」→「末了」；「两个儿媳」→「俩儿媳妇」
-　　⚠️ **换书换背景时连这张词表一起换。** 吴语、川渝、岭南背景的书堆北方词，是另一种假。
+${oralSection}
 
 **② 句子放短，但【必须留长句】。** 均句长压到 22 字以内（原版 25.9 就是书面腔的另一半病根），
 　　**同时 25 字以上的长句要占到两成**。
@@ -283,7 +341,7 @@ AI 中文最大的破绽是**每一句都在做功**：每句都推进情节、�
 番茄、起点的读者读的是口语化的故事，不是文学散文。这一条同时解决两个问题。
 不许为了"显得有文采"把正文往书面腔上拽。
 
-## 反 AI 味 / 拟人化标准（最高优先级，逐章自检）
+${bannedSection}## 反 AI 味 / 拟人化标准（最高优先级，逐章自检）
 
 写"像人写的"正文，核心是**具体、不均匀、有潜台词、有时代地域口音、不解释**。
 
@@ -292,6 +350,16 @@ AI 中文最大的破绽是**每一句都在做功**：每句都推进情节、�
 - **⚠️ 反过来的破绽同样致命**：靠狂堆短句来制造"不均匀"，读三章还行，读三十章就是节拍器。硬指标：
   **十字以内的短句不超过全章的四成**；**每隔几段必须有一个二十五字以上的长句**（带从句、有主次的那种）把节奏拉开。
   只有短句、没有长句的章，读起来跟只有长句一样单调。
+- **⚠️ 长句也有天花板：一章最多两句超过八十字，一句都不许过一百字。**
+  这条是被实打实撞出来的：上面只给了"要有二十五字以上的长句"这个下限，结果《重生三国》卷02
+  二十三章里写出六十一句八十字以上的长句，十二句过百，最长一百三十九字。**给下限，它就冲天花板。**
+  超了就拆，拆法是固定的三条：
+  　　· **分号串起来的三件事 → 三句话。**「A；B；C」写成「A。B。C。」气势不减，反而像唱名。
+  　　· **人物出场的百科堆砌 → 留两项。**"年约／生得／身披／外罩／掌中／胯下"六项连挂是资料卡不是描写。
+  　　· **连环动作一句到底 → 一个动作一句，最狠的那下单独成句。**
+  　　　「戟杆横扫，神力爆发，刀折成铁片，胸膛塌陷，倒飞两丈，撞墙，气绝」是七个动作挤一句；
+  　　　拆成「三柄环首刀齐断。铁片还在空中，人已经飞了出去——两丈开外，撞上青砖墙。」
+  拆完的目标是**低均值 + 高方差**：均句长压在二十二字以内，但长短差距拉大。
 - 段落长短也交错：紧张处用短段甚至单句成段，叙事处用稍长的段。整章别被一行短句霸占，也别全是工整长段。
 - 避免排比/三连的滥用（"他看见……他听见……他想起……"这种工整三段式，偶尔可，连用就假）。
 - **同一种句式不许扎堆**：像「他把 X 往 Y 上一磕／一撂／一扔」这类"把"字动作句，**全章不超过三次**。

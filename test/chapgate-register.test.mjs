@@ -12,7 +12,7 @@
 // 下面每个 case 都是在守这条曲线——阈值动了，测试就会红。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scanRegister, ORAL_MARKERS, gateChapter } from '../src/chapgate.mjs';
+import { scanRegister, ORAL_MARKERS, ORAL_MARKERS_SANGUO, ORAL_MARKER_SETS, gateChapter } from '../src/chapgate.mjs';
 
 // 造样本：以句号断句，控制均句长与口语词数量
 const mk = (sent, n, oral = '') => Array.from({ length: n }, (_, i) =>
@@ -83,6 +83,67 @@ test('节奏闸量不到 AI 味——这条是实测结论，别再把 CV 当反
   assert.match(src, /006/);
 });
 
+// ── 汉末三国表 ─────────────────────────────────────────────────
+// 由来：2026-09-23 拿豫北表量《重生三国，我吕布杀出一片天》，113 章全判"整章书面腔"。
+// 数值没错，结论没法用——汉末的人不说"自个儿""啥""咋"，往三国书里堆这些词是另一种假。
+
+test('三国表收的是半文半白那一路词，不是奏章上的文言', () => {
+  assert.ok(ORAL_MARKERS_SANGUO.length > 50);
+  // 这八个词是这本书全书 0 次的口语骨架，正是这张表存在的理由
+  for (const w of ['甚么', '怎地', '怎的', '晓得', '省得', '寻思', '也罢', '这厮']) {
+    assert.ok(ORAL_MARKERS_SANGUO.includes(w), '三国表里应有「' + w + '」');
+  }
+  // 豫北那一路的词不许混进来——那是另一种假
+  for (const w of ['自个儿', '啥', '咋', '味儿']) {
+    assert.ok(!ORAL_MARKERS_SANGUO.includes(w), '「' + w + '」是豫北词，不该出现在三国表');
+  }
+});
+
+test('误伤守闸：这五处是拿 37 万字全书验出来的，删了约束这里就红', () => {
+  const pad = '甲'.repeat(200);
+  const no = (t, why) => assert.equal(scanRegister(pad + t, { oralSet: '汉末三国' }).hits, 0, why);
+  no('千钧一发之际', '「一发」只来自千钧一发');
+  no('粥是我叫端的，好端端的', '「端的」只来自叫端的／好端端的');
+  no('能说明他们去过相似的地方', '「似的」不许吃掉「相似的」');
+  no('孩子缩在娘的怀里', '「娘的」是母亲不是骂人');
+  no('朝拖他娘的兵扑过去', '「他娘的兵」是他母亲的兵，不是骂人');
+  no('他下意识攥紧右手', '「攥」是旁白动词，这道闸量的是人物嘴里的口语');
+});
+
+test('「咱们」只算一次，不许被「咱」再数一遍', () => {
+  const r = scanRegister('甲'.repeat(200) + '咱们', { oralSet: '汉末三国' });
+  assert.equal(r.hits, 1, '实际 ' + r.hits);
+});
+
+test('未标定的表不许把话说得像实测过一样', () => {
+  const bookish = mk(20, 30);
+  const sg = scanRegister(bookish, { oralSet: '汉末三国' });
+  assert.equal(sg.calibrated, false);
+  assert.match(sg.problems[0], /未经朱雀标定/);
+  assert.ok(!/人类率一律为 0/.test(sg.problems[0]), '没标定过的表不许借用实测结论的口气');
+  // 标定过的那张仍然可以这么说
+  assert.match(scanRegister(bookish).problems[0], /人类率一律为 0/);
+  assert.equal(ORAL_MARKER_SETS['北方官话'].calibrated, '2026-09-23 朱雀四样本');
+});
+
+test('默认仍是北方官话——换表是 gate.json 的事，不许悄悄改老书的行为', () => {
+  assert.equal(scanRegister('甲'.repeat(100)).oralSet, '北方官话');
+  // 豫北词在三国表下不该加分，反之亦然
+  const north = '自个儿啥咋味儿' + '甲'.repeat(200);
+  assert.ok(scanRegister(north).hits > 0);
+  assert.equal(scanRegister(north, { oralSet: '汉末三国' }).hits, 0);
+});
+
+test('oralSet 能从 gateChapter 穿下去（gate.json 就是这么接的）', () => {
+  const sanguo = '“甚么？”那厮怎地不晓得省得寻思也罢' + mk(18, 10);
+  const a = gateChapter({ text: sanguo });                        // 豫北表：一个都认不出
+  const b = gateChapter({ text: sanguo, oralSet: '汉末三国' });
+  assert.ok(b.register.perK > a.register.perK, '换表之后口语密度应当涨：' + a.register.perK + ' → ' + b.register.perK);
+  // 自带词表优先于 oralSet
+  const c = gateChapter({ text: '甲'.repeat(100) + '喏喏喏', oralMarkers: ['喏'] });
+  assert.equal(c.register.hits, 3);
+});
+
 // ── 公文豁免 ──────────────────────────────────────────────────────────
 // 2026-09-24 加。008《知见人》是公堂章，整章 19.5/千字，差一点点。
 // 但那一章有 34% 的篇幅是宋代验状、供状、榜文原文——要把整章顶到 20，
@@ -129,5 +190,4 @@ test('公文少的章不走豁免（防止规则被滥用）', () => {
 test('判别只认公文定式，不认对白里的称谓（否则半章对话会被误判成公文）', () => {
   const dialog = '“回老大人，小民是同村乡邻。”\n“小人不敢欺瞒老大人。”\n“大老爷明鉴，小人冤枉啊！”';
   const r = scanRegister(dialog);
-  assert.equal(r.docRatio, 0, `「老大人」「小人」不该算公文，实际占比 ${r.docRatio}`);
-});
+  assert.equal(r.docRatio, 0, `「老大人」「小人」不该算公文，实际占比 ${r.docRatio}`);});
