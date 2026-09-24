@@ -110,3 +110,27 @@ test('闸自己出异常不许阻断写作', () => {
     { slug: 'X', from: 1, to: 3, onLog: (e) => logs.push(e) });
   assert.equal(r === null || typeof r === 'string', true, '不许抛出去');
 });
+
+// ── 节奏闸 → 定点修 的通路 ──────────────────────────────────────
+// 2026-09-24：节奏闸量出《重生三国》13 章字数不足，但它只会报警——
+// 落实的通路（定点修 readfix）只认「空钩子/逻辑/人物/情绪」四类，字数不足塞不进去。
+// 加了「篇幅」这第五类，两套机器才接上。
+test('定点修认得「篇幅」这一类，且带上「补戏不补字」那条规矩', async () => {
+  const { parseReadReview, buildReadFixInstruction } = await import('../src/readreview.mjs');
+  const r = parseReadReview('第 82 章｜篇幅｜只有 2394 字，缺 606 字｜加一场具体的戏');
+  assert.equal(r.items.length, 1);
+  assert.equal(r.items[0].kind, '篇幅');
+  assert.equal(r.items[0].num, 82);
+
+  const instr = buildReadFixInstruction(r.items);
+  assert.match(instr, /补的是戏，不是字/, '不带这条，模型就会去凑字数');
+  assert.match(instr, /严禁靠复述前情/);
+  assert.match(instr, /差得少的章/, '差几十字的章不该被硬塞一整场新戏');
+  assert.match(instr, /字数不得变少/, '原有的硬约束不能丢');
+
+  // 没有篇幅条目时不许多出这一段——提示词要紧凑
+  const other = buildReadFixInstruction([{ num: 1, kind: '逻辑', problem: 'a', fix: 'b' }]);
+  assert.ok(!other.includes('篇幅怎么改'));
+  // 原来四类不许被破坏
+  assert.equal(parseReadReview('第 3 章｜空钩子｜章末在总结｜换成具体的事').items[0].kind, '空钩子');
+});
