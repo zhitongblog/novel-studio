@@ -901,6 +901,17 @@
           <label class="field"><span>书名</span><input id="cvTitle" /></label>
           <label class="field"><span>作者名</span><input id="cvAuthor" placeholder="如：佚名" /></label>
           <label class="field"><span>主题</span><select id="cvTheme"></select></label>
+          <div class="ai-cover-box" style="border-color:rgba(120,200,160,.45)">
+            <div class="btn-row" style="gap:8px;align-items:center">
+              <select id="cvTextEngine" style="flex:0 0 auto">
+                <option value="chatgpt">ChatGPT</option>
+                <option value="gemini">Gemini</option>
+              </select>
+              <button class="btn" id="cvGenWithText" style="flex:1">🅰️ 生成带字成品封面（推荐）</button>
+            </div>
+            <div class="modal-hint" id="cvTextHint">让模型把<b>书名和作者直接画进图里</b>（版式、字体、字底它一起设计），比在素材上叠字好看得多。出图后会用视觉模型<b>逐字校验</b>：把封面上的字原样读回来跟书名比对，画错就带着错处重画，最多 3 次；三次都不行自动退回下面的「无字底图 + 叠字」。</div>
+          </div>
+          <label class="check" id="cvOverlayRow" style="margin:6px 0"><input type="checkbox" id="cvOverlay" checked> 在图上叠字（带字成品封面会自动关掉）</label>
           <div class="ai-cover-box">
             <button class="btn" id="cvGenAI" style="width:100%">🎨 AI 生成插画</button>
             <textarea id="cvPrompt" class="ai-prompt" rows="2" placeholder="可留空（自动按题材/文风生成画面提示词），或自己写一句画面描述…"></textarea>

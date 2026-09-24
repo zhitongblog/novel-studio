@@ -206,11 +206,12 @@ async function fetchCover(client, src) {
 }
 
 // 存盘 + 读 PNG 宽高
-function saveCover(book, dataUrl, minBytes = 2000) {
+function saveCover(book, dataUrl, minBytes = 2000, outFile) {
   const b64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
   const buf = Buffer.from(b64, 'base64');
   if (buf.length < minBytes) throw new Error('图片异常（过小），可能不是成品图');
-  const file = path.join(book.dir, 'cover_bg.png');
+  // outFile：带字成品封面直接落 cover.png；不传仍是无字底图 cover_bg.png（老行为）
+  const file = outFile || path.join(book.dir, 'cover_bg.png');
   fs.mkdirSync(book.dir, { recursive: true });
   fs.writeFileSync(file, buf);
   let w = 0, h = 0;
@@ -219,7 +220,7 @@ function saveCover(book, dataUrl, minBytes = 2000) {
 }
 
 // 主流程：Gemini 网页版生成封面底图 → 存 book.dir/cover_bg.png
-export async function generateCoverViaGemini(book, { prompt, profilePath, onLog } = {}) {
+export async function generateCoverViaGemini(book, { prompt, profilePath, onLog, outFile } = {}) {
   const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
   if (!profilePath) throw new Error('缺少 profilePath（需绑定已登录 Gemini 的 Unzoo 账号）');
   const client = new UnzooClient(profilePath, onLog, 'gemini.google.com', 'Gemini');
@@ -236,7 +237,7 @@ export async function generateCoverViaGemini(book, { prompt, profilePath, onLog 
   if (!src) throw new Error('Gemini 生图超时（>7 分钟未出图）。可能在排队，过一会儿重试即可。');
 
   log('图片已生成，正在取像素存盘…');
-  const r = saveCover(book, await fetchCover(client, src));
+  const r = saveCover(book, await fetchCover(client, src), 2000, outFile);
   log('✅ 封面底图已保存');
   return { ...r, prompt: art };
 }

@@ -2329,7 +2329,14 @@ function drawCover() {
   const cv = $('#cvCanvas'); if (!cv) return; const c = cv.getContext('2d'); const W = 600, H = 800;
   const themeId = $('#cvTheme').value;
   c.clearRect(0, 0, W, H);
-  if (themeId === 'ai' && coverBgImg) { drawAiBg(c, W, H); return drawCoverText(c, W, H, { tColor: '#fff', aColor: '#f0e6c8' }, true); }
+  // 带字成品封面（模型已把书名画进图里）不能再叠一层字——会糊成两层。
+  // 所以 AI 底图这条路要看「叠字」开关：成品封面加载时自动关掉。
+  if (themeId === 'ai' && coverBgImg) {
+    drawAiBg(c, W, H);
+    const overlay = $('#cvOverlay');
+    if (overlay && !overlay.checked) return;
+    return drawCoverText(c, W, H, { tColor: '#fff', aColor: '#f0e6c8' }, true);
+  }
   const theme = COVER_THEMES.find(t => t.id === themeId) || COVER_THEMES[0];
   theme.bg(c, W, H);
   drawCoverText(c, W, H, theme);
@@ -2375,12 +2382,14 @@ async function openCover() {
 $('#btnCover').addEventListener('click', openCover);
 ['cvTitle', 'cvAuthor'].forEach(id => $('#' + id).addEventListener('input', drawCover));
 $('#cvTheme').addEventListener('change', drawCover);
+$('#cvOverlay')?.addEventListener('change', drawCover);
 $('#cvGenAI').addEventListener('click', async () => {
   if (!CUR) return;
   const btn = $('#cvGenAI'); btn.disabled = true; const old = btn.textContent; btn.textContent = '🎨 生成中…（约10-20秒）'; $('#cvErr').textContent = '';
   try {
     const r = await api('/api/book/gen-cover-bg', 'POST', { book: CUR.slug, prompt: $('#cvPrompt').value.trim() || undefined });
     await loadCoverBg(API + r.url);
+    cvOverlayOn();
     $('#cvTheme').value = 'ai'; drawCover();
     if (r.prompt && !$('#cvPrompt').value.trim()) $('#cvPrompt').value = r.prompt;
     toast('AI 封面插画已生成');
@@ -2429,6 +2438,7 @@ $('#cvGenChatGPT').addEventListener('click', async () => {
         if (s.status === 'done') {
           clearInterval(cvChatPoll); cvChatPoll = null;
           await loadCoverBg(API + s.url + '&r=' + Date.now());
+          cvOverlayOn();
           $('#cvTheme').value = 'ai'; drawCover();
           if (s.prompt && !$('#cvPrompt').value.trim()) $('#cvPrompt').value = s.prompt;
           hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
@@ -2465,6 +2475,7 @@ $('#cvGrabChatGPT')?.addEventListener('click', async () => {
         if (s.status === 'done') {
           clearInterval(cvChatPoll); cvChatPoll = null;
           await loadCoverBg(API + s.url + '&r=' + Date.now());
+          cvOverlayOn();
           $('#cvTheme').value = 'ai'; drawCover();
           hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
           toast('已抓取 ChatGPT 封面');
@@ -2483,6 +2494,9 @@ $('#cvGrabChatGPT')?.addEventListener('click', async () => {
 // ===== Gemini 网页版生成封面（免费·快：后台跑 + 轮询状态，与 ChatGPT 那条共用 coverJobs 状态机）=====
 // 生成与抓取只差一个端点和几句文案，所以做成同一个工厂，省得两份几乎一样的轮询代码各自跑偏。
 let cvGemPoll = null;
+// 生成/抓取【无字底图】时必须把叠字打回来——上一次生成带字成品封面会把它关掉，
+// 不打回来的话这次拿到的干净底图上一个字都不会有。
+function cvOverlayOn() { const ov = $('#cvOverlay'); if (ov) ov.checked = true; }
 function cvGeminiRun(apiPath, btnId, runningText, doneToast) {
   return async () => {
     if (!CUR) return;
@@ -2503,6 +2517,7 @@ function cvGeminiRun(apiPath, btnId, runningText, doneToast) {
           if (st.status === 'done') {
             clearInterval(cvGemPoll); cvGemPoll = null;
             await loadCoverBg(API + st.url + '&r=' + Date.now());
+            cvOverlayOn();
             $('#cvTheme').value = 'ai'; drawCover();
             if (st.prompt && !$('#cvPrompt').value.trim()) $('#cvPrompt').value = st.prompt;
             hint.textContent = hintOld; btn.disabled = false; btn.textContent = old;
@@ -2520,6 +2535,53 @@ function cvGeminiRun(apiPath, btnId, runningText, doneToast) {
     }
   };
 }
+// 带字成品封面：模型把书名作者直接画进图里，出图后逐字校验，错了带着错处重画。
+// 与下面几个「底图」按钮的区别：这个出的是成品（cover.png），不需要再叠字。
+let cvTextPoll = null;
+$('#cvGenWithText')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const engine = $('#cvTextEngine').value === 'gemini' ? 'gemini' : 'chatgpt';
+  const profilePath = (engine === 'gemini' ? $('#cvGemProfile') : $('#cvChatProfile')).value;
+  if (!profilePath) {
+    $('#cvErr').textContent = `请先在下面选一个【已登录 ${engine === 'gemini' ? 'Gemini' : 'ChatGPT'}】的浏览器账号`;
+    return;
+  }
+  const btn = $('#cvGenWithText'); const old = btn.textContent; btn.disabled = true;
+  const hint = $('#cvTextHint'); const hintOld = hint.innerHTML;
+  $('#cvErr').textContent = '';
+  const restore = () => { btn.disabled = false; btn.textContent = old; hint.innerHTML = hintOld; };
+  try {
+    await api('/api/book/gen-cover-text', 'POST', {
+      book: CUR.slug, engine, profilePath,
+      title: $('#cvTitle').value.trim() || CUR.title, author: $('#cvAuthor').value.trim(),
+    });
+    btn.textContent = '🅰️ 生成中…（出图 + 校验，可能几分钟）';
+    if (cvTextPoll) clearInterval(cvTextPoll);
+    cvTextPoll = setInterval(async () => {
+      try {
+        const st = await api('/api/book/gen-cover-status', 'POST', { book: CUR.slug });
+        if (st.msg) hint.textContent = '⏳ ' + st.msg;
+        if (st.status === 'done') {
+          clearInterval(cvTextPoll); cvTextPoll = null;
+          await loadCoverBg(API + st.url + '&r=' + Date.now());
+          $('#cvTheme').value = 'ai';
+          // 成品封面：关掉叠字；退回底图：保持叠字
+          const ov = $('#cvOverlay'); if (ov) ov.checked = !st.withText;
+          drawCover();
+          restore();
+          toast(st.withText ? `带字封面已生成（第 ${st.attempts} 次校验通过）` : '字没画对，已退回无字底图，请用叠字');
+        } else if (st.status === 'error') {
+          clearInterval(cvTextPoll); cvTextPoll = null;
+          $('#cvErr').textContent = '生成失败：' + (st.error || '未知');
+          restore();
+        }
+      } catch {}
+    }, 5000);
+  } catch (e) {
+    $('#cvErr').textContent = '启动失败：' + e.message;
+    restore();
+  }
+});
 $('#cvGenGemini')?.addEventListener('click', cvGeminiRun('/api/book/gen-cover-gemini', '#cvGenGemini', '✨ Gemini 生成中…', 'Gemini 封面已生成'));
 $('#cvGrabGemini')?.addEventListener('click', cvGeminiRun('/api/book/grab-cover-gemini', '#cvGrabGemini', '📥 抓取中…', '已抓取 Gemini 封面'));
 

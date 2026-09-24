@@ -151,7 +151,7 @@ async function downloadImageDataUrl(client, src) {
 }
 
 // 主流程：ChatGPT 网页版生成封面底图 → 存 book.dir/cover_bg.png。返回 {file, prompt, w, h, bytes}。
-export async function generateCoverViaChatGPT(book, { prompt, profilePath, onLog } = {}) {
+export async function generateCoverViaChatGPT(book, { prompt, profilePath, onLog, outFile } = {}) {
   const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
   if (!profilePath) throw new Error('缺少 profilePath（需绑定已登录 ChatGPT 的 Unzoo 账号）');
   const client = new UnzooClient(profilePath, onLog, 'chatgpt.com', 'ChatGPT');
@@ -176,7 +176,8 @@ export async function generateCoverViaChatGPT(book, { prompt, profilePath, onLog
   const b64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
   const buf = Buffer.from(b64, 'base64');
   if (buf.length < 2000) throw new Error('下载到的图片异常（过小）');
-  const file = path.join(book.dir, 'cover_bg.png');
+  // outFile：带字成品封面直接落 cover.png；不传仍是无字底图 cover_bg.png（老行为）
+  const file = outFile || path.join(book.dir, 'cover_bg.png');
   fs.mkdirSync(book.dir, { recursive: true });
   fs.writeFileSync(file, buf);
   // 读 PNG 宽高（若是 PNG）

@@ -715,6 +715,50 @@ async function api(p, req, res, u) {
         return json(res, 200, { ok: true, prompt: await buildArtPromptAuto(book) });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
+    // 带字成品封面：让 ChatGPT/Gemini 一次画出含书名作者的成品图，再用视觉模型校验字形。
+    // 校验不过就重试（把画错的字喂回提示词），连试 attempts 次都不行则退回无字底图 + 前端叠字。
+    // 与上面两个「底图」端点并列：这个落 cover.png（成品），那两个落 cover_bg.png（素材）。
+    if (p === '/api/book/gen-cover-text') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const engine = body.engine === 'gemini' ? 'gemini' : 'chatgpt';
+        const profilePath = body.profilePath || (book.publish || {}).profilePath || '';
+        if (!profilePath) return json(res, 400, { error: `请先选一个【已登录 ${engine === 'gemini' ? 'Gemini' : 'ChatGPT'}】的浏览器账号` });
+        const slug = book.slug;
+        const cur = coverJobs.get(slug);
+        if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
+        coverJobs.set(slug, { status: 'running', msg: '正在生成带字封面…' });
+        const onLog = (e) => { const j = coverJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'cover' }); };
+        const attempts = Math.min(5, Math.max(1, parseInt(body.attempts, 10) || 3));
+        import('./covertext.mjs').then(({ generateCoverWithText }) =>
+          generateCoverWithText(book, {
+            engine, profilePath, onLog, attempts, cfg,
+            title: body.title || book.title, author: body.author || '',
+            visionModel: body.visionModel,
+          }))
+          .then((r) => {
+            if (r.ok) {
+              coverJobs.set(slug, { status: 'done', withText: true, attempts: r.attempts,
+                url: '/api/book/cover?book=' + encodeURIComponent(slug) + '&t=' + Date.now(),
+                msg: `带字封面已生成（第 ${r.attempts} 次字形校验通过）` });
+              pushLog(slug, { level: 'act', source: 'cover', msg: `✅ 带字封面已生成，字形校验通过（第 ${r.attempts} 次）` });
+            } else if (r.verifyUnavailable) {
+              coverJobs.set(slug, { status: 'error', error: r.reason, msg: '字形校验跑不起来：' + r.reason });
+              pushLog(slug, { level: 'error', source: 'cover', msg: '字形校验跑不起来（需要 claude 或 gemini CLI）：' + r.reason });
+            } else {
+              coverJobs.set(slug, { status: 'done', withText: false, fallback: true, attempts: r.attempts,
+                url: '/api/book/cover-bg?book=' + encodeURIComponent(slug) + '&t=' + Date.now(),
+                msg: `${r.attempts} 次都没把字画对，已退回无字底图（请用下面的叠字）` });
+              pushLog(slug, { level: 'warn', source: 'cover', msg: `⚠ ${r.attempts} 次都没把字画对，已退回无字底图 + 叠字` });
+            }
+          })
+          .catch((e) => {
+            coverJobs.set(slug, { status: 'error', error: e.message, msg: e.message });
+            pushLog(slug, { level: 'error', source: 'cover', msg: '生成带字封面失败：' + e.message });
+          });
+        return json(res, 200, { ok: true, started: true });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
     if (p === '/api/book/gen-cover-chatgpt') {   // 用【已登录的 ChatGPT(Pro)】网页版生成封面底图（免费、慢，后台跑）
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
