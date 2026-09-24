@@ -88,3 +88,25 @@ test('换了口语表的书，模板里的词表也跟着换——闸和模型�
   assert.match(sg, /未经朱雀标定/, '没标定的阈值要在模板里也说清楚');
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('禁用词表要渲进规范——只让闸看见，「再也犯不了第二次」就立不住', async () => {
+  const os = await import('node:os');
+  const { bannedSectionFor, skillBody } = await import('../src/skill.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'banned-'));
+  // 没有 gate.json / 空表 → 整节不出现，不给模型看一张空表
+  assert.equal(bannedSectionFor({ dir }), '');
+  fs.writeFileSync(path.join(dir, 'gate.json'), JSON.stringify({ banned: [] }), 'utf8');
+  assert.equal(bannedSectionFor({ dir }), '');
+
+  fs.writeFileSync(path.join(dir, 'gate.json'), JSON.stringify({
+    banned: [{ word: '自个儿', why: '汉末没有这个说法' }, '头一个'],
+  }), 'utf8');
+  const sec = bannedSectionFor({ dir });
+  assert.match(sec, /禁用写法/);
+  assert.match(sec, /自个儿/);
+  assert.match(sec, /汉末没有这个说法/, '理由要带上——只给词不给理由，模型换不对');
+  assert.match(sec, /头一个/, '纯字符串写法也要认');
+  // 真的进了模型读的那份规范
+  assert.match(skillBody({ dir, title: 'T' }), /禁用写法/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

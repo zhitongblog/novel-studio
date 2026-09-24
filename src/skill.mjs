@@ -40,6 +40,30 @@ export function oralSectionFor(book) {
   ].filter(Boolean).join(NL);
 }
 
+// 把 gate.json 的 banned 渲成规范里的一节。空表就整节不出现——
+// 不给模型看一张空表，那只会占篇幅。
+export function bannedSectionFor(book) {
+  let conf = {};
+  try { conf = JSON.parse(fs.readFileSync(path.join(book && book.dir || '', 'gate.json'), 'utf8')); } catch { conf = {}; }
+  const list = Array.isArray(conf.banned) ? conf.banned : [];
+  if (!list.length) return '';
+  const NL = String.fromCharCode(10);
+  const rows = list.map((x) => {
+    const word = typeof x === 'string' ? x : (x && x.word);
+    const why = typeof x === 'string' ? '' : (x && x.why || '');
+    return word ? `- **${word}**${why ? '　—— ' + why : ''}` : '';
+  }).filter(Boolean);
+  return [
+    '## 禁用写法（本书专属·硬红线，写完逐章扫一遍）',
+    '',
+    '下面每一条都是这本书【已经出过的错】，改好之后钉在这里，为的是同类错误再也犯不了第二次。',
+    '**一个都不许出现在正文里。** 不确定该换成什么，就换成具体的动作、物件或后果。',
+    '',
+    ...rows,
+    '',
+  ].join(NL) + NL;
+}
+
 export function skillBody(book) {
   const b = book || {};
   const std = b.standards || {};
@@ -52,6 +76,12 @@ export function skillBody(book) {
   // 为什么必须同源：2026-09-23 给三国书换了闸的表，模板却还在教"自个儿/啥/咋"——
   // 那等于一边判它书面腔，一边让它往汉末对白里塞豫北方言，两头都错。
   const oralSection = oralSectionFor(b);
+  // 禁用词表：每修好一处错误就钉一个写法进 gate.json，从此犯不了第二次。
+  // 【这一步以前是缺的】banned 原来只有审校闸在读，从没进过提示词——
+  // 于是"同类错误再也犯不了第二次"这个立意根本立不住：模型看不见那张表。
+  // 2026-09-23 实证：给三国书换上口语表后，模型被推着往口语走，
+  // 伸手就抓训练里最顺手的现代北方词，「自个儿」在 114–122 章冒出 10 次。
+  const bannedSection = bannedSectionFor(b);
   // 这本书有没有挂范本，决定文风那一节怎么写（范本优先，形容词降级为补充）
   let hasRefs = false;
   try { hasRefs = b.dir ? fs.readdirSync(path.join(b.dir, 'style_refs')).some(f => /\.(txt|md)$/i.test(f)) : false; } catch { hasRefs = false; }
@@ -288,7 +318,7 @@ AI 中文最大的破绽是**每一句都在做功**：每句都推进情节、�
 番茄、起点的读者读的是口语化的故事，不是文学散文。这一条同时解决两个问题。
 不许为了"显得有文采"把正文往书面腔上拽。
 
-## 反 AI 味 / 拟人化标准（最高优先级，逐章自检）
+${bannedSection}## 反 AI 味 / 拟人化标准（最高优先级，逐章自检）
 
 写"像人写的"正文，核心是**具体、不均匀、有潜台词、有时代地域口音、不解释**。
 
