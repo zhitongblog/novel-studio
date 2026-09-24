@@ -107,6 +107,11 @@ test('禁用词表要渲进规范——只让闸看见，「再也犯不了第�
   assert.match(sec, /汉末没有这个说法/, '理由要带上——只给词不给理由，模型换不对');
   assert.match(sec, /头一个/, '纯字符串写法也要认');
   // 真的进了模型读的那份规范
-  assert.match(skillBody({ dir, title: 'T' }), /禁用写法/);
+  const body = skillBody({ dir, title: 'T' });
+  assert.match(body, /禁用写法/);
+  // 【光有一节不够】实测：钉了 7 个词、渲进规范，之后 29 章里「自个儿」照样 23 次、
+  // 毫无下降趋势。病灶是它没进逐章自检清单——声明过一次就再没被提起。
+  assert.match(body, /⑦b \*\*逐字扫一遍「禁用写法」那一节\*\*/, '禁用表必须同时出现在逐章自检清单里');
+  assert.ok(!skillBody({ dir: '/nope', title: 'T' }).includes('⑦b'), '没有禁用词的书不该多出这一项');
   fs.rmSync(dir, { recursive: true, force: true });
 });
