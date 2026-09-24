@@ -26,6 +26,28 @@ const NORTH_SECTION = [
 export function oralSectionFor(book) {
   let conf = {};
   try { conf = JSON.parse(fs.readFileSync(path.join(book && book.dir || '', 'gate.json'), 'utf8')); } catch { conf = {}; }
+
+  // 探底导出的自带表（novel gate --probe-oral 写的）优先。
+  // 不接这一支，配了自带表的书会拿到豫北文案——闸按一张表判、模型按另一张写，
+  // 结果就是被一直判红却永远改不动。这正是"表和文案必须同源"那条规矩。
+  if (conf.oralMarkers?.length && conf.oralDisplay) {
+    const NL0 = String.fromCharCode(10);
+    const th = conf.oralThresholds || {};
+    const 画像 = conf._oral出处?.语体画像 || {};
+    const 主 = Object.entries(画像).filter(([k]) => k !== '跨时代通用').sort((a, b) => b[1] - a[1])[0];
+    return [
+      `**① 词换成口语。** 地板 **每千字 ${th.minPerK ?? 5} 个**，`
+        + `往 **${th.建议目标 ?? ''}/千字** 够（本书较好那四分之一的水平）。`
+        + `这张表是【拿本书正文探底导出来的】${主 ? `，语体偏${主[0]}` : ''}：`,
+      conf.oralDisplay,
+      '　　⚠️ **这张表是这本书自己的**——它只收了本书真在用的词。'
+        + `${(conf._oral出处?.本书不用的词 || []).slice(0, 6).join('、')} 这类词本书一次没用过，别往里掺。`,
+      `　　⚠️ ${th.minPerK ?? 5}/千字【未经朱雀标定】，是本书自己的分位数，只当相对指标：`
+        + '往口语走的方向是对的，但不必为了凑数把词硬塞进去——凑出来的口语比书面腔更假。',
+      th.整书提醒 ? '　　' + th.整书提醒 : '',
+    ].filter(Boolean).join(NL0);
+  }
+
   const set = ORAL_MARKER_SETS[conf.oralSet];
   if (!set || !set.display) return NORTH_SECTION;
   const NL = String.fromCharCode(10);

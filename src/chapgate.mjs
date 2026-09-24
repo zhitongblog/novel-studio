@@ -476,11 +476,13 @@ export function scanRegister(text, { minPerK, maxMeanSent = 22, hardFloor, marke
   };
 }
 
-export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false, oralSet, oralMarkers } = {}) {
+export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false, oralSet, oralMarkers, minPerK, hardFloor, maxShare } = {}) {
   const slop = scanSlop(text, slopOff);
   const stereo = stereoOff ? { problems: [], ok: true, said: 0, mood: 0, dialogues: 0, ratio: 0 } : scanStereotype(text);
   const rhythm = rhythmOff ? { problems: [], ok: true, paraCV: 0, longSentRatio: 0, oneSentRatio: 0 } : scanRhythm(text);
-  const register = registerOff ? { problems: [], ok: true, perK: 0, meanSent: 0, hits: 0, found: [] } : scanRegister(text, { oralSet, markers: oralMarkers });
+  // 阈值也要透下去：gate.json 里 oralThresholds 是探底导出的（novel gate --probe-oral），
+  // 只传表不传阈值，等于拿自带表配着豫北的 20/千字 用——换了表跟没换一样。
+  const register = registerOff ? { problems: [], ok: true, perK: 0, meanSent: 0, hits: 0, found: [] } : scanRegister(text, { oralSet, markers: oralMarkers, minPerK, hardFloor, maxShare });
   const ban = scanBanned(text, banned);
   const expo = expoOff ? { hits: [], count: 0 } : scanExposition(text);
   const hook = (prevText && !hookOff) ? checkHookContinuity(prevText, text, names, { history }) : { raised: [], dropped: [], late: [], ok: true };

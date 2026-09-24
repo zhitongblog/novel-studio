@@ -356,6 +356,11 @@ async function gateCmd(f, cfg) {
   const book = id ? getBook(id) : null;
   if (!book) { console.log(c.red(id ? '找不到书：' + id : '用法：novel gate --book "书名" [--vol 卷01]')); process.exitCode = 1; return; }
 
+  // novel gate --book X --probe-oral ：拿这本书自己的正文探底，导一张专属口语表写进 gate.json。
+  // 为什么要有它：一张豫北表量遍所有书是错的——三国书 113 章全判书面腔、修仙书 499 章 100% 不达标，
+  // 数值没错，结论没法用。手工一本配一张表又不可持续，所以让书自己说它是什么腔。
+  if (f['probe-oral'] || f.probeOral) return probeOralCmd(book, f);
+
   const readSafe = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
   const conf = (() => { try { return JSON.parse(readSafe(path.join(book.dir, 'gate.json')) || '{}'); } catch { return {}; } })();
   const banned = conf.banned || [];
@@ -375,6 +380,10 @@ async function gateCmd(f, cfg) {
     console.log(c.gray(`        口语表默认是北方官话（豫北）。背景不对的书要在 gate.json 里换：${Object.keys(ORAL_MARKER_SETS).map(k => `"oralSet":"${k}"`).join(' / ')}`));
   } else if (ORAL_MARKER_SETS[conf.oralSet] && !ORAL_MARKER_SETS[conf.oralSet].calibrated) {
     console.log(c.yellow(`        ⚠ 「${conf.oralSet}」表的阈值【未经朱雀标定】，是暂定值——口语那一项只当相对指标看，别拿它下死结论`));
+  } else if (conf.oralMarkers?.length) {
+    const th = conf.oralThresholds || {};
+    console.log(c.gray(`        自带表 ${conf.oralMarkers.length} 个词，阈值 ${th.minPerK ?? '(默认)'}/千字、单词上限 ${th.maxShare != null ? Math.round(th.maxShare * 100) + '%' : '(默认)'}（探底导出，未经朱雀标定）`));
+    if (th.整书提醒) console.log(c.yellow('        ' + th.整书提醒));
   }
   console.log('');
 
@@ -395,6 +404,9 @@ async function gateCmd(f, cfg) {
         expoOff: !!conf.expoOff, hookOff: !!conf.hookOff, stereoOff: !!conf.stereoOff, rhythmOff: !!conf.rhythmOff,
         // 口语表按书的背景走：三国书拿豫北表量，113 章会全判"书面腔"，数值没错但结论没法用
         oralSet: conf.oralSet, oralMarkers: conf.oralMarkers,
+        // 探底导出的阈值（novel gate --probe-oral 写进 gate.json 的）也要生效，
+        // 否则自带表配着豫北的 20/千字 用，等于没换
+        minPerK: conf.oralThresholds?.minPerK, hardFloor: conf.oralThresholds?.hardFloor, maxShare: conf.oralThresholds?.maxShare,
       });
       if (r.ok) {
         // 单处套话只作提示，不算事故——要卡的是密度不是总数（见 chapgate.scanSlop 顶部）
@@ -655,4 +667,56 @@ function reference() {
 function line(label, val, ok) {
   const mark = ok ? c.green('✔') : c.red('✖');
   console.log(`${mark} ${c.bold(label.padEnd(14))} ${c.gray(val)}`);
+}
+
+
+// 探底并导出这本书专属的口语表。--dry 只看不写。
+async function probeOralCmd(book, f) {
+  const { probeBook, deriveOralTable, writeGateOral } = await import('./oralprobe.mjs');
+  console.log(c.bold(`
+🔍 口语表探底 · 《${book.title}》
+`) + hr());
+  const probe = probeBook(book.dir);
+  if (!probe.ok) { console.log(c.red('  ' + probe.reason)); process.exitCode = 1; return; }
+  console.log(c.gray(`  探底：${probe.chapters} 章 / ${probe.han} 汉字`));
+  const fam = Object.entries(probe.byFamily).sort((a, b) => b[1] - a[1]);
+  console.log(c.gray('  语体画像：') + fam.map(([k, v]) => `${k} ${v}`).join('　'));
+  console.log('');
+
+  if (probe.建议用预设) {
+    console.log('  ' + c.yellow('建议：这本书不必自己导表 → 在 gate.json 里写 "oralSet": "' + probe.建议用预设.set + '"'));
+    console.log('  ' + c.gray('  ' + probe.建议用预设.why));
+    console.log('');
+  }
+
+  const derived = deriveOralTable(book.dir, probe);
+  console.log(`  留下 ${c.bold(probe.kept.length)} 个词　不用 ${probe.absent.length} 个　太稀踢掉 ${probe.dropped.length} 个`);
+  console.log(c.gray('  ' + derived.display));
+  console.log('');
+  console.log(`  逐章分布：最低 ${derived.分布.最低}　四分位 ${derived.分布.四分位}　中位 ${derived.分布.中位}　四分位上 ${derived.分布.四分位上}　最高 ${derived.分布.最高}`);
+  console.log(`  导出阈值：hardFloor ${derived.hardFloor}　minPerK ${derived.minPerK}　单词上限 ${Math.round(derived.maxShare * 100)}%　${c.gray('(未经朱雀标定)')}`);
+  if (derived.主导词?.length) {
+    // 上限导得高时必须说清楚是谁顶上去的——71% 这种数字单摆着没人看得懂，
+    // 也没人能判断它是"人物就这么说话"还是"作者在堆词"。
+    console.log(c.gray('  单词上限 ' + Math.round(derived.maxShare * 100) + '% 是被这些词顶上去的：')
+      + derived.主导词.map((x) => `${x.词}（领跑 ${x.领跑章数} 章）`).join('　'));
+    console.log(c.gray('    自称/称谓长期占大头是人物，不是口癖。真要卡它，把这个词从 gate.json 的 oralMarkers 里删掉再探一次。'));
+  }
+  if (derived.整书提醒) console.log('\n  ' + c.yellow(derived.整书提醒));
+
+  const guarded = probe.kept.filter((k) => k.guarded);
+  if (guarded.length) console.log('\n  ' + c.gray('已验证的误伤，自动加了约束：') + guarded.map((k) => k.w + '→' + k.pattern).join('　'));
+  if (probe.suspects.length) {
+    console.log('  ' + c.yellow('疑似误伤（只报不改，请人看过再决定）：'));
+    for (const s of probe.suspects) {
+      console.log('    ' + s.w + ' ×' + s.hits + '　' + s.traps.map((t) => `${t.side === 'prev' ? '前' : '后'}接「${t.ch}」${Math.round(t.share * 100)}%　例：${t.例}`).join('　'));
+    }
+  }
+  const amb = probe.kept.filter((k) => k.ambiguous);
+  if (amb.length) console.log('  ' + c.gray('一词多义、留不留由你：') + amb.map((k) => k.w).join('　'));
+
+  if (f.dry) { console.log('\n  ' + c.gray('--dry：没有写文件')); return; }
+  const { path: gp } = writeGateOral(book.dir, probe, derived);
+  console.log('\n  ' + c.green('已写入 ') + gp);
+  console.log('  ' + c.gray('下次 novel gate 就会用这张表。想回默认表，把 gate.json 里的 oralMarkers 删掉。'));
 }
