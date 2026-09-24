@@ -512,18 +512,31 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       // 写完一批后：给"写够章却没卷名"的卷自动起名写回 bible（后台、best-effort，不阻塞）
       onBatchDone: async () => {
         const b = getBook(slug) || book;
-        // ① 排版矫正闸：原来只挂在 cowrite / statelessWriter 上，【长驻窗口这条主路径一次都没跑过】，
-        //    《走进修仙》因此一路攒出 85 章「……」超标，直到发布前才被复检发现、只能事后扫 103 章。
-        //    闸的意义是"写完立刻矫正"，事后补扫是下策。批次范围 = 上次记下的最高章号+1 → 现在的最高章号。
-        // ② 顺带查一遍重复章号（《大宋第一女帝》两个 001 那类）。
+        // 排版矫正/查重/节奏/快照都已搬到 onBeforeContinue（那才是"下一批开写前"的时机）。
+        // 这里只剩卷名：后台、best-effort、不阻塞写作循环。
+        try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(b, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {}
+      },
+      // —— 写后闸：排版矫正(deslop) + 章号查重 + 节奏闸 + 台账快照闸 ——
+      // 【为什么落在"发继续之前"而不是 onBatchDone】onBatchDone 是在 autopilot 发完"继续"
+      // 之后才触发的、返回值还被丢弃——等于"下一批已经开写了才想起来体检"。
+      // 而这几道闸的全部意义就是【趁这一批还没变成下一批的上下文，先把病章改干净】。
+      // 节奏闸与快照闸原来只挂在 statelessWriter / cowrite 上，窗口这条主路径一次都没跑过：
+      // 《重生三国》151 章全是窗口模式写的，攒出 36 章数目堆砌（最密每 51 字一个数）、
+      // 13 章字数不足 3000、4 章预告腔假钩子、台账快照落后 2 章——全是这两道闸会拦下的。
+      onBeforeContinue: async () => {
+        const b = getBook(slug) || book;
         try {
-          const { afterBatch } = await import('./afterbatch.mjs');
+          const { afterBatch, batchGateInstruction } = await import('./afterbatch.mjs');
           const now = bookStats(b)?.maxChapter || 0;
           const prev = batchLowWater;
-          batchLowWater = now;
-          afterBatch(b, { from: prev > 0 ? prev + 1 : 0, to: now, onLog });
-        } catch {}
-        try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(b, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {}
+          const from = prev > 0 ? prev + 1 : 0;
+          if (!(now > 0) || now <= prev) return null;         // 这一拍没写出新章 → 放行
+          afterBatch(b, { from, to: now, onLog });             // 排版矫正是纯代码，先做掉
+          const instr = batchGateInstruction(b, { slug, from, to: now, cfg, onLog });
+          if (instr) return instr;                             // 不过 → 顶替"继续"，退回自纠
+          batchLowWater = now;                                 // 过了才推进水位
+          return null;
+        } catch (e) { onLog({ level: 'warn', msg: '写后闸异常（不阻断）：' + (e.message || e) }); return null; }
       },
       takeReviewResume: () => takeResume(slug),
       // 省 token：上下文快满就重开新会话（靠 continuity_ledger 重建）

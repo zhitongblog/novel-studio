@@ -580,6 +580,27 @@ export class Autopilot {
       }
     }
 
+    // —— 写后闸（排版矫正 / 节奏 / 台账快照）——
+    // 【为什么必须在发"继续"之前】onBatchDone 是在这条 submitText 之后才触发的，返回值还被丢弃；
+    // 挂在那儿等于"下一批已经开写了才想起来体检"。而这几道闸的全部意义就是
+    // 【趁这一批还没变成下一批的上下文，先把病章改干净】——否则模型照着自己上一批的
+    // 流水账继续写，跟当初「……」雪球一个滚法。
+    // 不过就用自纠指令【顶替】这次的"继续"，与无状态模式的"当批退回自纠、不写新章"对齐。
+    if (typeof this.opt.onBeforeContinue === 'function') {
+      let gateInstr = null;
+      try { gateInstr = await this.opt.onBeforeContinue(); }
+      catch (e) { this.log('写后闸异常（不阻断，照常续写）：' + e.message, 'warn'); }
+      if (gateInstr) {
+        this.sawAgentRunning = true;
+        try { await this.mcp.submitText(this.paneId, gateInstr); }
+        catch (e) { this.log('自纠指令注入失败（将重试）：' + e.message, 'warn'); return; }
+        this.lastRespondedHash = h;
+        this.stats.gateFixes = (this.stats.gateFixes || 0) + 1;
+        this.log('⛔ 写后闸未过 → 已退回作者就地自纠（本轮不写新章）', 'act');
+        return;
+      }
+    }
+
     // 先把指令打进输入框、停顿、再单独回车提交（一次性带回车会被当作粘贴内容、只填不发）。
     try {
       await this.mcp.submitText(this.paneId, text);

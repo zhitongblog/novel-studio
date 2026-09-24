@@ -143,18 +143,28 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestar
     // 写完一批：给"写够章却没卷名"的卷自动起名写回 bible（后台、best-effort）
     onBatchDone: async () => {
       const b = getBook(slug);
-      // ① 排版矫正闸：原来只挂在 cowrite / statelessWriter 上，长驻窗口这条主路径一次都没跑过，
-      //    《走进修仙》因此攒出 85 章「……」超标。批次范围取"上一次记下的最高章号+1 → 现在的最高章号"。
-      // ② 顺带查一遍重复章号（两个 001 那类）。
+      // 排版矫正/查重/节奏/快照都已搬到 onBeforeContinue（那才是"下一批开写前"的时机）。
+      // 这里只剩卷名：后台、best-effort、不阻塞写作循环。
+      try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(b, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {}
+    },
+    // —— 写后闸：排版矫正(deslop) + 章号查重 + 节奏闸 + 台账快照闸 ——
+    // 与 writer.mjs 同一套（重挂的会话也必须带上，否则重启后这几道闸又全没了）。
+    // 落在"发继续之前"而不是 onBatchDone：那时下一批已经开写，体检就晚了一拍。
+    onBeforeContinue: async () => {
+      const b = getBook(slug);
       try {
-        const { afterBatch } = await import('./afterbatch.mjs');
+        const { afterBatch, batchGateInstruction } = await import('./afterbatch.mjs');
         const { bookStats } = await import('./books.mjs');
         const now = bookStats(b)?.maxChapter || 0;
         const prev = batchLowWater;
+        const from = prev > 0 ? prev + 1 : 0;
+        if (!(now > 0) || now <= prev) return null;
+        afterBatch(b, { from, to: now, onLog });
+        const instr = batchGateInstruction(b, { slug, from, to: now, cfg, onLog });
+        if (instr) return instr;
         batchLowWater = now;
-        afterBatch(b, { from: prev > 0 ? prev + 1 : 0, to: now, onLog });
-      } catch {}
-      try { const { ensureVolumeNames } = await import('./volname.mjs'); await ensureVolumeNames(b, { cfg, onLog: (e) => onLog({ ...e, source: 'volname' }) }); } catch {}
+        return null;
+      } catch (e) { onLog({ level: 'warn', msg: '写后闸异常（不阻断）：' + (e.message || e) }); return null; }
     },
     takeReviewResume: () => takeResume(slug),
     contextSize: () => { const b = getBook(slug); return b ? currentContextSize(b.dir, sess.model) : 0; },
