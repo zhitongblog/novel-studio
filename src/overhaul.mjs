@@ -299,13 +299,22 @@ export async function runReadFix(book, { cfg, api, items, onLog = () => {}, batc
   const slug = book.slug;
   const batches = readFixBatches(items, batchSize);
   if (!batches.length) return { ok: true, nothing: true };
-  const opts = { mustFix: [], std: { keepSoft: true, hardFloorPct: 80, minKeepPct: 95, ...std }, useReviews: false, batchTimeoutMin, mode: 'rebuild' };
+  // 【mode 不能一律 rebuild】2026-09-24 实证：拿定点修去补 13 章的字数不足，
+  // rebuild 的授权是「允许改事件结果、调整爽点位置、让人物做出不同的选择」——
+  // 对"这章差 76 个字"来说大得离谱。结果第 22 章 2924→3997（缺 76 字却冲过了上限 3600），
+  // 且为了这 76 个字删掉了 110 行已上架的原文。第 17/38 章同样是 +170/-83、+145/-183。
+  // 判据：整批意见【全是轻活】（篇幅/情绪）时走 polish——"剧情事实、人物、事件结果、
+  // 已埋伏笔全部保留"；只要掺了一条重活（逻辑/人物/空钩子），才需要 rebuild 的授权。
+  const LIGHT = new Set(['篇幅', '情绪']);
+  const mode = (items || []).length && items.every(i => LIGHT.has(i.kind)) ? 'polish' : 'rebuild';
+  onLog({ level: 'info', msg: `定点修模式：${mode === 'polish' ? 'polish（文风精修，不许改剧情）' : 'rebuild（结构改造）'}` });
+  const opts = { mustFix: [], std: { keepSoft: true, hardFloorPct: 80, minKeepPct: 95, ...std }, useReviews: false, batchTimeoutMin, mode };
   const ctx = { book, cfg, api, onLog, opts, killAgents: api.killAgents || (async () => 0) };
   setState(slug, { status: 'running', stage: 'readfix', total: batches.length, doneBatches: [] });
   const done = [], report = [];
   for (const b of batches) {
     if (shouldStop()) { setState(slug, { status: 'stopped' }); return { ok: false, stopped: true, report }; }
-    const job = { a: b.from, b: b.to, round: 0, carry: '', fixInstruction: buildBatchInstruction(getBook(slug) || book, b.from, b.to, { mode: 'rebuild' }) + '。' + b.instruction };
+    const job = { a: b.from, b: b.to, round: 0, carry: '', fixInstruction: buildBatchInstruction(getBook(slug) || book, b.from, b.to, { mode }) + '。' + b.instruction };
     onLog({ level: 'act', msg: `定点修 第${b.from}–${b.to}章（${b.nums.length} 章有意见，共 ${items.filter(i => b.nums.includes(i.num)).length} 条）…` });
     for (;;) {
       const r = await runBatch(ctx, job);

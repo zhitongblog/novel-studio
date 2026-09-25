@@ -134,3 +134,24 @@ test('定点修认得「篇幅」这一类，且带上「补戏不补字」那�
   // 原来四类不许被破坏
   assert.equal(parseReadReview('第 3 章｜空钩子｜章末在总结｜换成具体的事').items[0].kind, '空钩子');
 });
+
+test('篇幅这种轻活必须走 polish，不能给 rebuild 的授权', async () => {
+  const src = fs.readFileSync(new URL('../src/overhaul.mjs', import.meta.url), 'utf8');
+  const i = src.indexOf('export async function runReadFix');
+  const body = src.slice(i, i + 2200);
+  assert.ok(!/mode: 'rebuild' \}/.test(body) || /const mode =/.test(body),
+    'runReadFix 不许再写死 rebuild');
+  assert.match(body, /const LIGHT = new Set\(\['篇幅', '情绪'\]\)/, '轻活清单');
+  assert.match(body, /items\.every\(i => LIGHT\.has\(i\.kind\)\)/,
+    '整批都是轻活才降级成 polish；掺一条重活就仍需 rebuild 的授权');
+  assert.match(body, /buildBatchInstruction\(getBook\(slug\) \|\| book, b\.from, b\.to, \{ mode \}\)/,
+    '算出来的 mode 要真的传下去，否则改了等于没改');
+});
+
+test('篇幅指令要有天花板——只给下限，模型就冲到 3997', async () => {
+  const { buildReadFixInstruction } = await import('../src/readreview.mjs');
+  const instr = buildReadFixInstruction([{ num: 22, kind: '篇幅', problem: '缺 76 字', fix: 'x' }]);
+  assert.match(instr, /不得超过 3600/, '第 22 章就是这么从"不足"变成"超标"的');
+  assert.match(instr, /补到刚过 3000 就停手/);
+  assert.match(instr, /不要为了腾地方去删原有的情节/, '为补 76 字删掉 110 行已上架原文，是这次最实的教训');
+});
