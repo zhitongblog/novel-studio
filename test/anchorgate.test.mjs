@@ -125,12 +125,19 @@ test('自纠指令：限量、带原句、且不许靠改后文绕过去', () =>
   assert.equal(buildAnchorFixInstruction([]), '');
 });
 
-test('已接进 runBatch，并且回指断了会退回自纠', () => {
+test('【只报不退回】回指闸不许参与控制流——噪音太高，驱动重写是净损失', () => {
+  // 2026-09-25 实测：一次正常改写就报 43 条，前几条是「阴晴不定」(97章)、
+  // 「匆匆赶来」(140章)、「一刻钟后」(10章)，全是成语不是锚点。
+  // 真锚点「李儒摩挲指节」罕字频 4，成语「阴晴不定」罕字频 7——成语里的字也罕见，
+  // 字频分不开这两者。拿它驱动退回，每章多烧一轮，还把噪音当"请补回来"喂给模型。
   const src = fs.readFileSync(new URL('../src/overhaul.mjs', import.meta.url), 'utf8');
-  assert.match(src, /checkAnchors\(fresh\(\)\.dir, before\)/, 'runBatch 要跑回指闸');
-  assert.match(src, /r\.anchors && !r\.anchors\.ok && job\.round < maxRounds/, '断了要退回补一轮');
-  assert.match(src, /buildAnchorFixInstruction\(r\.anchors\.breaks\)/, '要把断裂喂回指令');
-  // 闸自己出问题不许阻断改造
+  assert.match(src, /checkAnchors\(fresh\(\)\.dir, before\)/, 'runBatch 仍要跑它，当线索');
+  assert.ok(!/r\.anchors && !r\.anchors\.ok/.test(src), '不许再用回指结果决定要不要重写');
+  assert.ok(!src.includes('buildAnchorFixInstruction'), '不许把回指断裂喂回指令');
+  assert.match(src, /成语里的字也罕见/, '这条教训要留在代码里，免得有人again把 retry 加回来');
+  // 日志降级成 info：它是线索不是判决
   const i = src.indexOf('anchors = checkAnchors');
-  assert.match(src.slice(i - 200, i + 600), /catch \(e\)/, '回指闸异常必须吞掉');
+  const body = src.slice(i - 100, i + 700);
+  assert.match(body, /level: 'info'/, '只报线索就别用 warn 吓人');
+  assert.match(body, /catch \(e\)/, '闸自己出问题不许阻断改造');
 });

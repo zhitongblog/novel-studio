@@ -22,7 +22,7 @@ import { upsertBook } from './store.mjs';
 import { listBookChapters } from './signdiag.mjs';
 import { styleGate } from './stylegate.mjs';
 import { readReview, buildReadFixInstruction, writeReadReport } from './readreview.mjs';
-import { checkAnchors, buildAnchorFixInstruction } from './anchorgate.mjs';
+import { checkAnchors } from './anchorgate.mjs';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const pad = (n) => String(n).padStart(3, '0');
@@ -185,13 +185,21 @@ async function runBatch(ctx, job) {
   // 回指闸：styleGate 只量形式（比喻数/堆砌句/套话/段长/字数保留），
   // 【一条都不看前后文对不对得上】。2026-09-24 就是这么出的事：第 014 章改写删掉了
   // 「李儒摩挲指节」，而第 015 章开篇还在回指它，styleGate 一声没吭，两章都已上架。
+  //
+  // 【只报，不退回——这条是实测定下来的】2026-09-25 拿它守一轮真的改写：
+  // 一次正常改写就报 43 条，最可疑的前几条是「阴晴不定」(第97章)、「匆匆赶来」(第140章)、
+  // 「一刻钟后」(第10章)——全是成语和常用短语，不是锚点。
+  // 根因在判据本身：真锚点「李儒摩挲指节」罕字频 4，而成语「阴晴不定」罕字频 7——
+  // **成语里的字也罕见**，字频分不开"情节锚点"和"不常用的成语"。那要看语义，正则做不到。
+  // 拿这种噪音去驱动退回重写，等于每章多烧一轮，还把一堆莫名其妙的短语当成"请补回来"
+  // 喂给模型。所以它只打一条日志当线索，人看一眼即可，绝不参与控制流。
   let anchors = { ok: true, breaks: [] };
   try {
     anchors = checkAnchors(fresh().dir, before);
     if (!anchors.ok) {
-      onLog({ level: 'warn', source: 'anchorgate',
-        msg: `⚠️ 回指闸：改写删掉了 ${anchors.breaks.length} 处后文还在回指的东西，最可疑的是`
-          + anchors.breaks.slice(0, 3).map(x => `第${x.num}章「${x.gram}」(第${x.referencedBy.join('、')}章回指)`).join('、') });
+      onLog({ level: 'info', source: 'anchorgate',
+        msg: `🔎 回指线索 ${anchors.breaks.length} 条（含较多噪音，仅供人眼抽查，不阻断）：`
+          + anchors.breaks.slice(0, 3).map(x => `第${x.num}章「${x.gram}」→第${x.referencedBy.join('、')}章`).join('、') });
     }
   } catch (e) { onLog({ level: 'warn', source: 'anchorgate', msg: '回指闸异常（不阻断）：' + (e.message || e) }); }
 
@@ -335,13 +343,6 @@ export async function runReadFix(book, { cfg, api, items, onLog = () => {}, batc
       const r = await runBatch(ctx, job);
       if (!r.ok) { setState(slug, { status: 'error', error: r.error }); return { ok: false, error: r.error, report }; }
       if (r.quota && r.unchanged.length && job.round < 12) { job.round++; const w = (await api.quotaResetMs?.(job.round)) ?? 15 * 60000; onLog({ level: 'warn', msg: `⏳ 撞额度，等 ${Math.round(w / 60000)} 分钟` }); await ctx.killAgents(); await sleep(w); continue; }
-      // 回指断了 → 退回让作者把删掉的锚点补回原章（只退一轮，与零改动重试同一个纪律）
-      if (r.anchors && !r.anchors.ok && job.round < maxRounds) {
-        job.round++;
-        job.fixInstruction += '。' + buildAnchorFixInstruction(r.anchors.breaks);
-        onLog({ level: 'warn', msg: `↻ 回指闸未过（${r.anchors.breaks.length} 处）→ 退回补回锚点` });
-        continue;
-      }
       if (r.unchanged.length === b.to - b.from + 1 && job.round < maxRounds) {
         job.round++;
         job.fixInstruction += '。【上一轮你一个文件都没动就报了完成——那不算完成】必须实际落盘修改这几章';
