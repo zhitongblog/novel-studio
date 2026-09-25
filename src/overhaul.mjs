@@ -22,6 +22,7 @@ import { upsertBook } from './store.mjs';
 import { listBookChapters } from './signdiag.mjs';
 import { styleGate } from './stylegate.mjs';
 import { readReview, buildReadFixInstruction, writeReadReport } from './readreview.mjs';
+import { checkAnchors, buildAnchorFixInstruction } from './anchorgate.mjs';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const pad = (n) => String(n).padStart(3, '0');
@@ -180,7 +181,21 @@ async function runBatch(ctx, job) {
   // 质检：用改前正文当基线
   const gate = styleGate(fresh().dir, a, b, (e) => onLog({ ...e, source: 'stylegate' }), { std: opts.std, before });
   const unchanged = gate.scan.chapters.filter(c => c.unchanged).map(c => c.num);
-  return { ok: true, snap, gate, unchanged, quota, runaway };
+
+  // 回指闸：styleGate 只量形式（比喻数/堆砌句/套话/段长/字数保留），
+  // 【一条都不看前后文对不对得上】。2026-09-24 就是这么出的事：第 014 章改写删掉了
+  // 「李儒摩挲指节」，而第 015 章开篇还在回指它，styleGate 一声没吭，两章都已上架。
+  let anchors = { ok: true, breaks: [] };
+  try {
+    anchors = checkAnchors(fresh().dir, before);
+    if (!anchors.ok) {
+      onLog({ level: 'warn', source: 'anchorgate',
+        msg: `⚠️ 回指闸：改写删掉了 ${anchors.breaks.length} 处后文还在回指的东西，最可疑的是`
+          + anchors.breaks.slice(0, 3).map(x => `第${x.num}章「${x.gram}」(第${x.referencedBy.join('、')}章回指)`).join('、') });
+    }
+  } catch (e) { onLog({ level: 'warn', source: 'anchorgate', msg: '回指闸异常（不阻断）：' + (e.message || e) }); }
+
+  return { ok: true, snap, gate, unchanged, quota, runaway, anchors };
 }
 
 // 主流程。api 由调用方注入（server 传真的 HTTP 调用，测试传假的）
@@ -320,6 +335,13 @@ export async function runReadFix(book, { cfg, api, items, onLog = () => {}, batc
       const r = await runBatch(ctx, job);
       if (!r.ok) { setState(slug, { status: 'error', error: r.error }); return { ok: false, error: r.error, report }; }
       if (r.quota && r.unchanged.length && job.round < 12) { job.round++; const w = (await api.quotaResetMs?.(job.round)) ?? 15 * 60000; onLog({ level: 'warn', msg: `⏳ 撞额度，等 ${Math.round(w / 60000)} 分钟` }); await ctx.killAgents(); await sleep(w); continue; }
+      // 回指断了 → 退回让作者把删掉的锚点补回原章（只退一轮，与零改动重试同一个纪律）
+      if (r.anchors && !r.anchors.ok && job.round < maxRounds) {
+        job.round++;
+        job.fixInstruction += '。' + buildAnchorFixInstruction(r.anchors.breaks);
+        onLog({ level: 'warn', msg: `↻ 回指闸未过（${r.anchors.breaks.length} 处）→ 退回补回锚点` });
+        continue;
+      }
       if (r.unchanged.length === b.to - b.from + 1 && job.round < maxRounds) {
         job.round++;
         job.fixInstruction += '。【上一轮你一个文件都没动就报了完成——那不算完成】必须实际落盘修改这几章';
