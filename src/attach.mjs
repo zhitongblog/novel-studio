@@ -163,6 +163,15 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestar
         const instr = batchGateInstruction(b, { slug, from, to: now, cfg, onLog });
         if (instr) return instr;
         batchLowWater = now;
+        // 全文逻辑自检：旧判据是 autopilot 的 continueCount % N，那个计数【每次会话重开就归零】。
+        // 152 章的《重生三国》只跑过 1 次，攒出 264 条逻辑问题。改成按书算。
+        const { fullCheckDue } = await import('./logicgate.mjs');
+        const due = fullCheckDue(b.dir, now, { everyChapters: cfg.autopilot?.fullCheckEveryChapters || 15 });
+        if (due.due && cfg.autopilot?.fullCheckText) {
+          onLog({ level: 'act', source: 'logicgate',
+            msg: `🧭 距上次全文逻辑自检已写 ${due.since} 章（上次至第 ${due.last} 章）→ 插入一次自检` });
+          return cfg.autopilot.fullCheckText;
+        }
         return null;
       } catch (e) { onLog({ level: 'warn', msg: '写后闸异常（不阻断）：' + (e.message || e) }); return null; }
     },

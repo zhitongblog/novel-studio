@@ -535,6 +535,16 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
           const instr = batchGateInstruction(b, { slug, from, to: now, cfg, onLog });
           if (instr) return instr;                             // 不过 → 顶替"继续"，退回自纠
           batchLowWater = now;                                 // 过了才推进水位
+          // 全文逻辑自检：原判据是 autopilot 的 continueCount % N，而那个计数
+          // 【每次会话重开就归零】。152 章的《重生三国》只跑过 1 次，攒出 264 条逻辑问题。
+          // 改成按书算：距上一份 reviews/全文逻辑自检-至NNN.md 又写了 N 章就插一次。
+          const { fullCheckDue } = await import('./logicgate.mjs');
+          const due = fullCheckDue(b.dir, now, { everyChapters: cfg.autopilot?.fullCheckEveryChapters || 15 });
+          if (due.due && cfg.autopilot?.fullCheckText) {
+            onLog({ level: 'act', source: 'logicgate',
+              msg: `🧭 距上次全文逻辑自检已写 ${due.since} 章（上次至第 ${due.last} 章）→ 插入一次自检` });
+            return cfg.autopilot.fullCheckText;
+          }
           return null;
         } catch (e) { onLog({ level: 'warn', msg: '写后闸异常（不阻断）：' + (e.message || e) }); return null; }
       },
