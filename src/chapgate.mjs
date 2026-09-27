@@ -207,8 +207,20 @@ export function scanRhythm(text, { minParaCV = 0.5, minSentCV = 0.55, minLongSen
   const paraCV = cvOf(paras.map(hzCount).filter(n => n > 0));
   const sents = t.split(/[。！？”]/).map(hzCount).filter(n => n > 1);
   const sentCV = cvOf(sents);
-  const longSentRatio = sents.length ? sents.filter(n => n > 25).length / sents.length : 0;
   const dlgRatio = paras.filter(p => /[「」『』“”]/.test(p)).length / paras.length;
+  // ⚠️【长句占比只算叙述句】跟上面句长 CV 随对话密度浮动是同一个道理，2026-09-26 补。
+  // 《崇祯》296 章里 277 章报"长句太少"——一量才知道是尺子的问题：
+  //     全书混算  长句 12.6%   ← 报警
+  //     只算叙述  长句 18.1%   ← 贴着 20% 的线
+  //     只算对白  长句  8.6%（均句长 12，短句占 53%）
+  // 该书对白段占 56.5%，把台词掺进来，等于拿"人说话短"去判叙述"长句不够"。
+  // 台词天生十到二十五字，它压低的是【对白的】长句比例，不是叙述的节奏问题。
+  // 叙述句不足 10 句时（对白极密的对峙章）退回混算，免得样本太小反而抖。
+  const narrSents = paras.filter(p => !/[「」『』“”]/.test(p)).join('\n')
+    .split(/[。！？…]/).map(hzCount).filter(n => n > 1);
+  const longPool = narrSents.length >= 10 ? narrSents : sents;
+  const longOnNarr = narrSents.length >= 10;
+  const longSentRatio = longPool.length ? longPool.filter(n => n > 25).length / longPool.length : 0;
   const heavy = dlgRatio >= dialogueHeavy;
   const sentFloor = heavy ? sentCVRelaxed : minSentCV;
 
@@ -216,10 +228,10 @@ export function scanRhythm(text, { minParaCV = 0.5, minSentCV = 0.55, minLongSen
   const pct = (x) => Math.round(x * 100) + '%';
   if (paraCV < minParaCV) problems.push(`段落长度过于均匀（变异系数 ${paraCV.toFixed(2)}，下限 ${minParaCV}）——每段都差不多长，读起来像节拍器`);
   if (sentCV < sentFloor) problems.push(`句子长度过于均匀（变异系数 ${sentCV.toFixed(2)}，下限 ${sentFloor}${heavy ? '，本章对话占 ' + pct(dlgRatio) + ' 已按对话密集章放宽' : ''}）——句句一般长，这是机器写作最硬的指纹`);
-  if (longSentRatio < minLongSent) problems.push(`长句太少（>25字的句子只占 ${pct(longSentRatio)}，下限 ${pct(minLongSent)}）——缺少把节奏拉开的长句`);
+  if (longSentRatio < minLongSent) problems.push(`长句太少（${longOnNarr ? '叙述句里' : ''}>25字的句子只占 ${pct(longSentRatio)}，下限 ${pct(minLongSent)}）——缺少把节奏拉开的长句`);
   const veryLong = sents.filter(n => n > veryLongAt).length;
   if (veryLong > maxVeryLong) problems.push(`句子拉得过头：${veryLong} 句超过 ${veryLongAt} 字（上限 ${maxVeryLong} 句，最长 ${Math.max(...sents)} 字）——手机上读一句上百字是窒息的`);
-  return { veryLong, paraCV: +paraCV.toFixed(2), sentCV: +sentCV.toFixed(2), longSentRatio: +longSentRatio.toFixed(2), dlgRatio: +dlgRatio.toFixed(2), problems, ok: problems.length === 0 };
+  return { veryLong, paraCV: +paraCV.toFixed(2), sentCV: +sentCV.toFixed(2), longSentRatio: +longSentRatio.toFixed(2), longOnNarr, dlgRatio: +dlgRatio.toFixed(2), problems, ok: problems.length === 0 };
 }
 
 // ── 五、从台账里取【已登记专名】────────────────────────────────────
