@@ -6,6 +6,7 @@ import path from 'node:path';
 import { publishBook, getFanqieMaxChapter, getFanqieVolumes, createFanqieVolumes, renameFanqieVolume, numToCn } from './fanqie.mjs';
 import { setBookPublish } from './books.mjs';
 import { assertPlatform } from './platform.mjs';
+import { scheduleThroughDate, coverDays, updateCadence } from './cadence.mjs';
 import { getQidianMaxChapter, publishChapterToQidian } from './qidian.mjs';
 
 // —— 排期起始日 ——
@@ -374,8 +375,16 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
     }
   }
   const sched = resolveSchedule(pc, fm.latestDate);
+  // 断更账：同一批稿子，一次倒完只买 1 天保护，按 N 章/天铺开买 ceil(章数/N) 天。
+  // 七天红线是番茄停推荐的门槛，所以这笔账要在【按下发布之前】摆出来，不能事后复盘。
+  const cover = coverDays(newCh.length, pc.chaptersPerDay);
+  const cadence = updateCadence(book, { maxChapter: localMax });
+  if (newCh.length >= 4 && (!pc.chaptersPerDay || pc.chaptersPerDay === 'max')) {
+    onLog({ level: 'warn', msg: `⚠️ 这 ${newCh.length} 章会一次倒完，只买 1 天不断更保护；设 chaptersPerDay=2 可铺成 ${coverDays(newCh.length, 2)} 天` });
+  }
   return {
     ok: true, fanqieMax, fanqieRead: fqRead, floored, approx: !!fm.approx, localMax,
+    cadence, coverDays: cover,
     newCount: newCh.length, from: newCh[0]?.num || null, to: newCh[newCh.length - 1]?.num || null,
     titles: newCh.slice(0, 5).map(c => c.title),
     rewrittenCount: rewritten.length, rewrittenNums: rewritten.map(c => c.num),
@@ -608,6 +617,13 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
       const newMax = cands.length ? Math.max(...cands) : 0;
       const patch = { lastPublishAt: Date.now() };
       if (Number.isFinite(newMax) && newMax > 0) patch.publishedMax = newMax;   // 只写正有限数；绝不写 null/NaN、绝不降
+      // 排期尾日：这轮最后一章【读者能读到】的那天。断更闸靠它判断，没有它就只能看 lastPublishAt——
+      // 而排期发布时那是"我们点发布的时刻"，能和读者可见日差出一星期，好好排的书会被误报成断更。
+      // 只记新章（edit 是覆盖旧章，不产生新的可读日），且单调不回退。
+      if (publishedOk > 0) {
+        const through = scheduleThroughDate(sched.start || fmtYMD(new Date()), publishedOk, baseConfig.chaptersPerDay);
+        if (through && through > (pc.scheduledThrough || '')) patch.scheduledThrough = through;
+      }
       setBookPublish(book.slug, patch);
       // 指纹基线：把这次真正发上去的章记下来，作为下次"有没有被重写"的比对基准。
       // 只记发成功的那些，没发的不动——否则会把没发的章误标成"线上已是这版"。

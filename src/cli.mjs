@@ -12,6 +12,7 @@ import { listSessions, sendToBook, streamBook, stopBook, attachAutopilot, sample
 import { loadUsage, bookUsage, fmtTokens } from './usage.mjs';
 import { localHealth, buildModelfile, resolveOllamaBin } from './localai.mjs';
 import { c, logLine, hr } from './ui.mjs';
+import { updateCadence } from './cadence.mjs';
 
 function parseFlags(argv) {
   const out = { _: [] };
@@ -285,6 +286,14 @@ function bookList(cfg) {
   for (const b of books) {
     console.log(`${c.cyan('《' + b.title + '》')}  ${c.gray(b.genre || '')}`);
     console.log(`   ${c.gray('profile=' + b.profile + '  模型=' + b.model + '  章节=' + b.stats.chapters + '  ' + b.stats.kb + 'KB  tokens≈' + fmtTokens(bookUsage(b.slug)))}`);
+    // 断更状态放在书架上，是因为它必须【不用找就能看见】：圣女 167 万字在读 1，
+    // 就是没人盯着"上次更新是哪天"。详见 src/cadence.mjs。
+    const cd = updateCadence(b, { maxChapter: b.stats.maxChapter });
+    if (cd.level !== 'none') {
+      const paint = { dead: c.red, danger: c.red, warn: c.yellow, thin: c.yellow, ok: c.gray }[cd.level] || c.gray;
+      const mark = { dead: '🛑', danger: '⚠️', warn: '⚠️', thin: '📉', ok: '　' }[cd.level] || '　';
+      console.log(`   ${mark} ${paint(cd.text)}`);
+    }
     console.log(`   ${c.gray(b.dir)}`);
   }
   console.log('');
