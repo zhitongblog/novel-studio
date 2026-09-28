@@ -46,3 +46,17 @@ test('记住的模式要能存下来、读回来，并且可以改', () => {
     if (backup !== null) { try { fs.writeFileSync(f, backup, 'utf8'); } catch {} }
   }
 });
+
+// —— unterm 自己关着代理时，不许凭旧地址编一个出来 ——
+// 2026-09-28：本机改走 Cisco VPN、Clash 不再开，~/.unterm/proxy.json 里 enabled=false、
+// mode=off，但 http_proxy 旧值还留着 127.0.0.1:7897。老写法只取地址不看开关，
+// 写作会话照样被注入 HTTP_PROXY，agy 起手的资格校验直接炸在 connectex 拒绝上。
+test('proxyUrl：enabled=false / mode=off 一律返回空串', async () => {
+  const { proxyUrlFrom } = await import('../src/unterm.mjs');
+  assert.equal(proxyUrlFrom({ enabled: false, mode: 'off', http_proxy: 'http://127.0.0.1:7897' }), '', '关着就不该给地址');
+  assert.equal(proxyUrlFrom({ enabled: false, http_proxy: 'http://127.0.0.1:7897' }), '', 'enabled=false 就够判');
+  assert.equal(proxyUrlFrom({ mode: 'off', socks_proxy: 'socks5://127.0.0.1:7897' }), '', 'mode=off 也算关');
+  assert.equal(proxyUrlFrom({ enabled: true, mode: 'on', http_proxy: 'http://127.0.0.1:7897' }), 'http://127.0.0.1:7897', '开着照常给');
+  assert.equal(proxyUrlFrom({ http_proxy: 'http://127.0.0.1:7897' }), 'http://127.0.0.1:7897', '老配置没有开关字段时保持原行为');
+  assert.equal(proxyUrlFrom(null), '', '没有配置文件就是没有代理');
+});

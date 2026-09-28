@@ -258,10 +258,22 @@ export function resolveProxyNode(configNode) {
   return p?.current_node || 'local';
 }
 
-export function proxyUrl() {
-  const p = readProxyConfig();
-  return p?.http_proxy || p?.socks_proxy || '';
+// Unterm 当前真正在用的代理地址；它自己关着代理就返回空串。
+//
+// 【为什么要看 enabled/mode 而不是直接取 http_proxy】2026-09-28 踩的：
+// 这台机器改走 Cisco VPN、本地 Clash 早就不开了，~/.unterm/proxy.json 里
+// enabled=false、mode=off，但 http_proxy 那行【旧值还留着】= 127.0.0.1:7897。
+// 老写法不看开关只取地址，于是写作会话照样被注入 HTTP_PROXY=127.0.0.1:7897，
+// agy 起手的资格校验直接炸：
+//     proxyconnect tcp: dial tcp 127.0.0.1:7897: connectex: 目标主机积极拒绝
+// 界面上那个选项写的是「开（用 unterm 当前代理）」——unterm 当前没有代理，
+// 就不该凭一行陈年配置替它编一个出来。
+export function proxyUrlFrom(p) {
+  if (!p) return '';
+  if (p.enabled === false || p.mode === 'off') return '';
+  return p.http_proxy || p.socks_proxy || '';
 }
+export function proxyUrl() { return proxyUrlFrom(readProxyConfig()); }
 
 // —— 实例 ——
 export function listInstances() {

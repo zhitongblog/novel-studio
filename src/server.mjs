@@ -17,7 +17,7 @@ import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, dele
 import { STYLES } from './styles.mjs';
 import { recommendStyle, recommendCategory, recommendFanqieTags } from './planner.mjs';
 import { detectAll, getModel, canRunHeadless } from './models.mjs';
-import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig, killBookAgents } from './unterm.mjs';
+import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig, proxyUrlFrom, killBookAgents } from './unterm.mjs';
 import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
 import { connectInstance } from './mcpclient.mjs';
 import { startWriting, snapshotPaneIds } from './writer.mjs';
@@ -554,7 +554,9 @@ async function api(p, req, res, u) {
         untermVersion: uexe ? untermVersion(uexe) : '',
         untermCli: findUntermCli() || '',
         models: detectAll(),
-        proxy: { enabled: !!cfg.enableProxy, node: cfg.proxyNode, url: proxy?.http_proxy || proxy?.socks_proxy || '' },
+        // url 要走 proxyUrlFrom：unterm 自己把代理关了的时候，proxy.json 里那行旧地址不算数。
+        // 环境页照抄旧地址，会让人以为还挂着 127.0.0.1:7897，而会话里其实一个字节都没走它。
+        proxy: { enabled: !!cfg.enableProxy, node: cfg.proxyNode, url: proxyUrlFrom(proxy) },
         instances: listInstances().map(i => ({ id: i.id, version: i.version, mcp_port: i.mcp_port })),
         workspace: cfg.workspace,
         workspaceExists: (() => { try { return fs.existsSync(cfg.workspace); } catch { return false; } })(),
