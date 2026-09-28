@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig, updateConfig } from './config.mjs';
 import { createBook, listBooksWithStats, getBook } from './books.mjs';
 import { detectAll, getModel } from './models.mjs';
-import { findUntermExe, findUntermCli, untermVersion, listInstances, readProxyConfig, resolveProxyNode, sharesGlobalPaneNamespace, versionMismatch } from './unterm.mjs';
+import { findUntermExe, findUntermCli, untermVersion, listInstances, readProxyConfig, proxyUrlFrom, resolveProxyNode, sharesGlobalPaneNamespace, versionMismatch } from './unterm.mjs';
 import { startWriting } from './writer.mjs';
 import { listSessions, sendToBook, streamBook, stopBook, attachAutopilot, sampleTokens } from './attach.mjs';
 import { loadUsage, bookUsage, fmtTokens } from './usage.mjs';
@@ -77,7 +77,13 @@ async function doctor() {
     console.log(c.gray('   novel config set --unterm-exe "<新版 unterm.exe 的完整路径>"'));
   }
   const proxy = readProxyConfig();
-  line('代理配置', proxy ? `${proxy.enabled ? '启用' : '禁用'} ${proxy.http_proxy || ''} 节点=${proxy.current_node}` : '无', !!proxy);
+  // 关着的时候【不要把那行旧地址念出来】——proxy.json 里的 http_proxy 会留着上一个代理，
+  // 念出来会让人以为还挂着它（2026-09-28 本机改走 Cisco 之后就是这样）。
+  const pxUrl = proxyUrlFrom(proxy);
+  const cfgOn = loadConfig().enableProxy;
+  line('代理配置', proxy
+    ? (pxUrl ? `启用 ${pxUrl} 节点=${proxy.current_node}${cfgOn ? '' : '（但本工具设置里关着，不会注入）'}` : `无代理（unterm 里已关）${cfgOn ? '' : '；本工具设置里也关着'}`)
+    : '无', !!proxy);
   console.log(hr());
   for (const m of detectAll()) line('模型 ' + m.name, m.available ? m.path : `不可用（${m.bin} 不在 PATH）`, m.available);
   console.log(hr());
