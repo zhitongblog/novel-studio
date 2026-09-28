@@ -567,6 +567,11 @@ textarea { resize: vertical; line-height: 1.5; }
 .card-progress { font-size: 12.5px; color: var(--fg); opacity: .9; margin: 2px 0 0; }
 
 /* 异常徽章：书架上一眼扫过去就知道哪本书在等你 */
+/* 断更格：黄=快踩线/库存见底，红=已经停推荐。点它直接去发布。 */
+.pill.cadence { cursor: pointer; border-color: rgba(228,179,86,.4); color: #e4b356; }
+.pill.cadence:hover { border-color: #e4b356; background: rgba(228,179,86,.1); }
+.pill.cadence.bad { border-color: rgba(233,90,109,.45); color: #f0a0ab; background: rgba(233,90,109,.08); }
+.pill.cadence.bad:hover { border-color: #e95a6d; background: rgba(233,90,109,.16); }
 .pill.issues { cursor: pointer; border-color: rgba(228,179,86,.4); color: #e4b356; }
 .pill.issues:hover { border-color: #e4b356; background: rgba(228,179,86,.1); }
 .pill.issues.bad { border-color: rgba(233,90,109,.45); color: #f0a0ab; }

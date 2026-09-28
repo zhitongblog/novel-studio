@@ -289,7 +289,7 @@ function bookList(cfg) {
     // 断更状态放在书架上，是因为它必须【不用找就能看见】：圣女 167 万字在读 1，
     // 就是没人盯着"上次更新是哪天"。详见 src/cadence.mjs。
     const cd = updateCadence(b, { maxChapter: b.stats.maxChapter });
-    if (cd.level !== 'none') {
+    if (cd.level !== 'none' && cd.level !== 'done') {
       const paint = { dead: c.red, danger: c.red, warn: c.yellow, thin: c.yellow, ok: c.gray }[cd.level] || c.gray;
       const mark = { dead: '🛑', danger: '⚠️', warn: '⚠️', thin: '📉', ok: '　' }[cd.level] || '　';
       console.log(`   ${mark} ${paint(cd.text)}`);

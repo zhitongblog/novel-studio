@@ -41,7 +41,7 @@ export function readableThrough(book) {
 }
 
 // 返回 {level, daysSince, runway, stock, through, text}
-//   level: 'none' 没发过 | 'ok' | 'thin' 库存见底 | 'warn' | 'danger' 快踩线 | 'dead' 已断更
+//   level: 'none' 没发过 | 'done' 已完本 | 'ok' | 'thin' 库存见底 | 'warn' | 'danger' 快踩线 | 'dead' 已断更
 //   daysSince: 读者已经多少天没看到新章（排期到未来时为 0）
 //   runway: 排期还能顶几天（今天算 0）
 //   stock:  已写未发的章数
@@ -57,6 +57,12 @@ export function updateCadence(book, { now = Date.now(), maxChapter = 0 } = {}) {
 
   if (!through) {
     return { level: 'none', daysSince: 0, runway: 0, stock, through: 0, text: '还没发布过' };
+  }
+  // 已完本的书不存在断更——番茄的通知里自己给了这条退路：不再更新的作品可以申请改完结，
+  // 惩罚就止住了。这条规则放在这里，是为了让 CLI 书架、体检、界面三处【同一套判断】，
+  // 不然《鸿门拔剑》这种写完的书会在书架上挂一个「已断更 100 天」的红标，天天喊你去发。
+  if (book?.status === '已完本') {
+    return { level: 'done', daysSince: 0, runway: 0, stock, through, text: '已完本，不算断更' };
   }
 
   const today = startOfDay(now);

@@ -273,3 +273,62 @@ test('卷没有名字要报出来，并给出「自动起名」', () => {
   const c = mkBook(seq(5), { model: 'claude' });   // 卷01_开篇：目录名自带卷名
   try { assert.ok(!keyOf(checkupBook(c), 'vol-unnamed')); } finally { rm(c); }
 });
+
+// —— 断更 ——
+// 2026-09-26 实测：139 章的吕布在读 669，499 章 167 万字的圣女在读 1。
+// 后者内容全书复检过没有质量问题，就是 09-15 断过一次，推荐掐死后再没回来。
+// 体检以前对这件事一个字都不说。
+const 日 = 86400000;
+
+test('断更 7 天以上要报 bad，并带「去发布」的出口', () => {
+  const b = mkBook(seq(30), { publish: { bookId: '123', publishedMax: 30, lastPublishAt: Date.now() - 9 * 日 } });
+  try {
+    const it = keyOf(checkupBook(b), 'update-dead');
+    assert.ok(it, '9 天没更必须报');
+    assert.equal(it.level, 'bad');
+    assert.match(it.text, /9 天/);
+    assert.equal(it.action.kind, 'publish');
+  } finally { rm(b); }
+});
+
+test('第 5 天就该报，不能等踩了线才说', () => {
+  const b = mkBook(seq(30), { publish: { bookId: '123', publishedMax: 30, lastPublishAt: Date.now() - 5 * 日 } });
+  try {
+    const it = keyOf(checkupBook(b), 'update-danger');
+    assert.ok(it, '剩 2 天要报 bad');
+    assert.equal(it.level, 'bad');
+    assert.match(it.text, /只剩 2 天/);
+  } finally { rm(b); }
+});
+
+test('刚更过但库存见底 → 报 warn，出口是「去写」不是「去发布」', () => {
+  const b = mkBook(seq(30), { publish: { bookId: '123', publishedMax: 30, lastPublishAt: Date.now() } });
+  try {
+    const it = keyOf(checkupBook(b), 'stock-thin');
+    assert.ok(it, '写好的全发完了要报');
+    assert.equal(it.level, 'warn');
+    assert.equal(it.action.kind, 'cowrite', '库存不够是写的问题，不是发的问题');
+  } finally { rm(b); }
+});
+
+test('没绑番茄 / 已完本的书不报断更——那不是断更', () => {
+  const 没绑 = mkBook(seq(30), { publish: { publishedMax: 30, lastPublishAt: Date.now() - 30 * 日 } });
+  const 完本 = mkBook(seq(30), { status: '已完本', publish: { bookId: '123', publishedMax: 30, lastPublishAt: Date.now() - 30 * 日 } });
+  try {
+    for (const k of ['update-dead', 'update-danger', 'update-warn', 'stock-thin']) {
+      assert.ok(!keyOf(checkupBook(没绑), k), '没绑番茄不该报 ' + k);
+      assert.ok(!keyOf(checkupBook(完本), k), '已完本不该报 ' + k);
+    }
+  } finally { rm(没绑); rm(完本); }
+});
+
+test('排期到未来的书不算断更——判据是读者能读到的最后一天', () => {
+  const 后天 = new Date(Date.now() + 2 * 日);
+  const ymd = `${后天.getFullYear()}-${String(后天.getMonth() + 1).padStart(2, '0')}-${String(后天.getDate()).padStart(2, '0')}`;
+  const b = mkBook(seq(30), { publish: { bookId: '123', publishedMax: 20, scheduledThrough: ymd, lastPublishAt: Date.now() - 5 * 日 } });
+  try {
+    const r = checkupBook(b);
+    assert.ok(!keyOf(r, 'update-danger'), '排期还没走完，不该报快断更');
+    assert.ok(!keyOf(r, 'update-dead'));
+  } finally { rm(b); }
+});

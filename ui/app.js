@@ -242,6 +242,7 @@ function renderShelf() {
         ${b.status === '已完本' ? '<span class="pill done">✅ 已完本</span>' : b.status === '收尾中' ? '<span class="pill finale">🏁 收尾中</span>' : ''}
         ${b.fanqie?.status ? `<span class="pill ${b.fanqie.status === '已完结' ? 'done' : (b.status === '已完本' && b.fanqie.status !== '已完结' ? 'warn' : '')}" title="番茄平台状态">番茄·${esc(b.fanqie.status)}</span>` : ''}
         ${PUBLISHING.has(b.slug) ? '<span class="pill publishing" data-act="pubbadge" title="正在发布到番茄，点我看进度">📤 发布中</span>' : ''}
+        <span class="pill cadence hidden" data-act="cadence" title="番茄满 7 天没有新章上线就暂停推荐"></span>
         <span class="pill issues hidden" data-act="issues" title="点开看这本书要处理什么"></span>
       </div>
       <div class="card-actions">
@@ -258,6 +259,7 @@ function renderShelf() {
     card.querySelector('[data-act="nameexp"]').addEventListener('click', (e) => { e.stopPropagation(); openNameExp(b); });
     card.querySelector('[data-act="del"]').addEventListener('click', (e) => { e.stopPropagation(); openDelete(b); });
     card.querySelector('[data-act="issues"]').addEventListener('click', (e) => { e.stopPropagation(); openWrite(b); });
+    card.querySelector('[data-act="cadence"]').addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openPublish(b); });
     const pubBadge = card.querySelector('[data-act="pubbadge"]');
     if (pubBadge) pubBadge.addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openPublish(b); });
     card.addEventListener('click', () => openWrite(b));
@@ -282,6 +284,24 @@ async function paintShelfStatus() {
     const btn = card.querySelector('[data-act="write"]');
     // 主按钮说的是【这本书现在该干什么】，不是一律"写作"
     if (btn && r.nextLabel) btn.textContent = ({ write: '✍️ ', watch: '👀 ', review: '⏸ ', outline: '🧭 ', finale: '🏁 ', publish: '📤 ' }[r.next] || '') + r.nextLabel;
+    // 断更格：番茄满 7 天读者读不到新章就停推荐，而停推荐是在读人数的第一杀手
+    //（2026-09-26 实测：139 章的吕布 669 人，499 章 167 万字的圣女 1 人，差别只在断没断过）。
+    // 所以它不跟「N 件要处理」挤在一起——那一格是个计数，这一格要把天数说出来。
+    const cdPill = card.querySelector('[data-act="cadence"]');
+    if (cdPill) {
+      const cd = r.cadence;
+      if (cd) {
+        cdPill.textContent =
+          cd.level === 'dead' ? `🛑 断更 ${cd.days} 天`
+          : cd.level === 'thin' ? (cd.stock ? `📉 库存 ${cd.stock} 章` : '📉 库存见底')
+          : `⚠️ ${cd.days} 天没更`;
+        cdPill.title = cd.text;
+        cdPill.classList.toggle('bad', cd.level === 'dead' || cd.level === 'danger');
+        cdPill.classList.remove('hidden');
+      } else {
+        cdPill.classList.add('hidden');
+      }
+    }
     const bad = r.bad || 0, warn = r.warn || 0;
     const pill = card.querySelector('[data-act="issues"]');
     if (!pill) continue;

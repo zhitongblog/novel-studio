@@ -24,6 +24,7 @@ import { bookStats } from './books.mjs';
 import { finaleArtifacts } from './finaledone.mjs';
 import { canRunHeadless, getModel } from './models.mjs';
 import { bookVolNum, cleanVolSub, outlineVolSubtitle, bibleVolSubtitle } from './publish.mjs';
+import { updateCadence, 库存红线 } from './cadence.mjs';
 
 const chapNumOf = (name) => parseInt((String(name).match(/^(\d{1,4})/) || [])[1] || '0', 10);
 
@@ -92,6 +93,35 @@ export function checkupBook(book) {
       out.push(issue('warn', 'unpublished',
         `写到第 ${maxCh} 章，番茄上只到第 ${sent} 章——有 ${maxCh - sent} 章还没发出去`,
         { label: '去发布', kind: 'publish' }));
+    }
+  }
+
+  // ②a 断更 —— 番茄「读者连续 7 天读不到新章」就暂停推荐，恢复更新才恢复。
+  //
+  // 这条比「写了没发」更要紧：2026-09-26 一量在读人数，139 章的吕布 669 人，
+  // 499 章 167 万字的圣女只有 1 人——后者内容全书复检过，没有质量问题，
+  // 就是 09-15 断过一次，推荐掐死后再没回来。字数救不了断更。
+  // 判据用「读者能读到的最后一天」（含未来排期），不是我们点发布的时刻，见 cadence.mjs。
+  if (pub.bookId) {
+    const cd = updateCadence(book, { maxChapter: maxCh });   // 已完本由 updateCadence 自己挡掉
+    if (cd.level === 'dead') {
+      out.push(issue('bad', 'update-dead',
+        `已经 ${cd.daysSince} 天没有新章上线——番茄满 7 天就暂停推荐，这本的推荐大概率已经停了`,
+        { label: '去发布', kind: 'publish' }));
+    } else if (cd.level === 'danger') {
+      out.push(issue('bad', 'update-danger',
+        `${cd.daysSince} 天没有新章上线，距离番茄停推荐只剩 ${7 - cd.daysSince} 天`,
+        { label: '去发布', kind: 'publish' }));
+    } else if (cd.level === 'warn') {
+      out.push(issue('warn', 'update-warn',
+        `${cd.daysSince} 天没有新章上线，距离番茄停推荐还有 ${7 - cd.daysSince} 天`,
+        { label: '去发布', kind: 'publish' }));
+    } else if (cd.level === 'thin') {
+      out.push(issue('warn', 'stock-thin',
+        cd.stock === 0
+          ? `写好的章全发完了，库存 0——排期一走完就开始踩 7 天断更线`
+          : `库存只剩 ${cd.stock} 章（低于 ${库存红线} 章），一卡顿就会踩 7 天断更线`,
+        { label: '去写', kind: 'cowrite' }));
     }
   }
 

@@ -33,6 +33,7 @@ import { chapterProgressLine, isFirstSight } from './progress.mjs';
 import { FANQIE_CATEGORIES, isValidCategory } from './categories.mjs';
 import { finaleArtifacts, finaleSummary } from './finaledone.mjs';
 import { checkupBook } from './checkup.mjs';
+import { updateCadence } from './cadence.mjs';
 import { buildAllDigests, rebuildVolumeOutlines } from './outlinerun.mjs';
 import { digestProgress } from './outlinerebuild.mjs';
 import { diagnoseSigning } from './signrun.mjs';
@@ -439,6 +440,7 @@ async function api(p, req, res, u) {
         const out = [];
         for (const b of loadBooks()) {
           let next = 'write', nextLabel = '继续往下写', counts = { bad: 0, warn: 0, info: 0 };
+          let cadence = null;
           try {
             const st = bookStats(b);
             const pend = getPending(b.slug);
@@ -449,8 +451,15 @@ async function api(p, req, res, u) {
             else if (live) { next = 'watch'; nextLabel = '正在写'; }
             else if (planned > 0 && st.chapters >= planned) { next = 'finale'; nextLabel = '可以收尾了'; }
             counts = memo('chk:' + b.slug, 60000, () => checkupBook(b).counts);
+            // 断更状态单独出一格：它不该被折进「N 件要处理」里。番茄满 7 天不更就停推荐，
+            // 而停推荐是这些书在读人数的第一杀手（吕布 139 章 669 人 vs 圣女 499 章 1 人）。
+            // 只有绑了番茄的书才算；没发过的新书和已完本的书由 updateCadence 自己挡掉。
+            if ((b.publish || {}).bookId) {
+              const cd = updateCadence(b, { maxChapter: st.maxChapter || st.chapters || 0 });
+              if (!['none', 'done', 'ok'].includes(cd.level)) cadence = { level: cd.level, text: cd.text, days: cd.daysSince, stock: cd.stock };
+            }
           } catch {}
-          out.push({ slug: b.slug, next, nextLabel, ...counts });
+          out.push({ slug: b.slug, next, nextLabel, cadence, ...counts });
         }
         return json(res, 200, { ok: true, books: out });
       } catch (e) { return json(res, 500, { error: e.message }); }

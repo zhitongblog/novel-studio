@@ -103,3 +103,16 @@ test('coverDays：同一批稿子，铺开和倒完差出一条七天线', () =>
   assert.equal(coverDays(13, '2'), 7, '配置里是字符串也要认');
   assert.equal(coverDays(0, 2), 0);
 });
+
+test('已完本的书不算断更——《鸿门拔剑》写完了，别在书架上挂红标天天喊去发', () => {
+  const r = updateCadence(
+    { status: '已完本', publish: { lastPublishAt: 今天 - 100 * 日, publishedMax: 563 } },
+    { now: 今天, maxChapter: 563 });
+  assert.equal(r.level, 'done');
+  assert.equal(r.daysSince, 0);
+  // 同样的数据，没标完本就该报 dead——规则只由 status 决定，不由天数决定
+  const 连载 = updateCadence(
+    { publish: { lastPublishAt: 今天 - 100 * 日, publishedMax: 563 } },
+    { now: 今天, maxChapter: 563 });
+  assert.equal(连载.level, 'dead');
+});
