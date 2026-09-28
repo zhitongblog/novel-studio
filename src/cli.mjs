@@ -376,6 +376,25 @@ async function gateCmd(f, cfg) {
   // 数值没错，结论没法用。手工一本配一张表又不可持续，所以让书自己说它是什么腔。
   if (f['probe-oral'] || f.probeOral) return probeOralCmd(book, f);
 
+  // novel gate --book X --fix-style [--from N --to M] ：指纹判出哪几章漂了，就让模型改回来，
+  // 改完【再量一遍】，不达标重来，到上限停住交给人。这是整套闸的闭环那一步。
+  if (f['fix-style'] || f.fixStyle) {
+    const { fixStyleRange } = await import('./stylefix.mjs');
+    const r = await fixStyleRange(book, {
+      from: parseInt(f.from || '1', 10) || 1,
+      to: parseInt(f.to || '0', 10) || 0,
+      cfg, model: f.model || null,
+      maxRounds: parseInt(f.rounds || '2', 10) || 2,
+      dryRun: !!f.dry,
+      onLog: (e) => console.log((e.level === 'warn' ? c.yellow('  ! ') : e.level === 'act' ? c.cyan('  > ') : '  ') + e.msg),
+    });
+    if (!r.ok) { console.log(c.red('  ' + r.reason)); process.exitCode = 1; return; }
+    console.log(hr());
+    console.log(`  已回正 ${r.done.length}/${r.total} 章` + (r.failed.length ? c.yellow(`，仍未达标 ${r.failed.length} 章：第 ${r.failed.map(x => x.num).join('、')} 章`) : ''));
+    if (r.failed.length) console.log(c.gray('  这几章要人看一眼——模型改了两轮还压不下来，多半是剧情本身就要那个腔调，或者范本不对味。'));
+    return;
+  }
+
   // novel gate --book X --probe-style ：拿这本书已写的章导出【文风指纹】+ 自动挑范本。
   // 指纹负责判（偏离本书自身分布就报），范本负责示范（写作时固定喂给模型）。
   // 缺了范本这一半，模型只会在数值上兜圈子——光说"别那样写"，不给"这样写"。

@@ -153,13 +153,15 @@ export async function attachAutopilot(slug, cfg, onLog = () => {}, onFreshRestar
     onBeforeContinue: async () => {
       const b = getBook(slug);
       try {
-        const { afterBatch, batchGateInstruction } = await import('./afterbatch.mjs');
+        const { afterBatch, batchGateInstruction, autoFixStyle } = await import('./afterbatch.mjs');
         const { bookStats } = await import('./books.mjs');
         const now = bookStats(b)?.maxChapter || 0;
         const prev = batchLowWater;
         const from = prev > 0 ? prev + 1 : 0;
         if (!(now > 0) || now <= prev) return null;
         afterBatch(b, { from, to: now, onLog });
+        // 文风回正要在节奏闸判它【之前】跑完，否则闸报的还是没改过的那一版
+        await autoFixStyle(b, { from, to: now, cfg, onLog });
         const instr = batchGateInstruction(b, { slug, from, to: now, cfg, onLog });
         if (instr) return instr;
         batchLowWater = now;

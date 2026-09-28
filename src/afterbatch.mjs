@@ -18,6 +18,32 @@ import { deslopRange } from './deslop.mjs';
 import { pacingGate } from './pacing.mjs';
 import { snapshotGate } from './ledgersnap.mjs';
 
+// 🎨 文风回正（写完一批立刻跑，**在节奏闸判它之前**）。
+//
+// 为什么放在这儿：这几道闸的全部意义就是"趁这一批还没变成下一批的上下文，先把病章改干净"。
+// 文风漂移尤其如此——模型下一批会照着自己上一批写，漂过的章留在那儿就是自我模仿的种子。
+// 和其它闸不同的是，这一道【自己会改】：判出哪几章漂了就调模型改回来、改完再量，
+// 不达标才退回给作者。所以它是 async，只能挂在 onBeforeContinue 这个异步钩子里，
+// 不能塞进同步的 batchGateInstruction。
+export async function autoFixStyle(book, { from = 0, to = 0, cfg = {}, onLog = () => {} } = {}) {
+  if (cfg?.styleFix?.enabled === false) return null;
+  if (!book?.dir || !(to > 0)) return null;
+  try {
+    const { loadFingerprint } = await import('./stylefp.mjs');
+    if (!loadFingerprint(book.dir)) return null;          // 没挂指纹的书不碰
+    const { fixStyleRange } = await import('./stylefix.mjs');
+    const r = await fixStyleRange(book, {
+      from: from > 0 ? from : 1, to, cfg,
+      maxRounds: cfg?.styleFix?.maxRounds ?? 2,
+      onLog: (e) => onLog({ ...e, source: 'stylefix' }),
+    });
+    if (!r.ok || !r.total) return null;
+    onLog({ level: r.failed.length ? 'warn' : 'info', source: 'stylefix',
+      msg: `文风回正：${r.done.length}/${r.total} 章已回正` + (r.failed.length ? `，仍未达标第 ${r.failed.map(x => x.num).join('、')} 章` : '') });
+    return r;
+  } catch (e) { onLog({ level: 'warn', source: 'stylefix', msg: '文风回正异常（不阻断）：' + (e.message || e) }); return null; }
+}
+
 // 扫出重复章号。返回 [{ num, files:[...] }, ...]，没有重号就是空数组。
 export function findDuplicateChapters(bookDir) {
   const root = path.join(bookDir, 'chapters');
