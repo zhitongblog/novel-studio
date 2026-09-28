@@ -590,6 +590,14 @@ export class Autopilot {
       let gateInstr = null;
       try { gateInstr = await this.opt.onBeforeContinue(); }
       catch (e) { this.log('写后闸异常（不阻断，照常续写）：' + e.message, 'warn'); }
+      // 闸连催都没过 → 【停住，别再发"继续"】。
+      // 2026-09-28 之前这里没有这条路：催满次数后 batchGateInstruction 返回 null，
+      // 而 null 的含义是"过了"，于是带病的一批直接变成下一批的上下文接着写。
+      if (gateInstr && gateInstr.blocked) {
+        this.log(`⛔ ${gateInstr.reason || '写后闸连催未过'} → 停止自动续写，等你处理`, 'error');
+        this.stop('写后闸未过');
+        return;
+      }
       if (gateInstr) {
         this.sawAgentRunning = true;
         try { await this.mcp.submitText(this.paneId, gateInstr); }

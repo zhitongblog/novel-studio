@@ -59,15 +59,22 @@ test('章太短 → 退回自纠，且指令里说得出是哪几章', () => {
   fs.rmSync(b.dir, { recursive: true, force: true });
 });
 
-test('【防死循环】同一批最多退回一次，之后放行并留 warn——闸卡死写作比漏掉更糟', () => {
+// 2026-09-28 推翻了这里原来的判断。原来写的是「第二次必须放行——闸卡死写作比漏掉更糟」，
+// 代价当天就结账了：《崇祯》297–321 这批，闸报了偏差、催一次、模型说改了、没人复测 →
+// 放行 → 它接着写了 13 章，文风一路漂到跟前 296 章不像一个人写的。
+// 「漏掉」不是少一次体检，是整本书换了个调子还在往下写。所以改成【停住等人】。
+test('催满次数仍未过 → 不再放行，返回 blocked 让上层停掉自动续写', () => {
   resetBatchGateNudges('T');
   const b = mkBook([[1, '甲'.repeat(1200) + '。']]);
   const logs = [];
   const first = batchGateInstruction(b, { slug: 'T', from: 1, to: 1, onLog: (e) => logs.push(e) });
-  assert.ok(first, '第一次要退回');
+  assert.ok(first, '第一次要退回自纠');
+  assert.ok(typeof first === 'string', '第一次给的是自纠指令');
   const second = batchGateInstruction(b, { slug: 'T', from: 1, to: 1, onLog: (e) => logs.push(e) });
-  assert.equal(second, null, '第二次必须放行，不能无限退回');
-  assert.ok(logs.some(e => e.level === 'warn' && /重催上限/.test(e.msg)), '放行要留一条 warn，不能静默');
+  assert.ok(second && second.blocked === true, '第二次不许返回 null——null 的含义是"过了"');
+  assert.equal(second.instruction, '', '停住的时候不再发新指令');
+  assert.ok(/1-1/.test(second.reason || ''), '要说清是哪几章卡住了');
+  assert.ok(logs.some(e => e.level === 'error' && /停止自动续写/.test(e.msg)), '要留一条 error，不能静默停');
   fs.rmSync(b.dir, { recursive: true, force: true });
 });
 

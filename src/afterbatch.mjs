@@ -123,9 +123,15 @@ export function batchGateInstruction(book, { slug, from = 0, to = 0, cfg = {}, o
 
   if (!instrs.length) { nudges.delete(key); return null; }
   if (used >= maxNudge) {
-    onLog({ level: 'warn', source: 'pacing',
-      msg: `写后闸仍未过，已达重催上限（${maxNudge} 次）→ 放行第 ${from}-${to} 章（请人工留意，详见 reviews/节奏体检）` });
-    return null;
+    // 【为什么不再放行】2026-09-28 的账：《崇祯》297–321 这批，真闸报了「数目堆砌」
+    // 和「量级没换挡」，催一次、模型说改了、没人复测 → 放行 → 它接着写了 13 章，
+    // 文风一路漂到跟前 296 章不是一个人写的。催完就放行 = 闸只是个提示音。
+    //
+    // 现在改成【停住等人】：不再给新的自纠指令，但也不返回 null（null 的含义是"过了"）。
+    // 上层据 blocked 停止本轮自动续写，把事情交回作者——宁可停，不许带病往下写。
+    onLog({ level: 'error', source: 'pacing',
+      msg: `⛔ 写后闸催了 ${maxNudge} 次仍未过 → 【停止自动续写】第 ${from}-${to} 章，等人处理（详见 reviews/节奏体检 与 .studio/gates/）` });
+    return { blocked: true, reason: `第 ${from}-${to} 章未过写后闸`, instruction: '' };
   }
   nudges.set(key, used + 1);
   // 两道都没过就合成一条——分两次发会让 agent 做完第一件事就以为交差了

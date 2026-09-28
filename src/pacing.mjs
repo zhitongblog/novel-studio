@@ -14,7 +14,9 @@
 //   ② 生成一条「退回自纠」指令交给上层注入，让模型在【本批还没变成下一批上下文之前】就改掉。
 
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
+import { loadFingerprint, driftOf, driftInstruction } from './stylefp.mjs';
 import { chapterFilesInRange } from './deslop.mjs';
 
 // —— 事务流程词表：这些东西当背景质感可以，当整章主线就是流水账 ——
@@ -100,6 +102,16 @@ function styleMetrics(text) {
   // shortRatio/avgLen 一模一样，读起来天差地别。实测这本书范本 21.5 字/段、写出来 47.7。
   const paras = String(text).split(/\n+/).map(x => x.trim()).filter(Boolean);
   const pl = paras.map(x => x.replace(/\s/g, '').length);
+  // —— 三根"腔调"轴（2026-09-28 补）——
+  // 【为什么原来量不出问题】《崇祯》296 章感叹号密度 0.93/千字，第 301 章起跳到 8.46——
+  // 全书最刺眼的一个信号，而上面六根轴【一根都碰不到它】：感叹号只被拿去切句子。
+  // 同期"如…般/仿佛/宛如"从 0.00 跳到 0.39/千字，旁白喝彩从 1 次跳到 11 次。
+  // 这三样合起来就是"爆款爽文腔"，它不改变句长、不改变段长，闸全绿，书已经换了个人写。
+  const bang = (text.match(/[！!]/g) || []).length;
+  const simile = (text.match(/[如若][^，。！？、\s]{1,8}[般似]|仿佛|宛如|犹如/g) || []).length;
+  // 旁白替读者鼓掌：不是人物在说，是叙述者在喊"这有多厉害"
+  const cheer = (text.match(/字字诛心|声震|震撼|沸腾|心弦|何曾有|泼天|滚滚回荡|无数人|不由自主|瞬间红了|窒息|骇然|悚然|无不|齐刷刷/g) || []).length;
+  const per1k = (v) => +(v / chars * 1000).toFixed(2);
   return {
     avgPara: +(pl.reduce((a, b) => a + b, 0) / (pl.length || 1)).toFixed(1),
     shortRatio: +(short / n).toFixed(3),          // 短句(≤10字)占比
@@ -107,8 +119,13 @@ function styleMetrics(text) {
     avgLen: +(lens.reduce((a, b) => a + b, 0) / n).toFixed(1),
     numPer: nums ? Math.round(chars / nums) : 9999,   // 多少字出现一个数目
     baRatio: +(ba / n).toFixed(3),                // 「X把Y…」句式占比
+    bangPerK: per1k(bang),                        // 感叹号/千字
+    similePerK: per1k(simile),                    // 「如…般/仿佛/宛如」/千字
+    cheerPerK: per1k(cheer),                      // 旁白喝彩/千字
   };
 }
+
+export { styleMetrics };
 
 // 从这本书自己的范本量出目标值。
 //
@@ -414,17 +431,67 @@ export function writePacingReport(bookDir, scan, tag = '') {
   lines.push('', '## 结论', '');
   if (!scan.issues.length) lines.push('全部通过。');
   for (const i of scan.issues) lines.push(`- **${i.level === 'error' ? '事故' : '偏差'}｜${i.kind}**：${i.msg}\n  - ${i.fix}`);
+  const body = lines.join(String.fromCharCode(10)) + String.fromCharCode(10);
   const fp = path.join(dir, `节奏体检${tag ? '-' + tag : ''}.md`);
-  try { fs.writeFileSync(fp, lines.join('\n') + '\n', 'utf8'); } catch {}
+  // reviews/ 里的那份【只是给人看的副本】。2026-09-28 实测：模型能照着格式手写一份
+  // 「顺利通过节奏闸！」放进 reviews/，一批 25 章伪造了 9 份，真闸报的偏差一条没改。
+  // 所以判据那份落到 .studio/gates/——编排器的目录，写作 agent 没有理由去写它——
+  // 并存内容指纹。副本被改不影响判断；判据被改，比对时认得出来。
+  try { fs.writeFileSync(fp, body, 'utf8'); } catch {}
+  try {
+    const gdir = path.join(bookDir, '.studio', 'gates');
+    fs.mkdirSync(gdir, { recursive: true });
+    const sha = crypto.createHash('sha1').update(body, 'utf8').digest('hex').slice(0, 16);
+    fs.writeFileSync(path.join(gdir, `pacing-${tag || 'all'}.json`), JSON.stringify({
+      tag, at: new Date().toISOString(), sha, passed: !scan.issues.length,
+      issues: scan.issues.map(i => ({ level: i.level, kind: i.kind, msg: i.msg })),
+      chapters: scan.chapters.map(c => ({ num: c.num, style: c.style })),
+    }, null, 2), 'utf8');
+  } catch {}
   return fp;
+}
+
+// 这一批的判据：只认 .studio/gates 里那份，不认 reviews/ 里的副本。
+// 找不到判据 = 闸没跑过，【不等于通过】——这条是整个强制力的地基，别改成默认放行。
+export function gateVerdict(bookDir, tag) {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(bookDir, '.studio', 'gates', `pacing-${tag}.json`), 'utf8'));
+    return { ran: true, passed: !!v.passed, issues: v.issues || [], at: v.at };
+  } catch { return { ran: false, passed: false, issues: [] }; }
 }
 
 // 写后节奏闸：给 statelessWriter / cowrite 用。返回 { issues, instruction }；instruction 非空则上层注入退回自纠。
 export function pacingGate(bookDir, from, to, onLog = () => {}, { std = {}, warnAlso = false, report = true } = {}) {
   const scan = pacingScan(bookDir, from, to, { std });
+  // 📐 文风指纹：跟【这本书自己已写的几百章】比，不是跟写死的阈值比。
+  // 这一道是 2026-09-28 补的，补的正是上面那些轴全绿、书却换了个人写的那种漏。
+  // 指纹只在 gate.json 里有才判——新书没写够 20 章时分布不可信，宁可不判。
+  const drift = [];
+  try {
+    const fp = loadFingerprint(bookDir);
+    if (fp) {
+      for (const c of scan.chapters) {
+        const d = driftOf(c.style || {}, fp);
+        if (d.length) drift.push({ num: c.num, title: c.title, drift: d });
+      }
+    }
+  } catch (e) { onLog({ level: 'warn', msg: '文风指纹异常（不阻断）：' + (e.message || e) }); }
+  if (drift.length) {
+    scan.issues.push({
+      level: 'error', kind: 'drift',
+      msg: `文风漂移：第 ${drift.map(d => d.num).join('、')} 章跟本书前文不是一个调子（${
+        [...new Set(drift.flatMap(d => d.drift.map(x => x.label)))].join('、')}）`,
+      fix: '照 driftInstruction 逐章改；判据是本书已写章的分布，不是写死的阈值。',
+    });
+    scan.drift = drift;
+  }
   for (const i of scan.issues) {
     onLog({ level: i.level === 'error' ? 'warn' : 'info', msg: `${i.level === 'error' ? '⛔ 节奏事故' : '⚠ 节奏偏差'}：${i.msg}` });
   }
   if (report && scan.chapters.length) writePacingReport(bookDir, scan, `${from}-${to}`);
-  return { issues: scan.issues, instruction: buildPacingFixInstruction(scan, { warnAlso }), scan };
+  const parts = [buildPacingFixInstruction(scan, { warnAlso }), drift.length ? driftInstruction(drift) : '']
+    .filter(Boolean);
+  const NL = String.fromCharCode(10);
+  const SEP = NL + NL + '────────' + NL + NL;
+  return { issues: scan.issues, instruction: parts.join(SEP) || '', scan };
 }

@@ -376,6 +376,29 @@ async function gateCmd(f, cfg) {
   // 数值没错，结论没法用。手工一本配一张表又不可持续，所以让书自己说它是什么腔。
   if (f['probe-oral'] || f.probeOral) return probeOralCmd(book, f);
 
+  // novel gate --book X --probe-style ：拿这本书已写的章导出【文风指纹】+ 自动挑范本。
+  // 指纹负责判（偏离本书自身分布就报），范本负责示范（写作时固定喂给模型）。
+  // 缺了范本这一半，模型只会在数值上兜圈子——光说"别那样写"，不给"这样写"。
+  if (f['probe-style'] || f.probeStyle) {
+    const { probeStyle } = await import('./stylefp.mjs');
+    const upto = parseInt(f.upto || '0', 10) || 0;
+    const r = probeStyle(book.dir, { n: parseInt(f.n || '3', 10) || 3, upto });
+    if (!r.ok) { console.log(c.red('  ' + r.reason)); process.exitCode = 1; return; }
+    console.log(c.bold(`
+📐 文风指纹 ·《${book.title}》`) + c.gray(`  （量了 ${r.fingerprint.chapters} 章${upto ? '，只到第 ' + upto + ' 章' : ''}）
+`) + hr());
+    const L = { bangPerK: '感叹号/千字', similePerK: '如…般比喻/千字', cheerPerK: '旁白喝彩/千字', avgLen: '均句长', avgPara: '字/段', shortRatio: '短句占比' };
+    for (const [k, a] of Object.entries(r.fingerprint.axes)) {
+      const lim = a.max !== undefined ? `上限 ${a.max}` : `下限 ${a.min}`;
+      console.log(`  ${(L[k] || k).padEnd(16)} 中位 ${String(a.p50).padStart(6)}   ${lim}`);
+    }
+    console.log(hr());
+    console.log('  范本已挂：' + r.picks.map(p => p.name).join('、'));
+    console.log(c.gray('  存放于 ' + r.refDir + '（写作时会喂给模型；你也可以自己往里放认可的文字）'));
+    console.log(c.gray('  判据存进 gate.json 的 styleFingerprint —— 节奏闸照它判「是不是换了个人写」'));
+    return;
+  }
+
   const readSafe = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
   const conf = (() => { try { return JSON.parse(readSafe(path.join(book.dir, 'gate.json')) || '{}'); } catch { return {}; } })();
   const banned = conf.banned || [];
