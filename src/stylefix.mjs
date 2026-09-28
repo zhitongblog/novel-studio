@@ -76,6 +76,48 @@ export function splitFatParagraphs(text, target = 34) {
   }).join('\n');
 }
 
+
+// 一段话里引号只开不闭 —— 把它和后面的段落并回去。
+//
+// 《崇祯》前 296 章【一处都没有】，而引擎新写的 320/322/323/324/325 章各有 12–20 处：
+//     叩了许久，他冷笑一声：“好手段。
+//     （空行）
+//     煤山上吊没死成，到了关门，反倒成了通晓兵马钱粮的行家。
+//     （空行）
+//     本帅若是跟他动刀子硬抢，满营关宁铁骑立时就要炸营。”
+// 一个人一口气说的话被空行劈成三段，引号只在头尾各一个。这不是风格，是坏排版。
+const NL = String.fromCharCode(10);
+const RE_BLANK = new RegExp(NL + '{2,}');
+const qdepth = (t) => {
+  let d = 0;
+  for (const ch of t) { if ('“「『'.includes(ch)) d++; else if ('”」』'.includes(ch)) d--; }
+  return d;
+};
+
+export function joinBrokenQuotes(text) {
+  // 【按行走，不按空行走】这本书两种排版都有：319/320/325 用空行分段，
+  // 318/322/323/324 是一行一段。按空行切会把后者整篇当成一段，一处都查不出来。
+  const lines = String(text).split(NL);
+  const out = [];
+  let buf = null;
+  for (const ln of lines) {
+    if (buf !== null) {
+      if (!ln.trim()) continue;                 // 台词中间的空行一并去掉
+      buf += ln;                                // 一口气说的话并回同一行
+      if (qdepth(buf) <= 0) { out.push(buf); buf = null; }
+      continue;
+    }
+    if (ln.trim() && qdepth(ln) > 0) buf = ln; else out.push(ln);
+  }
+  if (buf !== null) out.push(buf);
+  return out.join(NL);
+}
+
+// 引号不闭合的行有几处——收稿闸拿它跟原文比，绝不许改多。
+export function unbalancedQuoteParas(text) {
+  return String(text).split(NL).filter(l => l.trim() && qdepth(l) !== 0).length;
+}
+
 export function mechanicalFix(text, fp) {
   const target = fp?.axes?.avgPara?.p50 || 34;
   return splitFatParagraphs(fixBang(text), target).replace(/\r\n/g, '\n');
@@ -129,6 +171,9 @@ export function acceptable(before, after, { names = [] } = {}) {
   if (/^(好的|以下是|这是|我已经|根据)/.test(after.trim())) return { ok: false, why: '开头带了寒暄/说明，不是纯正文' };
   const lost = names.filter(n => before.includes(n) && !after.includes(n));
   if (lost.length) return { ok: false, why: '改丢了专名：' + lost.join('、') };
+  // 引号只开不闭的段落绝不许改多——改稿时把一句台词劈成几段是常见翻车，指标反而更好看
+  const qb = unbalancedQuoteParas(before), qa = unbalancedQuoteParas(after);
+  if (qa > qb) return { ok: false, why: `把台词劈成了空行分隔的段落（引号不闭合的段落 ${qb}→${qa}）` };
   return { ok: true };
 }
 

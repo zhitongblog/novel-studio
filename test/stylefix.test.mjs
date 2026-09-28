@@ -5,7 +5,7 @@
 // 2026-09-28 实测：《崇祯》307 章第一次调用回的就是一段说明，被这道体检拦下了。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fixBang, splitFatParagraphs, acceptable, buildFixPrompt } from '../src/stylefix.mjs';
+import { fixBang, splitFatParagraphs, acceptable, buildFixPrompt, joinBrokenQuotes, unbalancedQuoteParas } from '../src/stylefix.mjs';
 
 test('感叹号：短吼保留，叙述和长台词一律改句号', () => {
   // 本书自己的用法：「站住！」留着（前 296 章 1053 处全是这种），
@@ -96,4 +96,22 @@ test('拆段：右引号绝不许被甩到下一行', () => {
 test('拆段：引号里的台词一口气说完，不许拦腰断开', () => {
   const 台词 = '“' + '这话我说三遍。'.repeat(8) + '”';
   assert.equal(splitFatParagraphs(台词, 34), 台词, '台词内部不该出现换行');
+});
+
+test('台词被空行劈成几段 → 并回去（本书 296 章一处都没有，这是硬判据）', () => {
+  const NL = String.fromCharCode(10);
+  const t = '他冷笑一声：“好手段。' + NL + NL + '煤山上吊没死成。' + NL + NL + '本帅若硬抢，立时炸营。”' + NL + NL + '下一段正常。';
+  assert.equal(unbalancedQuoteParas(t), 2);
+  const r = joinBrokenQuotes(t);
+  assert.equal(unbalancedQuoteParas(r), 0);
+  assert.equal(r.replace(/\s/g, ''), t.replace(/\s/g, ''), '只动空行，一个字不许丢');
+});
+
+test('收稿体检：把台词劈成段落的改稿不收', () => {
+  const NL = String.fromCharCode(10);
+  const 原 = '他说：“' + '甲'.repeat(1200) + '。”';
+  const 改 = '他说：“' + '甲'.repeat(600) + '。' + NL + NL + '甲'.repeat(600) + '。”';
+  const r = acceptable(原, 改);
+  assert.equal(r.ok, false);
+  assert.match(r.why, /台词劈成/);
 });
