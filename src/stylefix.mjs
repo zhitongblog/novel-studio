@@ -41,11 +41,29 @@ export function fixBang(text) {
 }
 
 // 过厚的段落在【句末】换行——只加换行，一个字不改。
+//
+// ⚠️ 断点不能只看"是不是句末标点"。2026-09-28 实测踩了两次：
+//   ①「“万顺。”温汝弼低低念了一句」在「。」后面断，右引号被甩到下一行：
+//        “万顺。
+//        ”温汝弼低低念了一句
+//     所以【句末标点后面紧跟收尾符号时不许断】。
+//   ② 引号里的长台词被拦腰断开——台词是一个人一口气说的，断了就不是一句话了。
+//     所以【引号内一律不断】。
 export function splitFatParagraphs(text, target = 34) {
-  return String(text).split('\n').map(line => {
+  const CLOSERS = '”」』）)】》…—';
+  return String(text).split(String.fromCharCode(10)).map(line => {
     if (clean(line).length <= target * 1.6) return line;
-    const parts = []; let buf = '';
-    for (const ch of line) { buf += ch; if (SENT_END.test(ch)) { parts.push(buf); buf = ''; } }
+    const parts = []; let buf = '', depth = 0;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      buf += ch;
+      if ('“「『'.includes(ch)) depth++;
+      else if ('”」』'.includes(ch)) depth = Math.max(0, depth - 1);
+      if (depth > 0) continue;
+      if (!SENT_END.test(ch)) continue;
+      if (CLOSERS.includes(line[i + 1] || '')) continue;
+      parts.push(buf); buf = '';
+    }
     if (buf) parts.push(buf);
     if (parts.length < 2) return line;
     const out = []; let cur = '';
