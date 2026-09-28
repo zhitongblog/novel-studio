@@ -242,6 +242,26 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   // 刷新本书 agent 上下文（写作 skill 标准）
   refreshContext(book);
 
+  // 📌 开写前先看台账快照在不在。
+  // 【为什么要在入口挡一道】写后闸（snapshotGate）只在【写完一批之后】跑，
+  // 所以一本从没迁移过台账的书，第一批照样是顶着「已写到第 000 章」的空快照开写的——
+  // 2026-09-28《我本凡人》就是这样：222 章、台账 12.3 万字符从没分过区，
+  // 每批只喂得进前 8000 字符（实测 fedRatio 6%），写到 222 章还在照开篇的旧账写。
+  // 这里幂等地补结构；快照确实空/过期时，把【补快照】顶替成这一轮的第一条指令，
+  // 让它先把当前态填好再动笔——不然后面每一章都在照旧状态写。
+  let seedFirst = '';
+  try {
+    const { ensureStructure, needsSeed, seedInstruction } = await import('./ledgersnap.mjs');
+    ensureStructure(book.dir, book);
+    const maxCh = bookStats(book)?.maxChapter || 0;
+    const ns = needsSeed(book.dir, maxCh);
+    if (ns?.need && maxCh > 0) {
+      seedFirst = seedInstruction(book, maxCh);
+      onLog({ level: 'warn', msg: `台账快照缺失/过期（${ns.why}）→ 本轮先补快照，补完再写新章` });
+    }
+  } catch (e) { onLog({ level: 'warn', msg: '台账检查异常（不阻断）：' + (e.message || e) }); }
+  if (seedFirst) instruction = seedFirst;
+
   // 平铺分章兜底：每次开写前由代码幂等地把根目录残留正文移进 chapters/卷01/（应对续传/后补文件），
   // 移完清掉 flatImport，避免续写指令里反复出现"去归档"的无用噪音。
   try {
