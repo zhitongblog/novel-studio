@@ -1700,14 +1700,10 @@ function pbAttachStream(slug, header) {
     let e; try { e = JSON.parse(ev.data); } catch { return; }
     if (e.source !== 'fanqie') return;
     const tag = e.level === 'error' ? '✖' : e.level === 'act' ? '▶' : '·';
-    out.textContent += `${tag} ${e.msg}\n`;
-    out.scrollTop = out.scrollHeight;
     appendModalResultText('pb', `${tag} ${e.msg}\n`);
     if (TASK.kind === 'publish') taskProgress({ text: e.msg });
     // 发布收尾/停止/异常 → 清状态、复位按钮
     if (/发布结束|重发结束|全部完成|已暂停|已中止|已停止|无新章|发布异常/.test(e.msg)) {
-      out.textContent += '\n——（已结束，可关闭。番茄那边稍后刷新可见）——\n';
-      out.scrollTop = out.scrollHeight;
       appendModalResultText('pb', '\n——（已结束，弹窗不自动关；结果留在这儿。番茄那边稍后刷新可见）——\n');
       pbMarkDone(slug);
     }
