@@ -94,22 +94,40 @@ const qdepth = (t) => {
   return d;
 };
 
-export function joinBrokenQuotes(text) {
+export function joinBrokenQuotes(text, maxMerge = 3) {
   // 【按行走，不按空行走】这本书两种排版都有：319/320/325 用空行分段，
   // 318/322/323/324 是一行一段。按空行切会把后者整篇当成一段，一处都查不出来。
+  //
+  // ⚠️ maxMerge 是 2026-09-30 用一章的损坏换来的。《我本凡人》265 章里有一条
+  // 社交长帖，每一段都用 “ 起头、通篇不闭合（作者的写法，不是错）。
+  // 原来的写法"一直并到闭合为止"于是一路吞到章尾——303 行压成 80 行。
+  // 字一个没丢，段落结构全毁了。
+  // 一个人一口气说的话最多跨两三行；并了三行还不闭合，那就不是"被劈开的台词"，
+  // 是别的东西，**放着别动**。宁可漏修，不可改坏。
   const lines = String(text).split(NL);
   const out = [];
-  let buf = null;
-  for (const ln of lines) {
+  let buf = null, merged = 0, bufIdx = -1;
+  // 并不拢 → 把吞进去的那几行【原样】吐回去，并把游标放回最后一行，从它的下一行接着走。
+  // ⚠️ 下标必须先存再清零：先清零再拿它算游标，i 会变成 -1，整个循环从头重来（死循环）。
+  const flushRaw = () => {
+    const start = bufIdx, count = merged;
+    buf = null; merged = 0; bufIdx = -1;
+    for (let k = start; k <= start + count && k < lines.length; k++) out.push(lines[k]);
+    return start + count;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
     if (buf !== null) {
-      if (!ln.trim()) continue;                 // 台词中间的空行一并去掉
-      buf += ln;                                // 一口气说的话并回同一行
-      if (qdepth(buf) <= 0) { out.push(buf); buf = null; }
+      if (!ln.trim()) { merged++; continue; }     // 台词中间的空行一并去掉
+      buf += ln; merged++;
+      if (qdepth(buf) <= 0) { out.push(buf); buf = null; merged = 0; bufIdx = -1; continue; }
+      if (merged >= maxMerge) i = flushRaw();
       continue;
     }
-    if (ln.trim() && qdepth(ln) > 0) buf = ln; else out.push(ln);
+    if (ln.trim() && qdepth(ln) > 0) { buf = ln; merged = 0; bufIdx = i; }
+    else out.push(ln);
   }
-  if (buf !== null) out.push(buf);
+  if (buf !== null) flushRaw();
   return out.join(NL);
 }
 
