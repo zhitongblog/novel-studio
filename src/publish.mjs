@@ -416,12 +416,15 @@ export async function republishRange(book, { from, to, limit = 0, onLog = () => 
       onLog({ level: 'info', msg: `番茄共 ${fanqieVolumes.length} 卷，编辑时按章所属卷自动切卷` });
     }
   } catch (e) { onLog({ level: 'warn', msg: '读番茄卷列表失败（编辑将只在当前卷查找）：' + (e.message || e) }); }
-  const config = { editMode: true, bookId: pc.bookId, intervalSeconds: pc.intervalSeconds || 3, fanqieVolumes };
+  // useAI 必须带上：原来这里漏了它，编辑重发一律按「否」申报，书里设了「是」也不管用（2026-10-02 国术实证）
+  const config = { editMode: true, bookId: pc.bookId, intervalSeconds: pc.intervalSeconds || 3, fanqieVolumes, useAI: pc.useAI !== false };
   const r = await publishBook({ profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title, chapters: chs, config, onLog });
   // 手工重发过的章要刷新指纹基线，否则下一次自动同步会把它们当成"又被重写"再覆盖一遍。
   if (r.ok) {
     const hs = loadPublishedHashes(book);
-    for (const c of chs) if (c && c.num && c.hash) hs[String(c.num)] = c.hash;
+    // 被番茄拒收的章没改上去——不能记成"已同步"，否则下次自动同步会以为线上已是新稿
+    const rejected = new Set((r.rejected || []).map(x => String(x.num)));
+    for (const c of chs) if (c && c.num && c.hash && !rejected.has(String(c.num))) hs[String(c.num)] = c.hash;
     savePublishedHashes(book, hs);
   }
   return { ok: !!r.ok, attempted: chs.length, ...r };
@@ -569,7 +572,7 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
     scheduledTime: pc.scheduledTime || '',
     intervalSeconds: pc.intervalSeconds || 3,
     matchVolumes: !!pc.matchVolumes,
-    useAI: !!pc.useAI,
+    useAI: pc.useAI !== false,
     bookId: pc.bookId,
     fanqieVolumes,
   };
@@ -605,6 +608,10 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
   const editedOk = editRes?.published || 0;
   const publishedOk = newRes?.published || 0;
   const doneChapters = [...editCh.slice(0, editedOk), ...newCh.slice(0, publishedOk)];
+  const rejectedEdits = editRes?.rejected || [];
+  if (rejectedEdits.length) {
+    onLog({ level: 'warn', msg: `⚠️ ${rejectedEdits.length} 章编辑被番茄拒收、线上仍是旧稿：${rejectedEdits.map(x => `第${x.num}章（${x.reason}）`).join('、')}` });
+  }
   const ok = runs.length > 0 && runs.every(x => !!x.ok);
 
   if (doneChapters.length) {
@@ -628,7 +635,9 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
       // 指纹基线：把这次真正发上去的章记下来，作为下次"有没有被重写"的比对基准。
       // 只记发成功的那些，没发的不动——否则会把没发的章误标成"线上已是这版"。
       const hs = loadPublishedHashes(book);
-      for (const c of doneChapters) if (c && c.num && c.hash) hs[String(c.num)] = c.hash;
+      // 编辑时被番茄拒收的章（标题重名等）没改上去，不能记成已同步
+      const rejectedNums = new Set(rejectedEdits.map(x => String(x.num)));
+      for (const c of doneChapters) if (c && c.num && c.hash && !rejectedNums.has(String(c.num))) hs[String(c.num)] = c.hash;
       savePublishedHashes(book, hs);
     } catch {}
   }

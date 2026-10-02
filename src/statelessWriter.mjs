@@ -46,6 +46,61 @@ function runHeadless(model, prompt, { cwd, cfg, timeoutMs = 900000, onChunk }) {
   });
 }
 
+// 自纠进度心跳。
+// 由来（2026-10-02《重生岳雷》379–381）：节奏闸退回自纠是一次无头调用，最长 15 分钟，
+// 期间日志一个字都没有——界面最后一行停在「⛔ 节奏闸未过 → 本批退回作者就地自纠」，
+// 作者看到的是"自己检查自己不通过，但没有下一步"，以为写到一半停了。其实进程在跑、正在改 379/380。
+// 所以：开始报一句（改哪些、最长多久），之后每 30 秒报一次（用了多久、哪几个文件已被改过），结束再报一句。
+// 判"改没改"只看 mtime，不读内容——心跳要便宜，不能拖慢自纠本身。
+function chapterFilesInRange(bookDir, from, to) {
+  const out = [];
+  const cdir = path.join(bookDir, 'chapters');
+  let vols = [];
+  try { vols = fs.readdirSync(cdir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name); } catch {}
+  for (const v of vols) {
+    let files = [];
+    try { files = fs.readdirSync(path.join(cdir, v)); } catch {}
+    for (const f of files) {
+      const m = f.match(/^(\d+).*\.txt$/i);
+      if (!m) continue;
+      const num = parseInt(m[1], 10);
+      if (num >= from && num <= to) out.push({ label: `第${num}章`, fp: path.join(cdir, v, f) });
+    }
+  }
+  return out;
+}
+
+function fmtSecs(s) { return s >= 60 ? `${Math.floor(s / 60)}分${s % 60}秒` : `${s}秒`; }
+
+function watchFix(targets, label, onLog, { timeoutMs = 900000, everyMs = 30000 } = {}) {
+  const t0 = Date.now();
+  const base = targets.map(t => { let m = 0; try { m = fs.statSync(t.fp).mtimeMs; } catch {} return { ...t, m }; });
+  const changed = () => base.filter(t => { try { return fs.statSync(t.fp).mtimeMs > t.m; } catch { return false; } }).map(t => t.label);
+  onLog({ level: 'act', msg: `🔧 ${label}开始：要改 ${base.map(t => t.label).join('、') || '（无文件）'}，最长 ${Math.round(timeoutMs / 60000)} 分钟，每 ${Math.round(everyMs / 1000)} 秒报一次进度` });
+  const tick = setInterval(() => {
+    const c = changed();
+    onLog({ level: 'info', msg: `⏳ ${label}中…已用 ${fmtSecs(Math.round((Date.now() - t0) / 1000))}${c.length ? `，已改：${c.join('、')}` : '，还没动到文件'}` });
+  }, everyMs);
+  return (r) => {
+    clearInterval(tick);
+    const c = changed();
+    const secs = Math.round((Date.now() - t0) / 1000);
+    const why = r?.killed ? '（超时被中止）' : (r && r.ok === false ? '（模型进程异常退出）' : '');
+    onLog(c.length
+      ? { level: 'act', msg: `🔧 ${label}结束${why}：用时 ${fmtSecs(secs)}，改了 ${c.join('、')}` }
+      : { level: 'warn', msg: `🔧 ${label}结束${why}：用时 ${fmtSecs(secs)}，但一个文件都没改` });
+    return { secs, changed: c };
+  };
+}
+
+// 闸复检仍未过时，把还剩什么问题说出来，别只说一句"仍未过"。
+function issueBrief(g) {
+  const list = Array.isArray(g?.issues) ? g.issues : [];
+  const bad = list.filter(i => !i.level || i.level === 'error');
+  const pick = (bad.length ? bad : list).slice(0, 2).map(i => String(i.msg || i.text || i.kind || '').replace(/\s+/g, ' ').slice(0, 80)).filter(Boolean);
+  return pick.length ? pick.join('；') : '';
+}
+
 // 跨卷自愈指令：模型在卷边界因"该卷无章级大纲"而停下（输出【大纲待审：卷NN】）时，
 // 授权它在无状态快速模式下【先补该卷章级大纲、再直接接着写】，不要停下等人工审稿。
 function buildBoundaryRetryPrompt(book, pack, scope, reviewed = false) {
@@ -186,12 +241,17 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
       const g = pacingGate(book.dir, from, after.maxChapter || 0, onLog, { std, warnAlso: cfg?.pacing?.strict === true });
       if (g.instruction) {
         onLog({ level: 'act', msg: '⛔ 节奏闸未过 → 本批退回作者就地自纠（不写新章）' });
-        await runHeadless(model, g.instruction, { cwd: book.dir, cfg, timeoutMs: cfg?.stateless?.batchTimeoutMs || 900000 });
+        const fixMs = cfg?.stateless?.batchTimeoutMs || 900000;
+        const done = watchFix(chapterFilesInRange(book.dir, from, after.maxChapter || 0), '节奏自纠', onLog, { timeoutMs: fixMs });
+        const fr = await runHeadless(model, g.instruction, { cwd: book.dir, cfg, timeoutMs: fixMs });
+        done(fr);
         after = bookStats(book); grew = (after.chapters || 0) - (before.chapters || 0);
+        onLog({ level: 'info', msg: '🔁 节奏闸复检中…' });
         const g2 = pacingGate(book.dir, from, after.maxChapter || 0, onLog, { std, report: false });
+        const left = g2.instruction ? issueBrief(g2) : '';
         onLog(g2.instruction
-          ? { level: 'warn', msg: '节奏闸复检仍未过 → 放行本批（请人工留意，详见 reviews/节奏体检）' }
-          : { level: 'act', msg: '✅ 节奏闸复检通过' });
+          ? { level: 'warn', msg: `节奏闸复检仍未过${left ? '（剩：' + left + '）' : ''} → 放行本批，接着写下一批（请人工留意，详见 reviews/节奏体检）` }
+          : { level: 'act', msg: '✅ 节奏闸复检通过 → 接着写下一批' });
       }
     } catch (e) { onLog({ level: 'warn', msg: '节奏闸异常（不阻断）：' + (e.message || e) }); }
   }
@@ -204,7 +264,8 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
     const g = snapshotGate(book.dir, after.maxChapter || 0, onLog, { book });
     if (g.instruction) {
       onLog({ level: 'act', msg: '📌 快照闸未过 → 退回作者就地刷新台账快照（不写新章）' });
-      await runHeadless(model, g.instruction, { cwd: book.dir, cfg, timeoutMs });
+      const done = watchFix([{ label: '台账 continuity_ledger.md', fp: path.join(book.dir, 'continuity_ledger.md') }], '快照自纠', onLog, { timeoutMs });
+      done(await runHeadless(model, g.instruction, { cwd: book.dir, cfg, timeoutMs }));
       const g2 = snapshotGate(book.dir, after.maxChapter || 0, () => {}, { book });
       onLog(g2.ok
         ? { level: 'act', msg: '📌 快照闸复检通过' }
@@ -292,3 +353,6 @@ export async function runStateless({
   onLog({ level: 'act', msg: `无状态写作结束：共 ${results.length} 批、新增 ${totalWrote} 章` });
   return { ok: true, batches: results.length, totalWrote, results };
 }
+
+// 仅供测试：自纠进度心跳的几个纯函数。
+export { chapterFilesInRange, watchFix, issueBrief };

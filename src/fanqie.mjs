@@ -109,10 +109,11 @@ class UnzooClient {
     try {
       // profile_id 用的是 profile 的【名字】而不是路径，且名字与路径不是简单规则
       //（"工作" 对应的目录是 Default），所以查表按路径末段匹配，别去猜。
-      const want = String(this.selectedProfilePath).split(/[\/]/).filter(Boolean).pop().toLowerCase();
+      // 分隔符必须是 [\\/]：Windows 路径是反斜杠，只按 / 切就切不出末段（曾写成 [\/]，等于整串比）。
+      const want = String(this.selectedProfilePath).split(/[\\/]/).filter(Boolean).pop().toLowerCase();
       const pl = await unzooCallTool('profile_list', {});
       const rows = pl?.profiles || (Array.isArray(pl) ? pl : []);
-      const row = rows.find(x => String(x.path || x.profile_path || '').split(/[\/]/).filter(Boolean).pop().toLowerCase() === want);
+      const row = rows.find(x => String(x.path || x.profile_path || '').split(/[\\/]/).filter(Boolean).pop().toLowerCase() === want);
       const pid = row?.name || row?.id;
       if (!pid) { this.addLog(`⚠️ profile 列表里找不到该账号（${want}），无法自动开${this.siteLabel}后台`, 'error'); return false; }
 
@@ -123,11 +124,11 @@ class UnzooClient {
 
       // 验证落点：必须在选中账号下，否则关掉
       await this.sleep(1200);
-      const norm = (x) => String(x || '').replace(/[\/]+$/, '').toLowerCase();
+      const norm = (x) => String(x || '').replace(/[\\/]+$/, '').toLowerCase();
       const list = await unzooCallTool('tab_list', {}).catch(() => null);
       const t = (list?.tabs || []).find(x => String(x.tab_id) === String(id));
       const same = t && (norm(t.profile_path) === norm(this.selectedProfilePath)
-        || String(t.profile_path || '').split(/[\/]/).filter(Boolean).pop().toLowerCase() === want);
+        || String(t.profile_path || '').split(/[\\/]/).filter(Boolean).pop().toLowerCase() === want);
       if (!same) {
         try { await unzooCallTool('tab_close', { tab_id: id }); } catch {}
         this.addLog('⚠️ 新开的标签页落到了别的账号下，已关掉并中止（绝不发错号）', 'error');
@@ -243,6 +244,15 @@ class UnzooClient {
       const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
       return result?.result;
     } catch (e) {
+      // Unzoo 遇到 beforeunload/alert 不会超时，而是直接报「A '…' dialog is blocking the page」。
+      // 原来只认「超时」，这种报错一律原样抛出 → 后面每一步都卡死在同一个弹窗上
+      // （2026-10-02 国术第 7 章：保存没被接受，离开编辑页弹出"未保存，确定离开？"，整批停住）。
+      if (/dialog is blocking|beforeunload|browser_handle_dialog/i.test(e.message || '')) {
+        const dismissed = await dismissDialog(this.tabId);
+        if (dismissed) this.addLog('检测到阻塞弹窗（离开页面确认等）并已关闭，重试…', 'warn');
+        const result = await unzooCallTool('browser_evaluate', { tab_id: this.tabId, expression: script });
+        return result?.result;
+      }
       // 超时多半是页面弹了阻塞 alert（eval 被卡住）→ 关掉弹窗后重试一次
       if (/超时/.test(e.message || '')) {
         const dismissed = await dismissDialog(this.tabId);
@@ -852,6 +862,85 @@ class FanqiePublisher {
   // 在【当前卷】的章节列表里逐页找目标章。
   // 翻页判据改用"下一页按钮是否可用"，不再靠 totalPages —— arco 分页出省略号(1 2 3 … 20)时
   // 从可见页码取 max 会把总页数算漏，导致"遍历N页后未找到"。
+  // 读当前页的分页与章号概况：当前页码、可点的页码、本页首末章号、本页条数、行签名。
+  async readPageInfo() {
+    return this.client.evaluate(`(function(){
+      var nums = [];
+      document.querySelectorAll('tr').forEach(function(r){
+        var m = ((r.innerText || '').trim()).match(/^第(\\d+)章/);
+        if (m) nums.push(parseInt(m[1], 10));
+      });
+      var active = document.querySelector('.arco-pagination-item-active');
+      var pages = [].slice.call(document.querySelectorAll('.arco-pagination-item'))
+        .map(function(x){ return parseInt((x.textContent || '').trim(), 10); })
+        .filter(function(n){ return n > 0; });
+      return {
+        page: active ? (parseInt(active.textContent, 10) || 1) : 1,
+        pages: pages, maxPage: pages.length ? Math.max.apply(null, pages) : 1,
+        first: nums.length ? nums[0] : 0, last: nums.length ? nums[nums.length - 1] : 0, count: nums.length,
+        sig: ${FanqiePublisher.ROW_SIG_JS},
+      };
+    })()`);
+  }
+
+  // 点一个可见页码，等到行真的换了。
+  async clickPageNumber(n, info) {
+    const clicked = await this.client.clickByLocator(`
+      const items = document.querySelectorAll('.arco-pagination-item');
+      for (const item of items) { if ((item.textContent || '').trim() === ${JSON.stringify(String(n))}) return item; }
+      return null;
+    `);
+    if (!clicked) return { ok: false };
+    const after = await this.waitChapterRows({ prevPage: info?.page, prevSig: info?.sig || null, maxMs: 20000 });
+    return { ok: !!after.ready, fatal: after.fatal, login: after.login };
+  }
+
+  // 算出第 N 章所在页并跳过去。返回 { found, page, tried, fatal }。
+  // 只在【第 1 页】上算：此时首行就是本卷最新（新→旧）或最早（旧→新）的一章。
+  async jumpToChapterPage(targetNum, checkPage) {
+    let info = await this.readPageInfo();
+    if (!info || !info.count) return { tried: false };
+    if (info.page !== 1) {
+      const back = await this.clickPageNumber(1, info);
+      if (back.fatal) return { fatal: true, message: back.login ? '番茄需要登录' : '番茄页面加载失败' };
+      info = await this.readPageInfo();
+      if (!info || info.page !== 1 || !info.count) return { tried: false };
+    }
+    const per = info.count;
+    if (per < 2) return { tried: false };
+    const desc = info.first > info.last;
+    const offset = desc ? info.first - targetNum : targetNum - info.first;
+    if (offset < 0) return { tried: false };   // 目标章比本卷最新还新/比最早还早 → 不在本卷，交给逐页/跨卷逻辑
+    const want = Math.floor(offset / per) + 1;
+    if (want > info.maxPage) return { tried: true, page: want };
+
+    const goTo = async (p) => {
+      for (let hop = 0; hop < 15; hop++) {
+        const cur = await this.readPageInfo();
+        if (!cur) return false;
+        if (cur.page === p) return true;
+        const vis = cur.pages.filter(n => n !== cur.page);
+        if (!vis.length) return false;
+        // 目标可见就点它；不可见就点离它最近的那个可见页码（番茄分页只露出当前页附近几页 + 首尾）
+        const pick = vis.includes(p) ? p : vis.reduce((a, b) => (Math.abs(b - p) < Math.abs(a - p) ? b : a));
+        const r = await this.clickPageNumber(pick, cur);
+        if (r.fatal) return null;
+        if (!r.ok) return false;
+      }
+      return false;
+    };
+
+    for (const p of [want, want + 1, want - 1]) {
+      if (p < 1 || p > info.maxPage) continue;
+      const ok = await goTo(p);
+      if (ok === null) return { fatal: true, message: '番茄页面加载失败' };
+      if (!ok) break;
+      const r = await this.client.evaluate(checkPage);
+      if (r?.found) return { found: true, page: p, tried: true };
+    }
+    return { tried: true, page: want };
+  }
+
   async searchChapterInCurrentVolume(targetChapterNum) {
     const targetPattern = `第${targetChapterNum}章`;
     const checkPage = `
@@ -881,6 +970,18 @@ class FanqiePublisher {
 
     let r = await this.client.evaluate(checkPage);
     if (r?.found) { this.log(`✅ ${targetPattern} 在当前页`); return { success: true }; }
+
+    // ⚡ 快路：直接算出目标页跳过去，不再从第 1 页一页页点"下一页"。
+    // 由来（2026-10-02 国术重发 34 章）：每章都从第 1 页逐页翻，找第 1 章要翻到第 31 页，每章十七八秒。
+    // 番茄章节列表每页条数固定、章号连续，按第 1 页首行章号 + 每页条数就能算出页码（新→旧或旧→新都行）。
+    // 算错（中间缺号/改过号）也不怕：落点和前后各一页都看一眼，还没有才退回下面的逐页翻。
+    try {
+      const fast = await this.jumpToChapterPage(targetChapterNum, checkPage);
+      if (fast?.found) { this.log(`✅ 直接跳到第 ${fast.page} 页找到 ${targetPattern}`); return { success: true }; }
+      if (fast?.fatal) return { success: false, fatal: true, message: fast.message };
+      if (fast?.tried) this.log(`快速定位没找到 ${targetPattern}（算的是第 ${fast.page} 页）→ 改为逐页查找`);
+    } catch (e) { this.log(`快速定位异常（${e.message || e}）→ 改为逐页查找`); }
+    r = await this.client.evaluate(checkPage);
 
     // 回到第 1 页再逐页找
     if ((r?.currentPage || 1) !== 1) {
@@ -938,7 +1039,7 @@ class FanqiePublisher {
       await this.gotoVolumePage(wantIdx);
     }
 
-    this.log(`查找 第${targetChapterNum}章，逐页遍历...`);
+    this.log(`查找 第${targetChapterNum}章…`);
     let r = await this.searchChapterInCurrentVolume(targetChapterNum);
     if (r.success || r.fatal) return r;
 
@@ -1018,6 +1119,13 @@ class FanqiePublisher {
             }
             this.currentIndex++;
           }
+        } else if (result.saveRejected) {
+          // 番茄明确没收这次保存（如标题与别的章重名）——同一章原样重试只会再被拒一次，
+          // 还白白多弹几次"未保存，确定离开？"。记下来、跳过、最后汇总，让人去处理根因。
+          this.rejected = this.rejected || [];
+          this.rejected.push({ num: websiteChapterNum, reason: result.message || '' });
+          this.log(`⏭ 第 ${websiteChapterNum} 章保存被番茄拒绝（${result.message || '原因未知'}）→ 跳过，继续下一章`);
+          this.currentIndex++;
         } else {
           consecutiveFailures++;
           this.log(`编辑失败: ${result.message}，重试中...`);
@@ -1037,8 +1145,10 @@ class FanqiePublisher {
     if (this.currentIndex >= this.chapters.length) {
       this.status = 'completed';
       const sk = (this.skipped || []);
-      this.log(`🎉 编辑完成！共编辑 ${this.chapters.length - sk.length}/${this.chapters.length} 章`
-        + (sk.length ? `；${sk.length} 章番茄上没有、已跳过：${sk.join('、')}` : ''));
+      const rj = (this.rejected || []);
+      this.log(`🎉 编辑完成！共编辑 ${this.chapters.length - sk.length - rj.length}/${this.chapters.length} 章`
+        + (sk.length ? `；${sk.length} 章番茄上没有、已跳过：${sk.join('、')}` : '')
+        + (rj.length ? `；${rj.length} 章保存被番茄拒绝、需人工处理：${rj.map(x => `第${x.num}章（${x.reason}）`).join('、')}` : ''));
     }
 
     this.emitProgress();
@@ -1191,7 +1301,8 @@ class FanqiePublisher {
         const hasPublishDialog = await this.client.pageContains(['发布设置', '确认发布']);
         if (hasPublishDialog) {
           // 先选择 AI 选项（坐标真实点击）
-          const targetText = (this.config?.useAI || false) ? '是' : '否';
+          // 默认勾「是」：只有书的发布设置里明确 useAI=false 才勾「否」（2026-10-02 作者定：所有书默认如实申报用了 AI）
+          const targetText = (this.config?.useAI !== false) ? '是' : '否';
           await this.client.clickByLocator(`
             const radioTexts = document.querySelectorAll('.arco-radio-text');
             for (const span of radioTexts) {
@@ -1251,6 +1362,30 @@ class FanqiePublisher {
     }
 
     if (!returnedToList) {
+      // 还停在编辑页 / 发布设置弹窗上 = 番茄没接受这次保存（实测原因：标题与别的章重名、敏感词、字数不够）。
+      // 原来这里直接导航回列表并返回 success:true —— 把一次失败报成了成功，
+      // 还因为离开未保存的编辑页触发 beforeunload，把后面每一步都卡死（2026-10-02 国术第 7 章）。
+      const stuck = await this.client.pageContains(['请输入标题', '请输入正文', 'ProseMirror', '发布设置', '确认发布']);
+      if (stuck) {
+        const reason = await this.client.evaluate(`(function(){
+          var sel=['.arco-message','.arco-notification','.arco-form-item-message','[class*="error"]','[class*="toast"]','.arco-modal-content'];
+          var seen={}, out=[];
+          sel.forEach(function(s){ document.querySelectorAll(s).forEach(function(n){
+            var t=(n.innerText||'').replace(/\\s+/g,' ').trim();
+            if(t && t.length<120 && !seen[t]){ seen[t]=1; out.push(t); } }); });
+          return out.slice(0,3).join('；');
+        })()`).catch(() => '');
+        this.log(`❌ 番茄没有接受这次保存，仍停在编辑页${reason ? '：' + reason : ''}（常见原因：标题与其他章重名）`);
+        // 留在原页离开时会弹"未保存"确认——导航前先把它关掉，免得卡住下一章
+        if (this.config?.bookId) {
+          const volumeIdx = this.currentVolPage || this.config.volumeIndex || 1;
+          try { await this.client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${this.config.bookId}&${volumeIdx}`); }
+          catch (e) { await dismissDialog(this.client.tabId); }
+          await dismissDialog(this.client.tabId);
+          await this.waitChapterRows({ maxMs: 15000 }).catch(() => {});
+        }
+        return { success: false, saveRejected: true, message: `保存未被番茄接受${reason ? '：' + reason : ''}` };
+      }
       this.log('⚠️ 无法确认是否返回章节列表，直接导航...');
       // 直接导航回【刚才所在的那一卷】的章节管理页（不是写死第1卷，否则下一章又要重新切卷）
       if (this.config?.bookId) {
@@ -1815,7 +1950,7 @@ class FanqiePublisher {
 
     // Step 1: 选择 AI 选项（是/否）—— 定位单选项后坐标真实点击
     if (this.config) {
-      const targetText = this.config.useAI ? '是' : '否';
+      const targetText = (this.config.useAI !== false) ? '是' : '否';
       const aiOk = await this.client.clickByLocator(`
         const targetText = ${JSON.stringify(targetText)};
         // 方法1: Arco radio 文本精确匹配
@@ -2329,7 +2464,7 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
   const innerConfig = {
     chaptersPerDay: config.chaptersPerDay === 'max' ? 'max'
       : (config.chaptersPerDay != null ? parseInt(config.chaptersPerDay, 10) : 'max'),
-    useAI: !!config.useAI,
+    useAI: config.useAI !== false,   // 没传 = 是；只有明确 false 才申报「未使用 AI」
     startIndex: config.startIndex || 0,
     intervalSeconds: config.intervalSeconds != null ? config.intervalSeconds : 3,
     scheduledStartDate: config.scheduledStartDate || null,
@@ -2412,6 +2547,8 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
         ? { num: lastChapterObj.chapterNumber, title: lastChapterObj.title }
         : null,
       status: publisher.status,
+      // 编辑模式下被番茄拒收、已跳过的章（章号 + 原因）——上层据此不记指纹基线，下次同步还会再试
+      rejected: (publisher.rejected || []).slice(),
       error: ok ? null : (publisher.lastError || (stopped ? '已手动停止' : publisher.status === 'paused' ? '已暂停' : null)),
     };
   } catch (err) {

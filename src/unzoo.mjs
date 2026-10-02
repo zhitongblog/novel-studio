@@ -193,7 +193,9 @@ export async function uploadTrusted(tabId, selector, filePaths) {
 // 清掉阻塞的 JS 弹窗（alert/confirm）——它会让 browser_evaluate 永久挂起。best-effort。
 export async function handleDialog(tabId, action = 'accept') {
   if (tabId == null) return false;
-  try { await mcpCall('browser_handle_dialog', { tab_id: tabId, action }, 8000); return true; }
+  // MCP 的 browser_handle_dialog 认的是 accept:true/false（2026-10-02 实测：只传 action 时 beforeunload 关不掉）；
+  // action 一并带上，兼容老版本。
+  try { await mcpCall('browser_handle_dialog', { tab_id: tabId, accept: action !== 'dismiss', action }, 8000); return true; }
   catch { return false; }
 }
 

@@ -1016,7 +1016,7 @@ function pbFill(book) {
   $('#pbSyncUnbased').checked = !!pc.syncUnbased;
   $('#pbRwLimit').value = Number.isFinite(Number(pc.rewriteSyncLimit)) ? Number(pc.rewriteSyncLimit) : 3;
   $('#pbAuto').checked = !!pc.autoPublish;
-  $('#pbUseAI').checked = !!pc.useAI;
+  $('#pbUseAI').checked = pc.useAI !== false;   // 默认勾「是」，只有明确设过 false 才不勾
 }
 function pbRenderProfiles(saved) {
   const sel = $('#pbProfile');
