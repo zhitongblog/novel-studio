@@ -1611,10 +1611,15 @@ class FanqiePublisher {
       const tabs = await this.client.getTabs();
       if (tabs.length <= 2) return;
 
+      // 只动【本账号】的标签页。原来不看 profile，把同时在跑的另一本书（另一个番茄账号）的后台标签页
+      // 当"多余"关掉了——2026-10-02 岳雷发布时，国术的重发两次报 tab not found 停在半路。
+      const norm = (x) => String(x || '').replace(/[\\/]+$/, '').toLowerCase();
+      const mine = this.client?.selectedProfilePath ? norm(this.client.selectedProfilePath) : '';
       const fanqieTabs = [];
       for (let i = 0; i < tabs.length; i++) {
         const tab = tabs[i];
         const url = tab.url || '';
+        if (mine && tab.profile_path && norm(tab.profile_path) !== mine) continue;
         if (url.includes('fanqienovel.com') || url.includes('author.fqnovel')) {
           fanqieTabs.push({ tabId: tab.tab_id, url, active: tab.active });
         }

@@ -140,3 +140,19 @@ const kinds = (scan) => scan.issues.map(i => i.kind);
 }
 
 console.log('\n全部通过 ✅  节奏闸判定正确');
+
+// 有快照/历史分区的台账：只量标记行以上（历史区按规范不压缩、不进上下文），2026-10-02《国术》实证。
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ldg-'));
+  fs.mkdirSync(path.join(dir, 'chapters', '卷01'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'chapters', '卷01', '001开头.txt'), '他走进门。'.repeat(700), 'utf8');
+  const snap = '## 📌 当前态快照\n- 进度：已写到第 001 章\n';
+  const hist = '## 历史\n' + '旧事。'.repeat(20000);
+  fs.writeFileSync(path.join(dir, 'continuity_ledger.md'), snap + '<!-- LEDGER_HISTORY_BELOW -->\n' + hist, 'utf8');
+  const r1 = pacingScan(dir, 1, 1, {});
+  assert.ok(!r1.issues.some(i => i.kind === 'ledger'), '历史区再大也不该判台账超限');
+  fs.writeFileSync(path.join(dir, 'continuity_ledger.md'), snap + hist, 'utf8');
+  const r2 = pacingScan(dir, 1, 1, {});
+  assert.ok(r2.issues.some(i => i.kind === 'ledger'), '没有分区标记的老台账照旧按整份量');
+  console.log('✓ 台账体积闸只量快照段');
+}

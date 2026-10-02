@@ -363,7 +363,13 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
   try {
     const lf = path.join(bookDir, 'continuity_ledger.md');
     const cap = std.ledgerMaxChars || 30000;
-    const txt = fs.readFileSync(lf, 'utf8');
+    const raw = fs.readFileSync(lf, 'utf8');
+    // 有「当前态快照 / 历史区」分区的台账：写作只喂快照（标记行以上），历史区按规范只追加、不压缩、不进上下文。
+    // 原来按整份文件量——《国术》台账 10.1 万字符里九成多是历史区，每批都被判"台账超限"事故，
+    // 自纠指令还让模型去删历史，和本书 CLAUDE.md「历史区不设长度上限」正面冲突（2026-10-02）。
+    // 所以有标记就只量标记行以上那段；没标记的老台账照旧按整份量。
+    const mark = raw.indexOf('LEDGER_HISTORY_BELOW');
+    const txt = mark >= 0 ? raw.slice(0, raw.lastIndexOf('\n', mark) + 1 || mark) : raw;
     const n = txt.length;
     if (n > cap) {
       // 找出「分章条目」类小节（#### 开头），它们是滚动窗口层，最该被压缩
