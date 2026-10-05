@@ -397,11 +397,13 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
 
 // 重发修正：把番茄上【已存在】的 from..to 章，用本地(已清洗)正文【编辑替换】。修"发错内容"用。
 // limit>0 时只改前 N 章（先试1章再全改）。
-export async function republishRange(book, { from, to, limit = 0, onLog = () => {} } = {}) {
+// dates：可选 { 章号: 'YYYY-MM-DD' }——编辑时顺带把这些已排期章改到指定发布日（修排期断档用）。
+export async function republishRange(book, { from, to, limit = 0, dates = null, onLog = () => {} } = {}) {
   const pc = book.publish || {};
   if (!pc.profilePath) throw new Error('未配置番茄账号(Unzoo profilePath)');
   if (!pc.bookId) throw new Error('未配置番茄 bookId');
-  let chs = loadPublishChapters(book).filter(c => c.num >= from && c.num <= to).map(c => ({ ...c, mode: 'edit' }));
+  let chs = loadPublishChapters(book).filter(c => c.num >= from && c.num <= to)
+    .map(c => ({ ...c, mode: 'edit', ...(dates && dates[c.num] ? { scheduleDate: dates[c.num] } : {}) }));
   if (limit > 0) chs = chs.slice(0, limit);
   if (!chs.length) { onLog({ level: 'info', msg: `第 ${from}-${to} 章本地为空，无可重发` }); return { ok: true, edited: 0 }; }
   onLog({ level: 'act', msg: `编辑替换番茄第 ${chs[0].num}–${chs[chs.length - 1].num} 章（共 ${chs.length} 章，用清洗后正文）…` });

@@ -1314,6 +1314,29 @@ class FanqiePublisher {
             return null;
           `);
           await this.client.sleep(200);
+          // 改期：编辑已排期的章时可顺带改发布日期（chapter.scheduleDate = 'YYYY-MM-DD'）。
+          // 由来（2026-10-03 国术）：一次排期把 470–472 挤进 10-08、473 起跳到 10-13，中间断更 4 天，
+          // 只能逐章编辑把日期改回来。改完必须读回输入框核对，对不上就取消、不点确认——宁可这章不改，也不能排错日子。
+          if (chapter.scheduleDate) {
+            const want = String(chapter.scheduleDate).slice(0, 10);
+            const [yy, mm, dd] = want.split('-').map(Number);
+            this.currentScheduleDay = new Date(yy, mm - 1, dd);
+            await this.enableScheduleSwitch();   // 只在开关是关着的时候才会点
+            await this.client.sleep(300);
+            await this.selectScheduleDate();
+            await this.client.sleep(400);
+            const shown = await this.client.evaluate(`(function(){
+              var i = document.querySelector('.arco-modal input.arco-picker-start-time, .arco-modal .arco-picker input');
+              return i ? (i.value || '') : '';
+            })()`);
+            if (String(shown || '').slice(0, 10) !== want) {
+              this.log(`⚠️ 改期没生效（输入框显示「${shown || '空'}」，要的是 ${want}）→ 取消本章，不提交`);
+              await this.client.clickButtonByText('取消');
+              await this.client.sleep(800);
+              return { success: false, saveRejected: true, message: `改期未生效（显示 ${shown || '空'}，目标 ${want}）` };
+            }
+            this.log(`📅 已改发布日期为 ${want}`);
+          }
           // 点击确认发布
           await this.client.clickButtonByText('确认发布');
           await this.client.sleep(1000);
@@ -2461,6 +2484,7 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
     title: c.title,
     content: c.content,
     volumeText: c.volumeText || '',
+    ...(c.scheduleDate ? { scheduleDate: c.scheduleDate } : {}),   // 编辑时顺带改期（见 editChapter）
   }));
 
   const client = new UnzooClient(profilePath || null, onLog || null);
