@@ -22,6 +22,7 @@ import { deslopRange } from './deslop.mjs';   // 写后强制排版矫正闸：�
 import { pacingGate } from './pacing.mjs';   // 写后节奏闸：治章长超标/事务流程当主线/量级不换挡/章末假钩子
 import { runwayEnough } from './cadence.mjs';   // 写作总闸：番茄排期够了就不再续写
 import { scanRegister, scanRhythm } from './chapgate.mjs';   // 口语密度闸
+import { oralMode } from './oralgate.mjs';   // 口语闸书级设置：off / report / fix
 import { inspect as inspectLedger, needsSeed, ensureStructure, seedInstruction, snapshotGate } from './ledgersnap.mjs';   // 台账当前态快照：治「每批喂的是开篇旧账」
 
 // 各模型"无头 + 自动批准文件读写"的参数。
@@ -300,11 +301,14 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
 
   // 🗣 写后口语密度闸（只对 standards.oral 配了 minPerK 的书）：不过就当批退回改语言，只自纠一轮。
   const oral = book.standards?.oral;
-  if (oral && oral.minPerK > 0 && (after.maxChapter || 0) >= (before.maxChapter || 0) + 1) {
+  const oMode = oralMode(oral);
+  if (oMode !== 'off' && (after.maxChapter || 0) >= (before.maxChapter || 0) + 1) {
     try {
       const from = (before.maxChapter || 0) + 1, to = after.maxChapter || 0;
       const issues = registerIssues(book.dir, from, to, oral);
-      if (issues.length) {
+      if (issues.length && oMode === 'report') {
+        onLog({ level: 'warn', msg: `🗣 口语提醒（只提醒不改）：${issues.map(i => `${i.label}（${i.bits.join('；')}）`).join('，')}` });
+      } else if (issues.length) {
         onLog({ level: 'warn', msg: `🗣 口语密度闸未过：${issues.map(i => `${i.label}（${i.bits.join('；')}）`).join('，')}` });
         const fixMs = cfg?.stateless?.batchTimeoutMs || 900000;
         const done = watchFix(chapterFilesInRange(book.dir, from, to), '口语自纠', onLog, { timeoutMs: fixMs });

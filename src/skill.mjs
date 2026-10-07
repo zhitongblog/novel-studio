@@ -7,6 +7,7 @@ import path from 'node:path';
 import { styleVoice } from './styles.mjs';
 import { romanceVoice, ROMANCE_REDLINE } from './romance.mjs';
 import { ORAL_MARKER_SETS } from './chapgate.mjs';
+import { oralPromptSection } from './oralgate.mjs';
 
 export const SKILL_NAME = 'longform-webnovel-writer';
 
@@ -167,6 +168,9 @@ export function skillBody(book) {
 
 ${ROMANCE_REDLINE}
 `;
+  // 开了口语密度闸的书，把要求写进规范（窗口模式只读得到这份文件）
+  const oralReq = oralPromptSection(b?.standards?.oral);
+  const oralGateSection = oralReq ? `\n\n${oralReq}\n` : '';
   return `# 长篇网文写作规范（${SKILL_NAME}）
 
 > 本文件由 Novel Studio 自动生成，等同 codex 的 longform-webnovel-writer skill。
@@ -180,7 +184,7 @@ ${ROMANCE_REDLINE}
 - 卷数 / 每卷章数：${freehand ? '不预设（探索式：全书无大纲，卷目录只作归档）' : `${std.volumes || '?'} 卷 / 约 ${std.chaptersPerVolume || '?'} 章`}
 - 默认批次：每次 ${batch} 章，写完自检
 - 单章目标：${tgtLo}–${tgtHi} 字；硬下限：文件 > 4KB 且正文 > ${minChars} 字
-${styleSection}${romanceSection}
+${styleSection}${romanceSection}${oralGateSection}
 ## 核心原则
 
 - 先读本地文件再动笔：开写前必须读 ${readSources}。

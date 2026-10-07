@@ -217,8 +217,25 @@
                   <span>🌐 网页账号（Unzoo）</span>
                   <select id="webProfile"><option value="">（加载账号列表…）</option></select>
                 </label>
-                <label class="field"><span>写到多少章就停（0＝不限）</span>
+                <label class="field" title="这是【全书计划总章数】，不是本轮停止点：写到离它一卷以内时会自动进入收尾冲刺（若开着自动收尾）。只想让这一轮少写几章，用上面的『一次写几批』。"><span>全书计划总章数（0＝不设；接近时会进入收尾）</span>
                   <input id="wbTarget" type="number" min="0" placeholder="0" /></label>
+                <div class="field oral-gate" id="oralGate" title="写完每批量一次口语密度、单个口语词次数、叙述长句占比。门槛按本书前文定，不同书别套同一个数。">
+                  <span>🗣 口语密度闸</span>
+                  <div class="oral-row">
+                    <select id="oralMode">
+                      <option value="off">关</option>
+                      <option value="report">只提醒（写进日志，不改）</option>
+                      <option value="fix">不达标就退回改语言</option>
+                    </select>
+                    <label>门槛 <input id="oralMin" type="number" min="1" max="60" step="0.5" style="width:60px" />/千字</label>
+                    <label>每词 ≤ <input id="oralPer" type="number" min="1" max="20" style="width:48px" /> 次</label>
+                  </div>
+                  <div class="oral-row">
+                    <button class="btn ghost" id="oralSuggestBtn" type="button">按前文建议</button>
+                    <button class="btn" id="oralSaveBtn" type="button">保存</button>
+                  </div>
+                  <small class="oral-hint" id="oralHint"></small>
+                </div>
               </div>
             </details>
 

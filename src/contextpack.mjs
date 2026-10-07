@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { bookStats, currentVolume, chaptersPerVol, plannedTotalChapters } from './books.mjs';
 import { voicePrint } from './voiceprint.mjs';
+import { oralPromptSection } from './oralgate.mjs';
 import { hasStructure, splitLedger } from './ledgersnap.mjs';
 
 function readOr(p, fallback = '') { try { return fs.readFileSync(p, 'utf8'); } catch { return fallback; } }
@@ -235,6 +236,10 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
     `6. 做一次本批自检（字数/命名/唯一/仅正文/与台账连贯/文风是否贴着范本）。\n` +
     `完成后简要回报：写了哪几章、各多少字、更新了哪些文件。除非我要求，不要在回复里粘贴整章正文。`
   );
+
+  // 本书开了口语密度闸 → 把要求写进 prompt，让第一稿就照着写（闸只兜底，见 oralgate.mjs）
+  const oralReq = oralPromptSection(std.oral);
+  if (oralReq) sections.splice(sections.length - 1, 0, oralReq);
 
   const prompt = sections.join('\n\n');
 

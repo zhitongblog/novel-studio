@@ -135,6 +135,10 @@ body {
 .ws-row .btn { flex: 0 0 auto; white-space: nowrap; }
 .stateless-toggle { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px dashed var(--border, #3a3a3a); border-radius: 8px; }
 .stateless-toggle .sl-controls { display: flex; align-items: center; gap: 10px; }
+.oral-gate { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px dashed var(--border, #3a3a3a); border-radius: 8px; }
+.oral-gate .oral-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.oral-gate .oral-row label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.oral-gate .oral-hint { color: var(--muted); font-size: 11px; line-height: 1.5; }
 .stateless-toggle input[type=checkbox] { width: 16px; height: 16px; }
 .stateless-toggle .sl-batch.hidden { display: none; }
 input, select, textarea {

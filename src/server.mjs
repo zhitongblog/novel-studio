@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, updateConfig } from './config.mjs';
 import { CONFIG_DIR } from './paths.mjs';
-import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance, setBookCategory, setBookTags} from './books.mjs';
+import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookOral, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance, setBookCategory, setBookTags} from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle, recommendCategory, recommendFanqieTags } from './planner.mjs';
 import { detectAll, getModel, canRunHeadless } from './models.mjs';
@@ -34,6 +34,7 @@ import { FANQIE_CATEGORIES, isValidCategory } from './categories.mjs';
 import { finaleArtifacts, finaleSummary } from './finaledone.mjs';
 import { checkupBook } from './checkup.mjs';
 import { updateCadence } from './cadence.mjs';
+import { oralSuggest } from './oralgate.mjs';
 import { buildAllDigests, rebuildVolumeOutlines } from './outlinerun.mjs';
 import { digestProgress } from './outlinerebuild.mjs';
 import { diagnoseSigning } from './signrun.mjs';
@@ -41,7 +42,7 @@ import { loadBooks } from './store.mjs';
 import { loadUsage, bookUsage, codexTokensForDir, claudeTokensForDir } from './usage.mjs';
 import { proposeTitles, buildKickoffInstruction, buildCompassKickoffInstruction, buildFreehandKickoffInstruction, buildVolumePlanPrompt, buildResumeInstruction, buildReviewInstruction, generateSynopsis, buildFinaleInstruction, buildRewriteInstruction, buildReprojectInstruction, buildAfterwordInstruction, buildRebuildOutlineInstruction, buildReviseSettingInstruction, buildRenameInstruction, resolveGenModel, runModelOnce, analyzeStyleSample } from './planner.mjs';
 import { styleFromFanqieUrl } from './refstyle.mjs';
-import { gitSnapshot } from './scaffold.mjs';
+import { gitSnapshot, refreshContext } from './scaffold.mjs';
 import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, buildReviseFromItems, buildEndingRenudgeInstruction, parseReviewItems, critiqueOf } from './editor.mjs';
 import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
@@ -541,6 +542,13 @@ async function api(p, req, res, u) {
         });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
+    if (p === '/api/book/oral-suggest') {   // 口语密度闸：按本书最近 30 章给建议值 + 当前设置（只读）
+      try {
+        const book = getBook(u.searchParams.get('book') || '');
+        if (!book) return json(res, 400, { error: '找不到书' });
+        return json(res, 200, { ok: true, current: book.standards?.oral || null, ...oralSuggest(book) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
     if (p === '/api/book/pending') {   // 写作台重开时恢复"待确认审稿/审核"动作条
       const slug = slugOf(u.searchParams.get('book') || '');
       const pend = getPending(slug);
@@ -623,6 +631,13 @@ async function api(p, req, res, u) {
     if (p === '/api/book/recommend-style') {
       try { const rec = await recommendStyle(body, cfg); return json(res, 200, { ok: true, style: rec }); }
       catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/oral-config') {   // 口语密度闸：保存书级设置，并重写 AGENTS/CLAUDE.md 让窗口模式也读到要求
+      try {
+        const b = setBookOral(body.book, body.oral || {});
+        try { refreshContext(b); } catch {}
+        return json(res, 200, { ok: true, oral: b.standards.oral });
+      } catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (p === '/api/book/set-target') {
       try { const b = setBookTarget(body.book, body.targetChapters); return json(res, 200, { ok: true, targetChapters: b.targetChapters }); }

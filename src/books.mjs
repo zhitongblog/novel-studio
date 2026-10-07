@@ -43,6 +43,19 @@ export function resolveStyle(input) {
 }
 
 // 设定"目标章节数上限"（0=不限）。autopilot 写到这个章数就停。
+// 口语密度闸的书级设置（见 oralgate.mjs）。mode：off / report / fix。
+export function setBookOral(slugOrId, { mode, minPerK, maxPerWord } = {}) {
+  const b = getBook(slugOrId);
+  if (!b) throw new Error('找不到书：' + slugOrId);
+  if (!['off', 'report', 'fix'].includes(mode)) throw new Error('mode 只能是 off / report / fix');
+  const min = Number(minPerK), per = Math.floor(Number(maxPerWord));
+  if (mode !== 'off' && !(min > 0 && min <= 60)) throw new Error('口语门槛要在 0–60/千字之间');
+  if (mode !== 'off' && !(per >= 1 && per <= 20)) throw new Error('每词上限要在 1–20 之间');
+  b.standards = { ...(b.standards || {}), oral: { mode, minPerK: mode === 'off' ? 0 : min, maxPerWord: mode === 'off' ? 0 : per } };
+  upsertBook(b);
+  return b;
+}
+
 export function setBookTarget(slugOrId, n) {
   const b = getBook(slugOrId);
   if (!b) throw new Error('找不到书：' + slugOrId);

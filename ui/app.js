@@ -346,6 +346,7 @@ function openWrite(book) {
   $('#mirror').textContent = '（开始写作后，这里实时显示 AI 写作过程）';
   $('#logFeed').innerHTML = '';
   $('#wbTarget').value = book.targetChapters || 0;
+  loadOral(book.slug);   // 口语密度闸：当前设置 + 按前文的建议值
   $('#writeMode').value = book.participation || (book.writeMode === 'review' ? 'chapter' : 'volume');
   // 探索式(freehand)：全书不建任何大纲 → 藏掉「🧭 本卷大纲」，改用共创面板逐段给情节
   if ($('#btnVolPlan')) $('#btnVolPlan').classList.toggle('hidden', book.planMode === 'freehand');
@@ -2305,7 +2306,42 @@ $('#wbTarget').addEventListener('change', async () => {
   try {
     await api('/api/book/set-target', 'POST', { book: CUR.slug, targetChapters: n });
     const nb = STATE.books.find(b => b.slug === CUR.slug); if (nb) nb.targetChapters = n; CUR.targetChapters = n;
-    toast(n ? ('写到 ' + n + ' 章就自动停') : '已取消上限（不限）');
+    toast(n ? ('全书计划 ' + n + ' 章：写到离它一卷以内会进入收尾') : '已取消全书计划章数');
+  } catch (e) { toast(e.message); }
+});
+
+// ---------- 口语密度闸（书级设置，见 src/oralgate.mjs） ----------
+function fillOral(o) {
+  const mode = !o ? 'off' : (o.mode || (o.minPerK > 0 ? 'fix' : 'off'));
+  $('#oralMode').value = mode;
+  $('#oralMin').value = o && o.minPerK ? o.minPerK : '';
+  $('#oralPer').value = o && o.maxPerWord ? o.maxPerWord : '';
+}
+async function loadOral(slug) {
+  $('#oralHint').textContent = '';
+  try {
+    const r = await api('/api/book/oral-suggest?book=' + encodeURIComponent(slug));
+    fillOral(r.current);
+    const s = r.stats || {};
+    $('#oralHint').textContent = s.chapters
+      ? `前文 ${s.from}–${s.to} 章：口语中位 ${s.perKMedian}/千字、25 分位 ${s.perKP25}；叙述长句中位 ${s.longMedian}%；${s.table}${s.calibrated ? '（已标定）' : '（未经朱雀标定）'}`
+      : '前文太少，量不出分布';
+    $('#oralGate').dataset.suggest = JSON.stringify(r.suggest || {});
+    $('#oralGate').dataset.why = r.why || '';
+  } catch (e) { $('#oralHint').textContent = '读取失败：' + e.message; }
+}
+$('#oralSuggestBtn').addEventListener('click', () => {
+  let s = {}; try { s = JSON.parse($('#oralGate').dataset.suggest || '{}'); } catch {}
+  if (!s.mode) { toast('还没有建议值'); return; }
+  fillOral(s);
+  toast('已填入建议值（还没保存）：' + ($('#oralGate').dataset.why || ''));
+});
+$('#oralSaveBtn').addEventListener('click', async () => {
+  if (!CUR) return;
+  const oral = { mode: $('#oralMode').value, minPerK: Number($('#oralMin').value), maxPerWord: Number($('#oralPer').value) };
+  try {
+    const r = await api('/api/book/oral-config', 'POST', { book: CUR.slug, oral });
+    toast(r.oral.mode === 'off' ? '口语密度闸已关' : `口语密度闸已保存：${r.oral.mode === 'fix' ? '不达标就退回改' : '只提醒'}，门槛 ${r.oral.minPerK}/千字，每词 ≤${r.oral.maxPerWord}`);
   } catch (e) { toast(e.message); }
 });
 
