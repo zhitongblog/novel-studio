@@ -57,7 +57,12 @@ const DEFAULTS = {
   },
   // 无状态分章写作：每批全新无头进程 + 精准重喂上下文包（治长篇"慢+费token"的平方级根因）。
   // 是长驻 autopilot 模式之外的可选模式；写作台勾选"无状态省钱模式"启用。
+  // 写作总闸：番茄已排期天数 + 库存折算天数 ≥ 这个数就不再续写（0=不拦）。见 cadence.runwayEnough。
+  writing: {
+    stopWhenRunwayDays: 14,
+  },
   stateless: {
+    autoResume: false,               // 引擎重启后是否自动接续上次没跑完的无状态写作（默认不接，避免崩溃后悄悄接着烧 token）
     checkEvery: 5,                   // 每 N 批插一次"全文逻辑自检"（0=关）；对齐长驻模式 autopilot.fullCheckEvery
     batchTimeoutMs: 900000,          // 单批无头调用超时（写多章 + 自检可能数分钟）
     outlineReview: true,             // 卷边界【大纲审稿门】：开新卷补大纲后，先让主编审该卷分章大纲、按意见改再写正文（对齐长驻的审稿门，只在卷边界触发、不拖速度）。false=关，退回"补大纲直接写"的自愈。
@@ -143,7 +148,7 @@ const DEFAULTS = {
     enabled: true,                   // 是否自动监控应答
     pollMs: 3000,                    // 轮询间隔
     idleConfirms: 2,                 // 连续 N 次空闲才判定"等待输入"
-    maxAutoContinue: 40,             // 最多自动"继续"多少次（防失控）
+    maxAutoContinue: 3,              // 最多自动"继续"多少次（防失控）。原默认 40≈120 章，一开就停不下来（2026-10-07 改 3）
     // 续写纪律：强制"先读后写、写完更新台账与索引"——这是对抗长篇漂移的关键。
     // 一个只收到"继续"二字的 agent 会跳过重建上下文，直接写 → 人物/伤势/时间线慢慢漂。
     continueText: '继续下一批。动笔前先重建上下文：读 continuity_ledger.md，再读最近 2 章正文与本卷 outlines/ 中对应章号段的分章大纲；据此确认当前最新章号、主角处境、未回收伏笔、欠债与伤势。然后严格按 longform-webnovel-writer 标准写下一批正文（仅正文、单章字数达标）。给每章取章名前，必须在 chapter_index.md 全表里检索，确保新章名【不与全书任何已有章名重复】（连意思高度相近的也错开），重复就换一个再用。写完务必：①把新章登记进 chapter_index.md；②更新 continuity_ledger.md（人物现状/已知信息、未回收伏笔、欠债与承诺、伤势、关键物件去向、时间线锚点）；③做常规批次自检。',

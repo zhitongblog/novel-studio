@@ -294,7 +294,7 @@ function startChapterProgressWatchdog() {
 
 // 启动一次无状态写作（后台跑、日志推 SSE、登记 rt + 落盘 stateless-active 供崩溃后自愈）。
 // 供 /api/book/stateless-start 端点与引擎启动时的 resumeStatelessRuns 共用同一条路径。
-function startStatelessRun(book, { model, batches = 1, untilTarget = false, cfg }) {
+function startStatelessRun(book, { model, batches = 1, untilTarget = false, cfg, ignoreRunway = false }) {
   const slug = book.slug;
   const control = { stopped: false };
   rtOf(slug).statelessRun = control;
@@ -302,7 +302,7 @@ function startStatelessRun(book, { model, batches = 1, untilTarget = false, cfg 
   markStatelessActive(slug, { book: book.title || slug, model, batches, untilTarget });
   pushLog(slug, { level: 'act', msg: `▶ 无状态省钱模式启动（模型 ${model}，${untilTarget ? '写到目标章数' : batches + ' 批'}）` });
   runStateless({
-    book, model, cfg, batches, untilTarget, control,
+    book, model, cfg, batches, untilTarget, control, ignoreRunway,
     onLog: (e) => pushLog(slug, { ...e, source: e.source || 'stateless' }),
     onReachedTarget: () => { try { maybeAutoPublish(getBook(slug) || book, { cfg, onLog: (e) => pushLog(slug, { ...e }) }); } catch {} },
   })
@@ -323,6 +323,15 @@ async function resumeStatelessRuns() {
   const slugs = Object.keys(map);
   if (!slugs.length) return;
   let cfg; try { cfg = loadConfig(); } catch { return; }
+  // 默认不自动接续（cfg.stateless.autoResume=true 才接）：引擎崩溃/重启后悄悄接着写，作者不知道还在烧 token。
+  // 2026-10-02 实证：桌面版退出重启后《岳雷》自动接着写，旧进程还在，两个进程同时写同一批。
+  if (cfg?.stateless?.autoResume !== true) {
+    for (const slug of slugs) {
+      clearStatelessActive(slug);
+      pushLog(slug, { level: 'warn', msg: '引擎重启：上次的无状态写作没跑完，按设置不自动接续（需要的话手动再点开始）' });
+    }
+    return;
+  }
   for (const slug of slugs) {
     const info = map[slug] || {};
     const book = getBook(slug);
@@ -2176,7 +2185,7 @@ async function api(p, req, res, u) {
         if (body.participation != null) { try { setParticipation(slug, body.participation); } catch {} }
         const untilTarget = body.untilTarget === true || (book.targetChapters > 0 && body.batches == null);
         const batches = Math.max(1, parseInt(body.batches, 10) || 1);
-        const out = startStatelessRun(book, { model, batches, untilTarget, cfg });
+        const out = startStatelessRun(book, { model, batches, untilTarget, cfg, ignoreRunway: body.ignoreRunway === true });
         return json(res, 200, out);
       } catch (e) { return json(res, 500, { error: e.message }); }
     }

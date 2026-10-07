@@ -18,6 +18,7 @@ import { recordUsage, currentContextSize } from './usage.mjs';
 import { bookStats, getBook, setBookStatus, archiveFlatChapters, archiveVolumeFolders, clearFlatImport, plannedVolumes, currentVolume, plannedTotalChapters, chaptersPerVol } from './books.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
 import { runFinaleClosure } from './finale.mjs';
+import { runwayEnough } from './cadence.mjs';   // 写作总闸：番茄排期够了就不再续写
 import { finaleArtifacts, buildFinaleFixInstruction, finaleSummary } from './finaledone.mjs';
 import { continueWithVoice } from './voiceprint.mjs';
 
@@ -587,6 +588,11 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
         // 于是一路续到第 40 次上限才会停。想只写一章，光在 prompt 里说没用，得有这道闸。
         if (untilChapter > 0 && bookStats(b).maxChapter >= untilChapter) return true;
         if (b.status === '已完本') return true;
+        // 排期够了就别续写（收尾冲刺中的书除外——那是在把书写完）。见 cadence.runwayEnough。
+        if (b.status !== '收尾中') {
+          const g = runwayEnough(b, { minDays: cfg?.writing?.stopWhenRunwayDays ?? 14, maxChapter: bookStats(b).maxChapter || 0 });
+          if (g.enough) { onLog({ level: 'act', msg: `⏹ ${g.text} → 不再续写` }); return true; }
+        }
         if (finaleOn) return false;
         const t = b.targetChapters || 0; return t > 0 && bookStats(b).chapters >= t;
       },

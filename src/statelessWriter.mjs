@@ -20,6 +20,7 @@ import { reviewOutline, parseReviewItems } from './editor.mjs';   // 卷边界�
 import { setPending, takeResume } from './pending.mjs';   // 参与模式：卷口挂起等用户逐条挑 / 用户拍板后恢复
 import { deslopRange } from './deslop.mjs';   // 写后强制排版矫正闸：治「……」雪球+逐句换行，断掉自我模仿的滚雪球
 import { pacingGate } from './pacing.mjs';   // 写后节奏闸：治章长超标/事务流程当主线/量级不换挡/章末假钩子
+import { runwayEnough } from './cadence.mjs';   // 写作总闸：番茄排期够了就不再续写
 import { inspect as inspectLedger, needsSeed, ensureStructure, seedInstruction, snapshotGate } from './ledgersnap.mjs';   // 台账当前态快照：治「每批喂的是开篇旧账」
 
 // 各模型"无头 + 自动批准文件读写"的参数。
@@ -294,6 +295,7 @@ async function runCheckStateless({ book, model, cfg, onLog }) {
 export async function runStateless({
   book, model, cfg, batches = 1, batchSize, dryRun = false, onLog = () => {},
   snapshot = true, control = null, untilTarget = false, checkEvery = null, onReachedTarget = null,
+  ignoreRunway = false,
 }) {
   const m = getModel(model);
   if (!m) throw new Error('未知模型：' + model);
@@ -334,6 +336,13 @@ export async function runStateless({
       onLog({ level: 'act', msg: `已达目标章数 ${target} → 停止续写` });
       if (onReachedTarget) { try { onReachedTarget(); } catch {} }
       break;
+    }
+
+    // 排期够了就别写（每批前都看一次：写完一批、发布一批之后，下一批可能就不需要了）
+    if (!ignoreRunway && !dryRun) {
+      const minDays = cfg?.writing?.stopWhenRunwayDays ?? 14;
+      const g = runwayEnough(b, { minDays, maxChapter: bookStats(b).maxChapter || 0 });
+      if (g.enough) { onLog({ level: 'act', msg: `⏹ ${g.text} → 不再续写（要硬写可传 ignoreRunway）` }); break; }
     }
 
     onLog({ level: 'info', msg: `—— 第 ${i + 1}${untilTarget ? '' : '/' + batches} 批 ——` });

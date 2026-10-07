@@ -2,7 +2,7 @@
 // 而圣女 167 万字在读 1。每条测试对应一个当时若有这个闸就能拦住的场景。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { updateCadence, scheduleThroughDate, coverDays, readableThrough, 断更天数, 库存红线 } from '../src/cadence.mjs';
+import { updateCadence, scheduleThroughDate, coverDays, readableThrough, runwayEnough, 断更天数, 库存红线 } from '../src/cadence.mjs';
 
 const 今天 = new Date('2026-09-26T10:00:00').getTime();
 const 日 = 86400000;
@@ -115,4 +115,28 @@ test('已完本的书不算断更——《鸿门拔剑》写完了，别在书�
     { publish: { lastPublishAt: 今天 - 100 * 日, publishedMax: 563 } },
     { now: 今天, maxChapter: 563 });
   assert.equal(连载.level, 'dead');
+});
+
+// 写作总闸 runwayEnough：2026-10-07 作者原话"不要每次一写就停不下来，把我的 token 给用完了"。
+test('排期还够 20 天 → 不再续写', () => {
+  const g = runwayEnough({ publish: { scheduledThrough: '2026-10-16', publishedMax: 100, chaptersPerDay: 2 } }, { minDays: 14, now: 今天, maxChapter: 100 });
+  assert.equal(g.enough, true);
+  assert.equal(g.runway, 20);
+});
+
+test('排期只剩 5 天，但库存 20 章、每天 2 章 → 合计 15 天，也算够', () => {
+  const g = runwayEnough({ publish: { scheduledThrough: '2026-10-01', publishedMax: 100, chaptersPerDay: 2 } }, { minDays: 14, now: 今天, maxChapter: 120 });
+  assert.equal(g.stockDays, 10);
+  assert.equal(g.enough, true);
+});
+
+test('排期只剩 5 天、没库存 → 该写', () => {
+  const g = runwayEnough({ publish: { scheduledThrough: '2026-10-01', publishedMax: 100, chaptersPerDay: 2 } }, { minDays: 14, now: 今天, maxChapter: 100 });
+  assert.equal(g.enough, false);
+});
+
+test('从没发布过的新书不拦；已完本的书一律拦；minDays=0 等于关闭', () => {
+  assert.equal(runwayEnough({ publish: {} }, { minDays: 14, now: 今天, maxChapter: 30 }).enough, false);
+  assert.equal(runwayEnough({ status: '已完本', publish: {} }, { minDays: 14, now: 今天 }).enough, true);
+  assert.equal(runwayEnough({ publish: { scheduledThrough: '2026-12-31', publishedMax: 1 } }, { minDays: 0, now: 今天 }).enough, false);
 });

@@ -100,6 +100,22 @@ export function updateCadence(book, { now = Date.now(), maxChapter = 0 } = {}) {
   return { level: 'ok', daysSince, runway, stock, through, text: `更新正常（${库存文}）` };
 }
 
+// 「排期够了就别写」：番茄已排到的天数 + 已写未发的库存按每日章数折算的天数 ≥ minDays → 不必再写。
+// 由来（2026-10-07 作者原话）："不要每次一写就停不下来，把我的 token 给用完了"——
+// 几本书番茄已排到两三周后，autopilot/无状态写作照样一批接一批续写。
+// 从没发过的书（level none）不拦：那种书要的就是先写出来；已完本的书一律拦。
+export function runwayEnough(book, { minDays = 14, now = Date.now(), maxChapter = 0 } = {}) {
+  if (!(minDays > 0)) return { enough: false, days: 0, text: '' };
+  if (book?.status === '已完本') return { enough: true, days: Infinity, text: '已完本' };
+  const c = updateCadence(book, { now, maxChapter });
+  if (c.level === 'none') return { enough: false, days: 0, text: c.text };
+  const perDay = Number(book?.publish?.chaptersPerDay) || 0;
+  const stockDays = (c.stock && perDay > 0) ? Math.floor(c.stock / perDay) : 0;
+  const days = (c.runway || 0) + stockDays;
+  const text = `番茄还排着 ${c.runway || 0} 天` + (stockDays ? ` + 库存约 ${stockDays} 天` : '') + `，共约 ${days} 天（≥${minDays} 天就不续写）`;
+  return { enough: days >= minDays, days, runway: c.runway || 0, stockDays, text };
+}
+
 // 这一批稿子能买几天「不断更」的保护。
 // 13 章一次倒完只买 1 天；按 2 章/天铺开买 7 天——同样的稿子，差出一条 7 天红线。
 export function coverDays(count, chaptersPerDay) {
