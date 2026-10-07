@@ -60,3 +60,29 @@ test('issueBrief 优先报 error 级问题', () => {
   assert.doesNotMatch(s, /偏长/);
   assert.equal(issueBrief({}), '');
 });
+
+// 口语密度闸：只对 standards.oral 配了阈值的书生效；书面腔、口语词扎堆都要报出来。
+import { registerIssues, buildRegisterFixInstruction } from '../src/statelessWriter.mjs';
+function mkOralBook(text) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oral-'));
+  fs.mkdirSync(path.join(dir, 'chapters', '卷03'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'chapters', '卷03', '500测试章.txt'), text, 'utf8');
+  return dir;
+}
+test('书面腔章节被口语密度闸报出来', () => {
+  const formal = '他站在码头边上，望着远处的江面，心中思索着接下来应当如何应对这一局面。\n'.repeat(120);
+  const r = registerIssues(mkOralBook(formal), 500, 500, { minPerK: 15, maxPerWord: 2 });
+  assert.equal(r.length, 1);
+  assert.match(r[0].bits.join('；'), /口语 .*\/千字（要 ≥15）/);
+});
+test('口语词超过每章上限也报', () => {
+  const heavy = '他瞧了瞧外头，又瞧了瞧里头，自个儿瞧着江面发呆，瞧了半晌才回过神来，觉得这事儿还得慢慢掂量。\n'.repeat(60);
+  const r = registerIssues(mkOralBook(heavy), 500, 500, { minPerK: 15, maxPerWord: 2 });
+  assert.ok(r[0] && /口语词用太多：.*瞧×/.test(r[0].bits.join('；')), JSON.stringify(r));
+});
+test('自纠指令里写明每词上限与"只改语言"', () => {
+  const s = buildRegisterFixInstruction([{ file: '500测试章.txt', bits: ['口语 3/千字（要 ≥15）'] }], { minPerK: 15, maxPerWord: 2 });
+  assert.match(s, /只改语言，不改情节/);
+  assert.match(s, /每章最多 2 次/);
+  assert.match(s, /500测试章\.txt：口语 3\/千字/);
+});

@@ -21,6 +21,7 @@ import { setPending, takeResume } from './pending.mjs';   // 参与模式：卷�
 import { deslopRange } from './deslop.mjs';   // 写后强制排版矫正闸：治「……」雪球+逐句换行，断掉自我模仿的滚雪球
 import { pacingGate } from './pacing.mjs';   // 写后节奏闸：治章长超标/事务流程当主线/量级不换挡/章末假钩子
 import { runwayEnough } from './cadence.mjs';   // 写作总闸：番茄排期够了就不再续写
+import { scanRegister, scanRhythm } from './chapgate.mjs';   // 口语密度闸
 import { inspect as inspectLedger, needsSeed, ensureStructure, seedInstruction, snapshotGate } from './ledgersnap.mjs';   // 台账当前态快照：治「每批喂的是开篇旧账」
 
 // 各模型"无头 + 自动批准文件读写"的参数。
@@ -100,6 +101,46 @@ function issueBrief(g) {
   const bad = list.filter(i => !i.level || i.level === 'error');
   const pick = (bad.length ? bad : list).slice(0, 2).map(i => String(i.msg || i.text || i.kind || '').replace(/\s+/g, ' ').slice(0, 80)).filter(Boolean);
   return pick.length ? pick.join('；') : '';
+}
+
+// 🗣 口语密度闸：量本批每章的口语标记密度、单个口语词次数、叙述长句占比。
+// 由来（2026-10-02 → 10-07《国术》）：无状态写作从不量口语，连续四批写出来都是 4–12/千字的书面腔、
+// 叙述句十来个字一断，每次都得事后人工再跑一轮改写。只对在 standards.oral 里配了阈值的书生效——
+// 各书口语表/阈值不同（见 chapgate 的 ORAL_MARKER_SETS 与 skill 第五节），不配就不拦。
+function registerIssues(bookDir, from, to, oral) {
+  const out = [];
+  for (const f of chapterFilesInRange(bookDir, from, to)) {
+    let t = '';
+    try { t = fs.readFileSync(f.fp, 'utf8'); } catch { continue; }
+    const r = scanRegister(t, { minPerK: oral.minPerK, oralSet: oral.oralSet, markers: oral.markers });
+    const h = scanRhythm(t);
+    const maxPer = oral.maxPerWord || 0;
+    const overused = maxPer > 0
+      ? (r.found || []).map(s => s.match(/^(.*)×(\d+)$/)).filter(m => m && Number(m[2]) > maxPer).map(m => `${m[1]}×${m[2]}`)
+      : [];
+    const bits = [];
+    if (r.perK < oral.minPerK) bits.push(`口语 ${r.perK}/千字（要 ≥${oral.minPerK}）`);
+    if (h.longSentRatio != null && h.longSentRatio < 0.2 && h.longSentRatio > 0) bits.push(`叙述长句只占 ${Math.round(h.longSentRatio * 100)}%（要 ≥20%）`);
+    if (r.meanSent > 22) bits.push(`均句 ${r.meanSent} 字（要 ≤22）`);
+    if (overused.length) bits.push(`口语词用太多：${overused.join('、')}（每词 ≤${maxPer}）`);
+    if (bits.length) out.push({ label: f.label, file: path.basename(f.fp), bits });
+  }
+  return out;
+}
+
+function buildRegisterFixInstruction(issues, oral) {
+  return [
+    '【口语密度闸未过 · 只改语言，不改情节】下面几章读起来是书面腔/短句节拍器，请就地改写这几章的文字：',
+    ...issues.map(i => `- ${i.file}：${i.bits.join('；')}`),
+    '',
+    '改法（硬性）：',
+    `1. 每章口语标记达到 ${oral.minPerK}/千字以上即可，不要往上堆；同一个口语词每章最多 ${oral.maxPerWord || 2} 次，换着说；不许造「底下头」「脸上头」这类不存在的词。`,
+    '2. 口语主要靠句法和对白来：短分句、省主语、人物各说各的腔；不要往叙述里硬塞口语词。',
+    '3. 把碎句并成逗号连缀的流水句，让叙述里 >25 字的长句占到两成以上，同时保留一部分短句；均句长 ≤22。',
+    '4. "不是X，是Y"每章最多 1 处；"跟……似的"每章最多 2 处；不写工整对仗的金句，不让旁白替主角喝彩。',
+    '5. 情节、人名、数字、章名、系统面板原文一个都不许改；不加新场景；每章字数大致不变（仍 >3000 字）。',
+    '6. 批量替换之后逐处回读句子。改完不用写新章。',
+  ].join('\n');
 }
 
 // 跨卷自愈指令：模型在卷边界因"该卷无章级大纲"而停下（输出【大纲待审：卷NN】）时，
@@ -257,6 +298,27 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
     } catch (e) { onLog({ level: 'warn', msg: '节奏闸异常（不阻断）：' + (e.message || e) }); }
   }
 
+  // 🗣 写后口语密度闸（只对 standards.oral 配了 minPerK 的书）：不过就当批退回改语言，只自纠一轮。
+  const oral = book.standards?.oral;
+  if (oral && oral.minPerK > 0 && (after.maxChapter || 0) >= (before.maxChapter || 0) + 1) {
+    try {
+      const from = (before.maxChapter || 0) + 1, to = after.maxChapter || 0;
+      const issues = registerIssues(book.dir, from, to, oral);
+      if (issues.length) {
+        onLog({ level: 'warn', msg: `🗣 口语密度闸未过：${issues.map(i => `${i.label}（${i.bits.join('；')}）`).join('，')}` });
+        const fixMs = cfg?.stateless?.batchTimeoutMs || 900000;
+        const done = watchFix(chapterFilesInRange(book.dir, from, to), '口语自纠', onLog, { timeoutMs: fixMs });
+        done(await runHeadless(model, buildRegisterFixInstruction(issues, oral), { cwd: book.dir, cfg, timeoutMs: fixMs }));
+        const left = registerIssues(book.dir, from, to, oral);
+        onLog(left.length
+          ? { level: 'warn', msg: `🗣 口语复检仍有 ${left.length} 章未过（${left.map(i => i.label + '：' + i.bits.join('；')).join('，')}）→ 放行本批，请人工留意` }
+          : { level: 'act', msg: '🗣 口语复检通过' });
+      } else {
+        onLog({ level: 'info', msg: `🗣 口语密度闸通过（≥${oral.minPerK}/千字）` });
+      }
+    } catch (e) { onLog({ level: 'warn', msg: '口语密度闸异常（不阻断）：' + (e.message || e) }); }
+  }
+
   // 📌 写后快照闸：台账顶部的「当前态快照」是下一批唯一读得到的状态，它一过期，后面每章都在照旧账写。
   // 提示词已要求模型就地改写快照，但"要求"从来不等于"做到"——deslop 与 pacing 已经证过两回。
   // 所以这里用代码查一个【可校验的锚点】：快照里的进度章号必须追上实际最高章号，且快照不能是空骨架。
@@ -364,4 +426,4 @@ export async function runStateless({
 }
 
 // 仅供测试：自纠进度心跳的几个纯函数。
-export { chapterFilesInRange, watchFix, issueBrief };
+export { chapterFilesInRange, watchFix, issueBrief, registerIssues, buildRegisterFixInstruction };
