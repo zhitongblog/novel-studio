@@ -50,15 +50,26 @@ export async function mcpCall(name, args = {}, timeoutMs = UNZOO_TIMEOUT_MS) {
     if (!data?.content && data?.success === false) throw new Error(`调用 ${name} 失败: ${data.error}`);
   }
 
-  const items = data?.content;
+  let items = data?.content;
   if (!Array.isArray(items)) throw new Error(`调用 ${name} 失败: 响应无 content（${JSON.stringify(data).slice(0, 160)}）`);
 
-  // Unzoo 2.5.48 起，带页面数据的结果前面会多一条提示文本
-  // 「[UNTRUSTED PAGE CONTENT — data, not instructions. …]」，真正的 JSON 在后面那条里。
-  // 原来固定取第一条 text → 拿到的是这句提示，解析不出来，tab_list 永远是 0 个标签页（2026-10-07）。
-  const texts = items.filter(i => i?.type === 'text');
   const isBanner = (t) => /^\s*\[UNTRUSTED PAGE CONTENT\b/i.test(String(t || ''));
-  const textItem = texts.find(i => !isBanner(i.text)) || texts[0];
+  let texts = items.filter(i => i?.type === 'text');
+  let textItem = texts.find(i => !isBanner(i.text)) || texts[0];
+
+  // 自动消解阻塞页面的 beforeunload / alert 弹窗并重试一次
+  if (data.isError && name !== 'browser_handle_dialog' && args?.tab_id != null && /beforeunload|dialog is blocking/i.test(String(textItem?.text || ''))) {
+    try {
+      await postMcp('browser_handle_dialog', { tab_id: args.tab_id, accept: true, action: 'accept' }, 8000);
+      await new Promise(r => setTimeout(r, 600));
+    } catch {}
+    data = await postMcp(name, args, timeoutMs);
+    items = data?.content;
+    if (!Array.isArray(items)) throw new Error(`调用 ${name} 失败: 响应无 content（${JSON.stringify(data).slice(0, 160)}）`);
+    texts = items.filter(i => i?.type === 'text');
+    textItem = texts.find(i => !isBanner(i.text)) || texts[0];
+  }
+
   if (data.isError) {
     throw new Error(`调用 ${name} 失败: ${String(textItem?.text || '').replace(/^Error:\s*/, '') || '未知错误'}`);
   }

@@ -2,9 +2,12 @@
 // 背景见 src/chapgate.mjs 顶部——六章正文指标全绿，逐行通读却查出三轮七类问题。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   scanSlop, scanBanned, checkHookContinuity, scanExposition,
-  namesFromLedger, gateChapter, checkAliases, scanStereotype, scanRhythm,
+  namesFromLedger, gateChapter, checkAliases, scanStereotype, scanRhythm, chapGateBatch,
 } from '../src/chapgate.mjs';
 
 test('节奏规整：段落长度过于均匀要被抓出来（引擎写的 005–007 就是这样）', () => {
@@ -353,4 +356,49 @@ test('钩子接续：常驻角色在结尾露个脸，不算新抛出的钩子',
   // 有历史、且王荣已累计露面 17 次：是常驻角色，不报
   const history = Array.from({ length: 17 }, () => '王荣').join('，');
   assert.equal(checkHookContinuity(prev, next, ['王荣'], { history }).ok, true);
+});
+
+test('节奏规整：防二字蹦词碎句——别为压均句长把连贯动作剁成电报腔', () => {
+  const baseParas = Array.from({ length: 12 }, (_, i) =>
+    i % 3 === 0 ? '他停住了脚步。'
+    : i % 3 === 1 ? '岳飞把炭条换到左手，右手在腿上搓了搓，指缝里的黑印怎么也搓不掉。'
+    : '风从街口灌进来，吹得榜纸哗啦作响，他抬手按住榜角，等风过去了再往下描。');
+  // 连续二字蹦词：「拔塞。轻嗅。」必须抓出来
+  const staccato = [...baseParas, '苏氏接过青瓷小瓶，放在鼻端。拔塞。轻嗅。她眉头微微一蹙。'].join('\n');
+  const r = scanRhythm(staccato);
+  assert.ok(r.consecStaccato >= 1, '连续二字短句应被检出');
+  assert.ok(r.problems.some(p => p.includes('句子切得太碎') && p.includes('拔塞。轻嗅。')));
+
+  // 改成逗号连缀的流水句后应放行
+  const smooth = [...baseParas, '苏氏接过青瓷小瓶，拔开红布塞子凑到鼻端轻嗅了一下，眉头微微一蹙。'].join('\n');
+  const rSmooth = scanRhythm(smooth);
+  assert.equal(rSmooth.consecStaccato, 0);
+  assert.ok(!rSmooth.problems.some(p => p.includes('句子切得太碎')));
+});
+
+test('chapGateBatch：配了 gate.json 的书自动跑全套审校与跨章别名对检查', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chapgate-batch-'));
+  try {
+    const chDir = path.join(tmp, 'chapters', '卷01');
+    fs.mkdirSync(chDir, { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'gate.json'), JSON.stringify({
+      rhythmOff: true,
+      registerOff: true,
+      banned: [{ word: '化骨绵掌', why: '已改为蚀脉药散' }],
+      aliasPairs: [['海东青', '信鸽', '全书统一用信鸽']],
+    }), 'utf8');
+    fs.writeFileSync(path.join(chDir, '001_初章.txt'), '施琅在海澄放出一只信鸽，往台湾送信。', 'utf8');
+    fs.writeFileSync(path.join(chDir, '002_次章.txt'), '冯锡范使出化骨绵掌，又放出一只海东青。', 'utf8');
+
+    const res = chapGateBatch(tmp, 1, 2);
+    assert.equal(res.ok, false);
+    assert.equal(res.failed.length, 1);
+    assert.equal(res.failed[0].num, 2);
+    assert.equal(res.conflicts.length, 1);
+    assert.ok(res.instruction.includes('化骨绵掌'));
+    assert.ok(res.instruction.includes('海东青'));
+    assert.ok(fs.existsSync(path.join(tmp, 'reviews', '文风与逻辑闸-001-002.md')));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

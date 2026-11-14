@@ -17,6 +17,7 @@ import path from 'node:path';
 import { deslopRange } from './deslop.mjs';
 import { pacingGate } from './pacing.mjs';
 import { snapshotGate } from './ledgersnap.mjs';
+import { chapGateBatch } from './chapgate.mjs';
 
 // 🎨 文风回正（写完一批立刻跑，**在节奏闸判它之前**）。
 //
@@ -69,8 +70,66 @@ export function findDuplicateChapters(bookDir) {
     .map(([num, files]) => ({ num, files }));
 }
 
-// 一批写完后跑：先矫正排版，再查重号。两件都是 best-effort，绝不打断写作循环。
-// from/to 给 0 表示"这批的范围算不出来"，那就只查重号、不动排版（宁可不矫正，也不能误伤整本）。
+// 确定性补齐 chapter_index.md：模型写完正文经常漏登记索引（如《红衣密码》写到 008 索引还停在 003），
+// 导致下游章名查重、进度读取、完本检查看到半截旧账。这里扫 chapters/ 磁盘文件把漏登的章号补齐。
+export function syncChapterIndex(bookDir, onLog = () => {}) {
+  if (!bookDir) return { added: 0, total: 0 };
+  const root = path.join(bookDir, 'chapters');
+  const onDisk = new Map(); // num -> { num, title, vol, rel }
+  const walk = (d, relDir = '') => {
+    let ents = [];
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(d, e.name);
+      const subRel = relDir ? `${relDir}/${e.name}` : e.name;
+      if (e.isDirectory()) { walk(p, subRel); continue; }
+      if (!e.name.toLowerCase().endsWith('.txt')) continue;
+      const m = e.name.match(/^(\d{1,4})[_\-\s]*(.*)\.txt$/i);
+      if (!m) continue;
+      const num = parseInt(m[1], 10);
+      if (onDisk.has(num)) continue; // 重号留给 findDuplicateChapters 报，这里取先扫到的
+      const title = (m[2] || '').trim() || `第${num}章`;
+      const vol = relDir.split('/')[0] || '卷01';
+      onDisk.set(num, { num, title, vol, rel: `chapters/${subRel}` });
+    }
+  };
+  walk(root, '');
+  if (!onDisk.size) return { added: 0, total: 0 };
+
+  const idxPath = path.join(bookDir, 'chapter_index.md');
+  let raw = '';
+  try { raw = fs.readFileSync(idxPath, 'utf8'); } catch {}
+  const indexedNums = new Set();
+  for (const line of raw.split(/\r?\n/)) {
+    const m = line.match(/^\s*\|\s*(\d{1,4})\s*\|/);
+    if (m) indexedNums.add(parseInt(m[1], 10));
+  }
+
+  const missing = [...onDisk.values()].filter(x => !indexedNums.has(x.num)).sort((a, b) => a.num - b.num);
+  if (!missing.length) return { added: 0, total: onDisk.size };
+
+  const rows = missing.map(x => `| ${String(x.num).padStart(3, '0')} | ${x.title} | ${x.vol} | ${x.rel} | 已写 |`);
+  let next = raw.trimEnd();
+  if (!next || !/\|\s*全局章号|\|\s*---/.test(next)) {
+    const header = [
+      next || `# 章节索引（chapter_index.md）`,
+      '',
+      '| 全局章号 | 章名 | 卷 | 路径 | 状态 |',
+      '|---|---|---|---|---|',
+    ].filter((v, i) => i > 0 || Boolean(v)).join('\n');
+    next = header + '\n' + rows.join('\n') + '\n';
+  } else {
+    next = next + '\n' + rows.join('\n') + '\n';
+  }
+  try {
+    fs.writeFileSync(idxPath, next, 'utf8');
+    onLog({ level: 'info', source: 'chapters', msg: `📇 章节索引已自动补齐 ${missing.length} 章（第 ${missing.map(x => String(x.num).padStart(3, '0')).join('、')} 章）` });
+  } catch {}
+  return { added: missing.length, total: onDisk.size };
+}
+
+// 一批写完后跑：先矫正排版、补齐索引，再查重号。都是 best-effort，绝不打断写作循环。
+// from/to 给 0 表示"这批的范围算不出来"，那就只补索引与查重号、不动排版（宁可不矫正，也不能误伤整本）。
 export function afterBatch(book, { from = 0, to = 0, onLog = () => {} } = {}) {
   const out = { deslopped: 0, dupes: [] };
   if (!book?.dir) return out;
@@ -84,6 +143,11 @@ export function afterBatch(book, { from = 0, to = 0, onLog = () => {} } = {}) {
       onLog({ level: 'warn', source: 'deslop', msg: `排版矫正没跑成（${e.message}）——这一批的「……」与逐句换行没有被矫正，请留意` });
     }
   }
+
+  try {
+    const ir = syncChapterIndex(book.dir, onLog);
+    if (ir.added) out.indexed = ir.added;
+  } catch {}
 
   try {
     const dupes = findDuplicateChapters(book.dir);
@@ -147,6 +211,15 @@ export function batchGateInstruction(book, { slug, from = 0, to = 0, cfg = {}, o
     if (g?.instruction) instrs.push(g.instruction);
   } catch (e) { onLog({ level: 'warn', source: 'ledger', msg: '快照闸异常（不阻断）：' + (e.message || e) }); }
 
+  // 🔍 文风与逻辑闸（chapgate）：书目录配了 gate.json 时自动跑口语度/均句长/变异系数/二字碎句/套话/禁用词/钩子接续/跨章别名对。
+  if (cfg?.chapgate?.enabled !== false) {
+    try {
+      const g = chapGateBatch(book.dir, from > 0 ? from : 1, to, (e) => onLog({ ...e, source: 'chapgate' }),
+        { force: cfg?.chapgate?.force === true });
+      if (g?.instruction) instrs.push(g.instruction);
+    } catch (e) { onLog({ level: 'warn', source: 'chapgate', msg: '文风与逻辑闸异常（不阻断）：' + (e.message || e) }); }
+  }
+
   if (!instrs.length) { nudges.delete(key); return null; }
   if (used >= maxNudge) {
     // 【为什么不再放行】2026-09-28 的账：《崇祯》297–321 这批，真闸报了「数目堆砌」
@@ -160,9 +233,10 @@ export function batchGateInstruction(book, { slug, from = 0, to = 0, cfg = {}, o
     return { blocked: true, reason: `第 ${from}-${to} 章未过写后闸`, instruction: '' };
   }
   nudges.set(key, used + 1);
-  // 两道都没过就合成一条——分两次发会让 agent 做完第一件事就以为交差了
+  // 多道没过就合成一条——分多次发会让 agent 做完第一件事就以为交差了
   if (instrs.length === 1) return instrs[0];
   const NL = String.fromCharCode(10);
   const SEP = NL + NL + '────────' + NL + NL;
-  return instrs.join(SEP) + NL + NL + '以上两件事【都要做完】再继续写新章。';
+  const countWord = instrs.length === 2 ? '两' : String(instrs.length);
+  return instrs.join(SEP) + NL + NL + `以上${countWord}件事【都要做完】再继续写新章。`;
 }

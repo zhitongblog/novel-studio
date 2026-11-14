@@ -33,6 +33,7 @@ import { chapterProgressLine, isFirstSight } from './progress.mjs';
 import { FANQIE_CATEGORIES, isValidCategory } from './categories.mjs';
 import { finaleArtifacts, finaleSummary } from './finaledone.mjs';
 import { checkupBook } from './checkup.mjs';
+import { cleanBookAiTraces } from './deslop.mjs';
 import { updateCadence } from './cadence.mjs';
 import { oralSuggest } from './oralgate.mjs';
 import { buildAllDigests, rebuildVolumeOutlines } from './outlinerun.mjs';
@@ -47,18 +48,20 @@ import { reviewOutline, snapshotOutline, reviewEnding, buildReviseInstruction, b
 import { getPending, setPending, clearPending, setReviewEvery, getReviewEvery, getReviewDefault, setResume } from './pending.mjs';
 import { listBookFiles, readBookFile, saveBookFile, renumberGlobalChapters, deleteChapters, deleteReviews, listReviews } from './files.mjs';
 import { previewPublish, publishToFanqie, republishRange, loadPublishChapters, loadPublishedHashes,
-         bookVolNum, cleanVolSub, outlineVolSubtitle, bibleVolSubtitle } from './publish.mjs';
+         bookVolNum, cleanVolSub, outlineVolSubtitle, bibleVolSubtitle,
+         publishShortStoryToFanqie, inferShortStoryCategories } from './publish.mjs';
 import { diagnoseBook } from './diagnose.mjs';
 import { runOverhaul, runReadFix, parseReadReportFile, parseQuotaReset, getState as getOverhaulState } from './overhaul.mjs';
 import { readReview, writeReadReport } from './readreview.mjs';
 import { generateVolumeName, existingVolName } from './volname.mjs';
-import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment, updateFanqieBookInfo } from './fanqie.mjs';
+import { listProfiles as listUnzooProfiles, getFanqieBooks, getFanqieVolumes, renameFanqieVolume, stopPublish, changeFanqieCover, createFanqieBook, pushNameExperiment, scanFanqieNameExperiments, checkFanqieExperimentNames, NAME_EXP_STATUS_TEXT, updateFanqieBookInfo } from './fanqie.mjs';
 import { getCompletionReport, runFinaleClosure, locateCompletion, buildCompletionNote } from './finale.mjs';
 import { previewFanqieImport, importFromFanqie } from './import_fanqie.mjs';
 import { generateCoverBg, buildArtPromptAuto } from './imagegen.mjs';
-import { generateNameExperiment, readNameExperiment } from './nameexp.mjs';
+import { generateNameExperiment, readNameExperiment, updateNameExperimentManifest, regenerateOneExperimentCover, sanitizeFanqieExpTitle } from './nameexp.mjs';
 import { generateCoverViaChatGPT, grabCoverFromChatGPT, buildChatGptCoverPrompt } from './covergen_web.mjs';
 import { generateCoverViaGemini, grabCoverFromGemini } from './covergen_gemini.mjs';
+import { fetchAllBooksTraffic, fetchBookTrafficDetail, readCachedTrafficOverview, readCachedBookTraffic } from './traffic.mjs';
 
 const UI_DIR = path.resolve(fileURLToPath(import.meta.url), '..', '..', 'ui');
 
@@ -598,6 +601,15 @@ async function api(p, req, res, u) {
     if (p === '/api/romance-levels') return json(res, 200, ROMANCE_LEVELS);   // 建书表单用：感情线档位表
     if (p === '/api/config') return json(res, 200, maskConfig(cfg));
     if (p === '/api/logs') { const slug = u.searchParams.get('book'); return json(res, 200, rtOf(slug).logs); }
+    if (p === '/api/traffic') {
+      const cached = readCachedTrafficOverview();
+      return json(res, 200, cached ? { ok: true, cached: true, ...cached } : { ok: true, cached: false, books: [], summary: null });
+    }
+    if (p === '/api/traffic/book') {
+      const bookKey = u.searchParams.get('book') || '';
+      const cached = bookKey ? readCachedBookTraffic(bookKey) : null;
+      return json(res, 200, cached ? { ok: true, cached: true, ...cached } : { ok: true, cached: false });
+    }
     return json(res, 404, { error: 'not found' });
   }
   if (req.method === 'POST') {
@@ -661,6 +673,18 @@ async function api(p, req, res, u) {
         const hash = gitSnapshot(book.dir, '全局重编号前存档');
         const r = renumberGlobalChapters(book);
         pushLog(book.slug, { level: 'act', msg: `全局重编号完成：${r.chapters} 章连续编号（改名 ${r.renamed}，卷简介移出 ${r.intros}）` });
+        return json(res, 200, { ok: true, ...r, snapshot: hash });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/clean-ai-traces') { // 一键清除AI痕迹：清除全书章节中的 * 号、Markdown标记、（本章完）尾注、分割线、解释腔套话、叠标点
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const hash = gitSnapshot(book.dir, '一键清除AI痕迹前存档');
+        const r = cleanBookAiTraces(book.dir, {
+          from: Number(body.from) || 1,
+          to: Number(body.to) || 0,
+          onLog: (e) => pushLog(book.slug, { ...e, source: 'deslop' }),
+        });
         return json(res, 200, { ok: true, ...r, snapshot: hash });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
@@ -928,7 +952,7 @@ async function api(p, req, res, u) {
         const profilePath = (body.profilePath || (book.publish || {}).profilePath || '').trim();
         if (!profilePath) return json(res, 400, { error: '请先选择 Unzoo 账号（发布弹窗顶部）' });
         const title = String(body.title || book.title || '').trim();
-        const synopsis = String(body.synopsis || book.synopsis || '').trim();
+        let synopsis = String(body.synopsis || book.synopsis || '').trim();
         const mainCategory = String(body.mainCategory || '').trim();
         const channel = body.channel === '女频' ? '女频' : '男频';
         const signMode = body.signMode === '完本模式' ? '完本模式' : '连载模式';
@@ -950,6 +974,17 @@ async function api(p, req, res, u) {
         // 病根是 UI 那个下拉切频道时纹丝不动（列表写死一套男频子集），这里再守一道。
         if (!isValidCategory(channel, mainCategory)) {
           return json(res, 400, { error: `「${mainCategory}」不是${channel}的主分类。${channel}可选：${FANQIE_CATEGORIES[channel].join('、')}` });
+        }
+        if (synopsis.length < 50 && body.autoSynopsis !== false) {
+          try {
+            pushLog(book.slug, { level: 'act', source: 'fanqie', msg: '✍️ 简介不足 50 字，正在据设定圣经自动生成作品简介…' });
+            const gen = generateSynopsis(book, cfg);
+            if (gen && gen.synopsis && gen.synopsis.length >= 50) {
+              synopsis = gen.synopsis;
+              setBookSynopsis(book.slug, synopsis);
+              pushLog(book.slug, { level: 'act', source: 'fanqie', msg: `✍️ 已自动生成并保存作品简介（${synopsis.length} 字）` });
+            }
+          } catch {}
         }
         if (synopsis.length < 50) return json(res, 400, { error: `简介仅 ${synopsis.length} 字，番茄要求 50–500 字，请先在「作品简介」写好` });
         const slug = book.slug;
@@ -989,10 +1024,11 @@ async function api(p, req, res, u) {
         const slug = book.slug;
         const cur = nameExpJobs.get(slug);
         if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
-        const count = Math.max(2, Math.min(10, Number(body.count) || 6));
+        const count = Math.max(2, Math.min(10, Number(body.count) || 5));
+        const author = String(body.author || '光头通').trim();
         nameExpJobs.set(slug, { status: 'running', msg: '开始…' });
         const onLog = (e) => { const j = nameExpJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'nameexp' }); };
-        generateNameExperiment(book, { count, cfg, onLog })
+        generateNameExperiment(book, { count, author, cfg, onLog })
           .then((manifest) => { nameExpJobs.set(slug, { status: 'done', manifest, msg: `已生成 ${manifest.count} 个候选` }); pushLog(slug, { level: 'act', source: 'nameexp', msg: `✅ 书名实验：${manifest.count} 个候选书名+封面已生成` }); })
           .catch((e) => { nameExpJobs.set(slug, { status: 'error', error: e.message, msg: e.message }); pushLog(slug, { level: 'error', source: 'nameexp', msg: '书名实验生成失败：' + e.message }); });
         return json(res, 200, { ok: true, started: true, count });
@@ -1007,35 +1043,156 @@ async function api(p, req, res, u) {
         return json(res, 200, { ok: true, status: manifest ? 'done' : 'idle', manifest });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
+    if (p === '/api/book/name-experiment-update') {   // 保存手动修改的候选书名/钩子/作者笔名，并重烤 NN.titled.png
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const manifest = updateNameExperimentManifest(book, { items: body.items, author: body.author });
+        const j = nameExpJobs.get(book.slug);
+        if (j && j.status === 'done') j.manifest = manifest;
+        return json(res, 200, { ok: true, manifest });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/name-experiment-regen-one') {   // 单独重出某一张候选的封面底图
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const manifest = await regenerateOneExperimentCover(book, { index: body.index, cfg });
+        const j = nameExpJobs.get(book.slug);
+        if (j && j.status === 'done') j.manifest = manifest;
+        return json(res, 200, { ok: true, manifest });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/name-experiment-check') {   // 调用番茄书名查重接口检查候选书名是否可用
+      try {
+        const book = body.book ? getBook(body.book) : null;
+        const profilePath = body.profilePath || book?.publish?.profilePath || '';
+        const titles = Array.isArray(body.titles) ? body.titles : [];
+        const r = await checkFanqieExperimentNames({ profilePath, titles });
+        if (r && Array.isArray(r.results)) {
+          r.results = r.results.map(x => ({
+            ...x,
+            ok: !!x.valid,
+            msg: x.reason || '',
+          }));
+        }
+        return json(res, 200, r);
+      } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+    }
+    if (p === '/api/fanqie/name-experiments-scan') {   // 扫描番茄单书或全账号全部作品的「多书名实验」状态与开启条件
+      try {
+        const book = body.book ? getBook(body.book) : null;
+        const profilePath = body.profilePath || book?.publish?.profilePath || '';
+        const bookId = body.bookId || book?.publish?.bookId || '';
+        const r = await scanFanqieNameExperiments({ profilePath, bookId: body.all ? '' : bookId });
+        if (!r.ok) return json(res, 200, r);
+        const localBooks = loadBooks();
+        const norm = (s) => String(s || '').replace(/[\s，,。：:！!？?、·—\-]/g, '');
+        const formatExp = (exp) => {
+          if (!exp) return null;
+          const conds = (exp.condition_list || []).map(c => ({ desc: c.description, done: !!c.completed, ok: !!c.completed }));
+          const allMet = conds.length > 0 && conds.every(c => c.done);
+          const groups = (exp.record_detail?.group_list || []).map(g => g.alias_name).filter(Boolean);
+          const detailList = (exp.detail_list || []).map(d => ({ book_name: d.book_name, pic_uri: d.pic_uri })).filter(d => d.book_name);
+          if (!detailList.length && groups.length) {
+            for (const g of groups) detailList.push({ book_name: g });
+          }
+          // 番茄多书名实验真实状态码（对齐 NAME_EXP_STATUS_TEXT）：
+          // 1=未开启, 2=可开启, 3=校验中, 4=校验未通过, 5=实验中, 6=实验中, 7=已结束, 8=已终止, 9=已失效
+          const eligible = exp.status === 2 || exp.status === 4 || (exp.status === 1 && allMet);
+          const isRunning = [3, 5, 6].includes(exp.status);
+          const isDone = [7, 8].includes(exp.status);
+          return {
+            type: exp.type,
+            status: exp.status,
+            statusText: NAME_EXP_STATUS_TEXT[exp.status] || ('状态' + exp.status),
+            eligible,
+            isRunning,
+            isDone,
+            allMet,
+            conditions: conds,
+            result: exp.result || '',
+            groups,
+            detailList,
+          };
+        };
+        if (r.single) {
+          const e20 = formatExp((r.infoList || []).find(x => x.type === 1));
+          const e100 = formatExp((r.infoList || []).find(x => x.type === 2));
+          const singleBook = {
+            bookId,
+            bookName: book?.title || '',
+            exp1: e20,
+            exp2: e100,
+            exp20: e20,
+            exp100: e100,
+            canApplyNow: !!(e20?.eligible || e100?.eligible),
+            hasRunningOrReview: !!(e20?.isRunning || e100?.isRunning),
+            isDoneAny: !!(e20?.isDone || e100?.isDone),
+          };
+          return json(res, 200, { ok: true, single: true, bookId, exp20: e20, exp100: e100, exp1: e20, exp2: e100, books: [singleBook] });
+        }
+        const enriched = (r.books || []).map(fb => {
+          const matchLocal = localBooks.find(lb => lb.publish?.bookId === fb.bookId || (norm(lb.title) && norm(fb.bookName).includes(norm(lb.title))) || (norm(lb.title) && norm(lb.title).includes(norm(fb.bookName))));
+          const e20 = formatExp((fb.infoList || []).find(x => x.type === 1));
+          const e100 = formatExp((fb.infoList || []).find(x => x.type === 2));
+          const hasLocalManifest = matchLocal ? !!readNameExperiment(matchLocal)?.items?.length : false;
+          const eligibleAny = !!(e20?.eligible || e100?.eligible);
+          const hasRunningOrReview = !!(e20?.isRunning || e100?.isRunning);
+          const isDoneAny = !!(e20?.isDone || e100?.isDone);
+          return {
+            bookId: fb.bookId,
+            bookName: fb.bookName,
+            aliasName: fb.aliasName,
+            chapterNum: fb.chapterNum,
+            wordNumber: fb.wordNumber,
+            thumbUrl: fb.thumbUrl,
+            localSlug: matchLocal?.slug || '',
+            localTitle: matchLocal?.title || '',
+            hasLocalManifest,
+            exp1: e20,
+            exp2: e100,
+            exp20: e20,
+            exp100: e100,
+            eligibleAny,
+            canApplyNow: eligibleAny,
+            hasRunningOrReview,
+            isDoneAny,
+          };
+        });
+        return json(res, 200, { ok: true, single: false, books: enriched });
+      } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+    }
     if (p === '/api/book/push-name-experiment') {   // 把书名实验候选(书名+封面)推到番茄「多书名实验·实验配置」(设置别名)
       try {
         const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
         const pc = book.publish || {};
-        if (!pc.profilePath || !pc.bookId) return json(res, 400, { error: '该书未配番茄账号/bookId（先在发布里配好账号并选中番茄书籍）' });
+        const profilePath = body.profilePath || pc.profilePath || '';
+        const bookId = body.bookId || pc.bookId || '';
+        const bookTitle = body.bookName || pc.bookName || book.title;
+        if (!profilePath && !bookId) return json(res, 400, { error: '该书未配番茄账号/bookId（先在发布里配好账号并选中番茄书籍）' });
         const manifest = readNameExperiment(book);
-        if (!manifest || !(manifest.items || []).length) return json(res, 400, { error: '还没有书名实验，请先点「🧪 书名实验」生成候选书名+封面' });
-        // 组装 items：书名 + 对应封面绝对路径（experiment/NN.png）。可只推指定序号(body.pick=[1,3,...])。
+        if (!manifest || !(manifest.items || []).length) return json(res, 400, { error: '还没有书名实验，请先点「✨ 生成候选书名+封面」' });
+        // 组装 items：书名 + 对应封面绝对路径（优先 NN.titled.png，没有退回 NN.png），最多取前 5 个对齐番茄上限
         const pick = Array.isArray(body.pick) && body.pick.length ? new Set(body.pick.map(Number)) : null;
         const items = (manifest.items || [])
           .filter(it => it && it.title && (!pick || pick.has(it.i)))
+          .slice(0, 5)
           .map(it => {
-            // 优先用【带书名】的封面(NN.titled.png，UI 推送前烤好的)，没有才退回无字底图(NN.png)
             let cover = '';
             if (it.bg) {
               const titled = path.join(book.dir, 'experiment', it.bg.replace(/\.png$/i, '') + '.titled.png');
               const bg = path.join(book.dir, 'experiment', it.bg);
               cover = fs.existsSync(titled) ? titled : (fs.existsSync(bg) ? bg : '');
             }
-            return { title: String(it.title).trim(), coverPath: cover };
+            return { title: sanitizeFanqieExpTitle(it.title), coverPath: cover };
           });
         if (!items.length) return json(res, 400, { error: '没有可推的候选书名' });
-        const autoSubmit = !!body.autoSubmit;   // 默认 false：填好停在实验配置，让用户核对后自己「开启实验」(不可逆)
+        const autoSubmit = !!body.autoSubmit;
         const slug = book.slug;
         const cur = nameExpPushJobs.get(slug);
         if (cur && cur.status === 'running') return json(res, 200, { ok: true, started: true, already: true });
         nameExpPushJobs.set(slug, { status: 'running', msg: '开始…' });
         const onLog = (e) => { const j = nameExpPushJobs.get(slug); if (j) j.msg = e.msg; pushLog(slug, { ...e, source: 'nameexp' }); };
-        pushNameExperiment({ bookId: pc.bookId, bookTitle: pc.bookName || book.title, items, profilePath: pc.profilePath, autoSubmit, onLog })
+        pushNameExperiment({ bookId, bookTitle, items, profilePath, autoSubmit, onLog })
           .then((r) => {
             if (r.ok) {
               nameExpPushJobs.set(slug, { status: 'done', submitted: !!r.submitted, semiManual: !!r.semiManual, filled: r.filled || 0, msg: r.msg });
@@ -1602,6 +1759,29 @@ async function api(p, req, res, u) {
       try { return json(res, 200, await listUnzooProfiles()); }
       catch (e) { return json(res, 200, { ok: false, error: e.message, profiles: [] }); }
     }
+    if (p === '/api/traffic/overview') {   // 全账号番茄作品流量与收益大盘采集
+      try {
+        const r = await fetchAllBooksTraffic({
+          profilePath: body.profilePath || '',
+          includeIncome: body.includeIncome !== false,
+        });
+        return json(res, 200, r);
+      } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
+    }
+    if (p === '/api/traffic/book') {   // 单书深度流量趋势 + 渠道构成 + 章节流失率Top毒点 + 收益诊断
+      try {
+        const slug = body.book ? slugOf(body.book) : '';
+        const r = await fetchBookTrafficDetail({
+          profilePath: body.profilePath || '',
+          bookId: body.bookId || '',
+          slug,
+          days: Number(body.days) || 14,
+          includeIncome: body.includeIncome !== false,
+          onLog: (e) => slug && pushLog(slug, { ...e, source: 'traffic' }),
+        });
+        return json(res, 200, r);
+      } catch (e) { return json(res, 200, { ok: false, error: e.message }); }
+    }
     if (p === '/api/fanqie/books') {   // 列出某番茄账号下全部书籍(title+bookId)，供"从番茄选书"
       try {
         const profilePath = body.profilePath;
@@ -1712,6 +1892,28 @@ async function api(p, req, res, u) {
           .then(r => pushLog(book.slug, { level: 'act', source: 'fanqie', msg: `番茄发布结束：新发 ${r.published || 0} 章${r.edited ? `、同步重写 ${r.edited} 章` : ''}，状态 ${r.status || '-'}${r.error ? '，错误 ' + r.error : ''}` }))
           .catch(e => pushLog(book.slug, { level: 'error', source: 'fanqie', msg: '番茄发布异常：' + e.message }));
         return json(res, 200, { ok: true, started: true, limit });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/book/publish-short') {   // 番茄「短故事（短篇）」一键合成存草稿/发布
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 400, { error: '找不到书' });
+        const draftOnly = body.draftOnly !== false;
+        const trialRatio = Number(body.trialRatio) || 0.3;
+        const categories = Array.isArray(body.categories) && body.categories.length ? body.categories : inferShortStoryCategories(book);
+        const itemId = body.itemId || '';
+        publishShortStoryToFanqie(book, {
+          draftOnly, trialRatio, categories, itemId,
+          onLog: (e) => pushLog(book.slug, { ...e, source: 'fanqie-short' }),
+        })
+          .then(r => pushLog(book.slug, {
+            level: r.ok ? 'act' : 'error',
+            source: 'fanqie-short',
+            msg: r.ok
+              ? `番茄短故事${draftOnly ? '存草稿' : '提交发布'}成功：itemId=${r.itemId}，合并 ${r.chapters} 章（约 ${r.words} 字），分类=[${(r.categories || []).join(', ')}]`
+              : `番茄短故事失败：${r.error || '未知错误'}`,
+          }))
+          .catch(e => pushLog(book.slug, { level: 'error', source: 'fanqie-short', msg: '番茄短故事异常：' + e.message }));
+        return json(res, 200, { ok: true, started: true, draftOnly, categories });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/book/web-write') {   // 网页版写作：后台驱动 通义/ChatGPT/Claude 网页版写小说，日志推 SSE

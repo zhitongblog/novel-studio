@@ -3,8 +3,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { publishBook, getFanqieMaxChapter, getFanqieVolumes, createFanqieVolumes, renameFanqieVolume, numToCn } from './fanqie.mjs';
-import { setBookPublish } from './books.mjs';
+import { publishBook, getFanqieMaxChapter, getFanqieVolumes, createFanqieVolumes, renameFanqieVolume, numToCn, publishShortStoryOnFanqie } from './fanqie.mjs';
+import { setBookPublish, parseTotalWords } from './books.mjs';
+import { loadBooks } from './store.mjs';
 import { assertPlatform } from './platform.mjs';
 import { scheduleThroughDate, coverDays, updateCadence } from './cadence.mjs';
 import { getQidianMaxChapter, publishChapterToQidian } from './qidian.mjs';
@@ -12,6 +13,27 @@ import { getQidianMaxChapter, publishChapterToQidian } from './qidian.mjs';
 // —— 排期起始日 ——
 function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
 function fmtYMD(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+
+// 统计同一番茄账号(profilePath)下，在指定日期(YYYY-MM-DD)已有排期的其他连载书数量。
+// 番茄限制同一自然日最多更新约 6 本连载作品（超出报「更新连载模式作品数超出每日上限」）。
+function countProfileBooksScheduledOn(profilePath, selfBookId, ymd) {
+  if (!profilePath || !ymd) return 0;
+  const normP = String(profilePath).replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
+  let count = 0;
+  try {
+    for (const b of loadBooks()) {
+      const p = b.publish || {};
+      if (!p.bookId || String(p.bookId) === String(selfBookId || '')) continue;
+      if (b.status === '已完本') continue;
+      const bp = String(p.profilePath || '').replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
+      if (bp !== normP) continue;
+      const through = String(p.scheduledThrough || '').slice(0, 10);
+      if (through && through >= ymd) count++;
+    }
+  } catch {}
+  return count;
+}
+
 // 规则：读番茄最新章日期(latestDateStr)，晚于今天→以它为起点；今天或更早→从今天起。
 // 用户手动设了更晚的日期(manualStr)则尊重其更晚者。返回 Date(当天0点)。
 function computeScheduleStart(latestDateStr, manualStr) {
@@ -28,15 +50,43 @@ function computeScheduleStart(latestDateStr, manualStr) {
   }
   return start;
 }
-// 是否需要走"预约排期"：每日限量 / 番茄已排到未来(需接续) / 用户手动指定了日期。返回 {scheduled, start, reason}。
-function resolveSchedule(pc, latestDateStr) {
+// 是否需要走"预约排期"：每日限量 / 番茄已排到未来(需接续) / 用户手动指定了日期 / 同账号当日连载作品数已满。返回 {scheduled, start, initialDailyCount, reason}。
+function resolveSchedule(pc, latestDateStr, latestDateCount = 0) {
   const today = startOfDay(new Date());
   const latestFuture = !!latestDateStr && (() => { const d = new Date(String(latestDateStr).replace(' ', 'T')); return !isNaN(d.getTime()) && startOfDay(d).getTime() > today.getTime(); })();
   const isDaily = pc.chaptersPerDay && pc.chaptersPerDay !== 'max';
-  if (!isDaily && !latestFuture && !pc.scheduledStartDate) return { scheduled: false, start: '', reason: 'immediate' };
+  const MAX_BOOKS_PER_DAY = 6;
+  const todayFull = countProfileBooksScheduledOn(pc.profilePath, pc.bookId, fmtYMD(today)) >= MAX_BOOKS_PER_DAY;
+  if (!isDaily && !latestFuture && !pc.scheduledStartDate && !todayFull) return { scheduled: false, start: '', initialDailyCount: 0, reason: 'immediate' };
   const start = computeScheduleStart(latestDateStr, pc.scheduledStartDate);
-  const reason = latestFuture ? `接续番茄已排期到 ${latestDateStr}` : (pc.scheduledStartDate ? '按设置' : '从今天起');
-  return { scheduled: true, start: fmtYMD(start), reason };
+  let initialDailyCount = 0;
+  let reason = latestFuture ? `接续番茄已排期到 ${latestDateStr}` : (pc.scheduledStartDate ? '按设置' : '从今天起');
+  const limit = isDaily ? (parseInt(pc.chaptersPerDay, 10) || 0) : 0;
+  if (latestFuture && limit > 0 && latestDateCount > 0) {
+    const latestDay = startOfDay(new Date(String(latestDateStr).replace(' ', 'T')));
+    if (start.getTime() === latestDay.getTime()) {
+      if (latestDateCount >= limit) {
+        start.setDate(start.getDate() + 1);
+        reason = `接续番茄已排期（${String(latestDateStr).slice(0, 10)} 已排满 ${latestDateCount} 章，顺延至次日）`;
+      } else {
+        initialDailyCount = latestDateCount;
+        reason = `接续番茄已排期到 ${latestDateStr}（当日已排 ${latestDateCount}/${limit} 章）`;
+      }
+    }
+  }
+  // 若目标起始日同账号下已有 ≥6 本其他连载书排期，且用户未强行锁定更早日期，则自动顺延至首个未满额日期
+  if (!pc.scheduledStartDate) {
+    let guard = 0;
+    while (guard < 60 && countProfileBooksScheduledOn(pc.profilePath, pc.bookId, fmtYMD(start)) >= MAX_BOOKS_PER_DAY) {
+      start.setDate(start.getDate() + 1);
+      initialDailyCount = 0;
+      guard++;
+    }
+    if (guard > 0) {
+      reason = `同账号前序日期连载作品排期已满，自动错峰顺延至 ${fmtYMD(start)}`;
+    }
+  }
+  return { scheduled: true, start: fmtYMD(start), initialDailyCount, reason };
 }
 
 // 图书卷目录名 → 番茄新建卷用的卷名。"卷14" → "第十四卷"；"卷14_少年游" → "第十四卷：少年游"。
@@ -192,7 +242,15 @@ async function syncVolNamesFromLocal(book, vm, pc, onLog) {
         profilePath: pc.profilePath, bookId: pc.bookId,
         num, oldName: fqName, newName: wantSub, onLog,
       });
-      if (r?.ok) { renamed++; onLog({ level: 'info', msg: `✅ 第${num}卷已更名为「${wantSub}」` }); }
+      if (r?.ok) {
+        renamed++;
+        const nextName = r.after || want;
+        vm.map[localVol] = nextName;
+        if (Array.isArray(vm.fanqieVolumes)) {
+          vm.fanqieVolumes = vm.fanqieVolumes.map(v => v === fqName ? nextName : v);
+        }
+        onLog({ level: 'info', msg: `✅ 第${num}卷已更名为「${wantSub}」` });
+      }
       else onLog({ level: 'warn', msg: `第${num}卷改名没成功：${r?.error || '未知'}（不影响发章）` });
     } catch (e) {
       onLog({ level: 'warn', msg: `第${num}卷改名异常：${e.message || e}（不影响发章）` });
@@ -234,8 +292,15 @@ export function cleanChapterText(raw, title) {
     if (paras.length) s = paras.join('\n');
     else s = s.replace(/<[^>]+>/g, '');   // 兜底：没匹配到 <p> 就直接剥标签
   }
-  // 去掉残留标签 + 开头与标题完全相同的首行
-  s = s.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ');
+  // 去掉残留标签 + Markdown 星号/代码围栏/章尾套壳 + 开头与标题完全相同的首行
+  s = s.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ')
+    .replace(/^\s*```[a-zA-Z0-9_-]*\s*$/gm, '')
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/^\s*([-_]{3,}|—{3,}|─{3,}|={3,}|[*＊]{3,})\s*$/gm, '')
+    .replace(/^\s*[（(【［\-—]*\s*(本章完|全章完|本集完|未完待续)\s*[）)】］\-—。！!]*\s*$/gm, '')
+    .replace(/[（(【［]\s*(本章完|全章完|本集完|未完待续)\s*[）)】］]\s*$/g, '')
+    .replace(/[*＊]+/g, '')
+    .replace(/`([^`\n]+)`/g, '$1').replace(/`/g, '');
   const lines = s.split(/\r?\n/);
   const t = String(title || '').replace(/^第\d+章\s*/, '').trim();
   if (t && lines.length && lines[0].trim() === t) lines.shift();
@@ -371,10 +436,17 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
     else {
       const neededVols = [...new Set(newCh.map(c => c.vol))];
       const willCreate = vm.missing.filter(v => neededVols.includes(v)).map(v => volDisplayName(v));
-      volumes = { map: vm.map, missing: vm.missing, willCreate, fanqieVolumes: vm.fanqieVolumes };
+      const totalWords = parseTotalWords(book?.standards?.totalWords);
+      const localVolCount = new Set(all.map(c => c.vol)).size || 1;
+      const avgPerVol = all.length / localVolCount;
+      const shortStoryWarn = (totalWords > 0 && totalWords <= 150000) || (willCreate.length > 0 && avgPerVol < 4);
+      if (shortStoryWarn) {
+        onLog({ level: 'warn', msg: `⚠️ 短篇/少章分卷提示：本书体量较小（均每卷 ${avgPerVol.toFixed(1)} 章），开启「按图书分卷建卷」会在番茄新建不可删除的分卷；短篇建议关闭此项（直接单卷顺发）` });
+      }
+      volumes = { map: vm.map, missing: vm.missing, willCreate, fanqieVolumes: vm.fanqieVolumes, shortStoryWarn };
     }
   }
-  const sched = resolveSchedule(pc, fm.latestDate);
+  const sched = resolveSchedule(pc, fm.latestDate, fm.latestDateCount || 0);
   // 断更账：同一批稿子，一次倒完只买 1 天保护，按 N 章/天铺开买 ceil(章数/N) 天。
   // 七天红线是番茄停推荐的门槛，所以这笔账要在【按下发布之前】摆出来，不能事后复盘。
   const cover = coverDays(newCh.length, pc.chaptersPerDay);
@@ -421,12 +493,18 @@ export async function republishRange(book, { from, to, limit = 0, dates = null, 
   // useAI 必须带上：原来这里漏了它，编辑重发一律按「否」申报，书里设了「是」也不管用（2026-10-02 国术实证）
   const config = { editMode: true, bookId: pc.bookId, intervalSeconds: pc.intervalSeconds || 3, fanqieVolumes, useAI: pc.useAI !== false };
   const r = await publishBook({ profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title, chapters: chs, config, onLog });
-  // 手工重发过的章要刷新指纹基线，否则下一次自动同步会把它们当成"又被重写"再覆盖一遍。
-  if (r.ok) {
+  // 手工重发过的章要刷新指纹基线（即使中途因每日字数上限中断，也把已成功替换的章写入指纹基线）。
+  if (r.ok || (r.published || 0) > 0) {
     const hs = loadPublishedHashes(book);
-    // 被番茄拒收的章没改上去——不能记成"已同步"，否则下次自动同步会以为线上已是新稿
-    const rejected = new Set((r.rejected || []).map(x => String(x.num)));
-    for (const c of chs) if (c && c.num && c.hash && !rejected.has(String(c.num))) hs[String(c.num)] = c.hash;
+    // 被番茄拒收或未找到跳过的章没改上去——不能记成"已同步"，否则下次自动同步会以为线上已是新稿
+    const rejected = new Set([
+      ...(r.rejected || []).map(x => String(x.num)),
+      ...(r.skipped || []).map(x => String(x)),
+    ]);
+    const processedCount = r.ok ? chs.length : Math.min(chs.length, r.published || 0);
+    for (const c of chs.slice(0, processedCount)) {
+      if (c && c.num && c.hash && !rejected.has(String(c.num))) hs[String(c.num)] = c.hash;
+    }
     savePublishedHashes(book, hs);
   }
   return { ok: !!r.ok, attempted: chs.length, ...r };
@@ -553,24 +631,24 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
       onLog({ level: 'info', msg: '卷映射：' + [...new Set([...editCh, ...newCh].map(c => c.vol))].map(v => `${v}→${vm.map[v]}`).join('，') });
     }
   }
-  // matchVolumes 关、但要 edit 已发布旧章时：仍需知道番茄有几卷，否则编辑模式只会在第1卷找章，
-  // 多卷书里第2卷及以后的章永远找不到。只读一次卷列表，读失败不阻断（退化成单卷行为）。
-  if (!fanqieVolumes.length && editCh.length) {
+  // matchVolumes 关时：仍需知道番茄有几卷，编辑模式跨卷查找、新建模式默认切到最新卷（避免发进第一卷：默认）。
+  if (!fanqieVolumes.length) {
     try {
       const fv = await getFanqieVolumes({ profilePath: pc.profilePath, bookId: pc.bookId, onLog });
       if (fv.ok && fv.volumes.length > 1) {
         fanqieVolumes = fv.volumes;
-        onLog({ level: 'info', msg: `番茄共 ${fv.volumes.length} 卷，编辑重写章时会自动跨卷查找` });
+        onLog({ level: 'info', msg: `番茄共 ${fv.volumes.length} 卷（最新卷：${fv.volumes[0]}）` });
       }
     } catch (e) { onLog({ level: 'warn', msg: '读番茄卷列表失败（编辑将只在当前卷查找）：' + (e.message || e) }); }
   }
   // 排期起始日：自动接续番茄已排期（晚于今天→用它；否则→今天；手动更晚者优先）
-  const sched = resolveSchedule(pc, fm.latestDate);
+  const sched = resolveSchedule(pc, fm.latestDate, fm.latestDateCount || 0);
   if (sched.scheduled) onLog({ level: 'info', msg: `📅 排期起始日：${sched.start}（${sched.reason}）` });
   else onLog({ level: 'info', msg: '📅 立即发布（番茄无未来排期、未设每日限量）' });
   const baseConfig = {
     chaptersPerDay: pc.chaptersPerDay || 'max',
     scheduledStartDate: sched.start,
+    initialDailyCount: sched.initialDailyCount || 0,
     scheduledTime: pc.scheduledTime || '',
     intervalSeconds: pc.intervalSeconds || 3,
     matchVolumes: !!pc.matchVolumes,
@@ -637,8 +715,11 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
       // 指纹基线：把这次真正发上去的章记下来，作为下次"有没有被重写"的比对基准。
       // 只记发成功的那些，没发的不动——否则会把没发的章误标成"线上已是这版"。
       const hs = loadPublishedHashes(book);
-      // 编辑时被番茄拒收的章（标题重名等）没改上去，不能记成已同步
-      const rejectedNums = new Set(rejectedEdits.map(x => String(x.num)));
+      // 编辑时被番茄拒收或未找到跳过的章没改上去，不能记成已同步
+      const rejectedNums = new Set([
+        ...rejectedEdits.map(x => String(x.num)),
+        ...(editRes?.skipped || []).map(x => String(x)),
+      ]);
       for (const c of doneChapters) if (c && c.num && c.hash && !rejectedNums.has(String(c.num))) hs[String(c.num)] = c.hash;
       savePublishedHashes(book, hs);
     } catch {}
@@ -760,4 +841,105 @@ export async function publishToQidian(book, { limit = 0, draft = false, onLog = 
   onLog({ level: published === newCh.length ? 'info' : 'warn',
     msg: `${draft ? '存草稿' : '发布'}完成：${published}/${newCh.length} 章` });
   return { ok: !error, onlineMax: m.onlineMax, attempted: newCh.length, published, lastChapter, draft, error };
+}
+
+// ── 番茄「短故事（短篇）」一键合成发布/存草稿 ─────────────────────
+// 根据书籍題材/标签自动推断番茄短故事 5 维分类（最多 8 个，第 1 个为主分类）
+export function inferShortStoryCategories(book) {
+  const pc = book?.publish || {};
+  if (Array.isArray(pc.shortCategories) && pc.shortCategories.length) return pc.shortCategories;
+  const text = [
+    book?.title, book?.genre, book?.synopsis,
+    book?.category?.mainCategory,
+    JSON.stringify(book?.tags || {}),
+  ].filter(Boolean).join(' ');
+
+  const out = [];
+  // 1. 主分类（必选 1 个）
+  if (/悬疑|刑侦|破案|推理|凶杀|碎尸|奇案|惊悚|灵异|怪谈/.test(text)) out.push('悬疑惊悚');
+  else if (/年代|90年代|80年代|七零|八零/.test(text)) out.push('年代');
+  else if (/民国/.test(text)) out.push('民国旧影');
+  else if (/古言|宫斗|宅斗/.test(text)) out.push('宫斗宅斗');
+  else if (/历史|古代|大宋|大明|三国/.test(text)) out.push('历史古代');
+  else if (/玄幻|仙侠|修仙/.test(text)) out.push('玄幻仙侠');
+  else if (/甜宠/.test(text)) out.push('现言甜宠');
+  else if (/虐恋|追妻/.test(text)) out.push('虐心婚恋');
+  else out.push('都市日常');
+
+  // 2. 情节 / 角色 / 情绪 / 背景（最多补满 8 个）
+  const candidates = [
+    [/推理|破案|刑侦|神探|法医/, '推理'],
+    [/姐妹|表姐|闺蜜|女性互助/, '女性互助'],
+    [/规则怪谈/, '规则怪谈'],
+    [/民间奇闻|奇案/, '民间奇闻'],
+    [/逆袭|打脸/, '打脸逆袭'],
+    [/重生/, '重生'],
+    [/穿越/, '穿越'],
+    [/系统/, '系统'],
+    [/末日/, '末日求生'],
+    [/科幻/, '科幻'],
+    [/法医|医生|解剖|医院|外科/, '医生'],
+    [/特种兵|刑警|硬汉|老刑警/, '糙汉'],
+    [/霸总|首富/, '首富'],
+    [/惊悚|悬疑|凶案|碎尸/, '惊悚'],
+    [/救赎|沉冤|昭雪/, '救赎'],
+    [/爽文/, '爽文'],
+    [/虐/, '虐文'],
+    [/励志/, '励志'],
+    [/现代|1996|90年代|都市/, '现代'],
+    [/职场|公安局|医院|专案组/, '职场'],
+    [/家庭|婚姻/, '家庭'],
+    [/校园|夜校|大学/, '校园'],
+  ];
+  for (const [re, tag] of candidates) {
+    if (out.length >= 8) break;
+    if (re.test(text) && !out.includes(tag)) out.push(tag);
+  }
+  return out.slice(0, 8);
+}
+
+export async function publishShortStoryToFanqie(book, {
+  draftOnly = true,
+  trialRatio = 0.3,
+  categories = null,
+  itemId = '',
+  onLog = () => {},
+} = {}) {
+  const pc = book?.publish || {};
+  if (!pc.profilePath) throw new Error('未配置番茄账号(Unzoo profilePath)');
+  const all = loadPublishChapters(book);
+  if (!all.length) throw new Error('本地没有任何已写章节，无法发布短故事');
+
+  const cats = (Array.isArray(categories) && categories.length)
+    ? categories
+    : inferShortStoryCategories(book);
+  const useAI = pc.useAI !== false;
+  const targetItemId = itemId || pc.shortItemId || '';
+  // 封面：优先 pc.coverPath，其次书目录下 cover.png / cover.jpg（短故事封面不能出现人物）
+  const coverPath = [pc.coverPath, book?.dir && path.join(book.dir, 'cover.png'), book?.dir && path.join(book.dir, 'cover.jpg')]
+    .find(p => p && fs.existsSync(p)) || '';
+
+  const res = await publishShortStoryOnFanqie({
+    profilePath: pc.profilePath,
+    itemId: targetItemId,
+    title: pc.bookName || book.title,
+    chapters: all,
+    useAI,
+    categories: cats,
+    trialRatio: Number(pc.trialRatio || trialRatio) || 0.3,
+    coverPath,
+    draftOnly,
+    onLog,
+  });
+
+  if (res?.ok && res.itemId) {
+    try {
+      setBookPublish(book.slug || book.id, {
+        shortItemId: res.itemId,
+        shortCategories: cats,
+        lastShortPublishAt: Date.now(),
+      });
+    } catch {}
+  }
+  return res;
 }

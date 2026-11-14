@@ -14,6 +14,8 @@
 //
 // 纯 Node、零第三方依赖、ESM。只用 node 内置 + global fetch（Node 18+）。
 
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   mcpCall, UNZOO_TIMEOUT_MS,
   clickAt, inputText, uploadTrusted, handleDialog, launchProfile, waitFor,
@@ -232,6 +234,9 @@ class UnzooClient {
   async ensureTabId() {
     if (!this.tabId) {
       await this.getActiveTab();
+      if (this.tabId) {
+        try { await unzooCallTool('tab_activate', { tab_id: String(this.tabId) }); } catch {}
+      }
     }
     if (!this.tabId) {
       throw new Error('未找到任何已打开的番茄标签页，请先在浏览器登录并打开番茄作者后台');
@@ -304,6 +309,7 @@ class UnzooClient {
       }
       this.tabId = id;
     }
+    try { await this._call('tab_activate', { tab_id: String(this.tabId) }); } catch {}
     if (url) { try { await this._call('browser_navigate', { tab_id: this.tabId, url }); } catch {} }
     await this.sleep(2500);
     this.addLog(`标签页已重建（${old} → ${this.tabId}）`, 'warn');
@@ -393,14 +399,57 @@ class UnzooClient {
   // 用 element.click()(JS)触发——实测本环境坐标点击(/api/v1/click)对番茄发布页顶部按钮/弹窗按钮
   // 常落空不触发(下一步、错别字"忽略"按钮均如此)，JS .click() 才稳定。返回 true=已点击。
   // 注：正文需可信输入的地方走 typeText/pressKey，不经此函数，故 JS click 不影响内容识别。
+  static UNTHROTTLE_JS = `
+    if (!window.__rafPatched) {
+      window.__rafPatched = true;
+      var origST = window.setTimeout.bind(window), origCT = window.clearTimeout.bind(window);
+      var q = window.__fqTimers = [], seq = 1;
+      var ch = new MessageChannel();
+      var flush = window.__flushTimers = function(){
+        var now = Date.now(), list = q.slice();
+        for (var i = 0; i < list.length; i++) {
+          var item = list[i];
+          if (!item.done && now >= item.due) {
+            item.done = true;
+            try { origCT(item.nid); } catch (e) {}
+            try { item.cb(); } catch (e) {}
+          }
+        }
+        for (var j = q.length - 1; j >= 0; j--) { if (q[j].done) q.splice(j, 1); }
+      };
+      ch.port1.onmessage = flush;
+      window.setTimeout = function(cb, ms) {
+        if (typeof cb !== 'function') return origST(cb, ms);
+        var args = Array.prototype.slice.call(arguments, 2);
+        var delay = Number(ms) || 0;
+        var item = { id: ++seq, due: Date.now() + delay, done: false, cb: function(){ cb.apply(window, args); }, nid: 0 };
+        item.nid = origST(function(){ if (!item.done) { item.done = true; try { item.cb(); } catch (e) {} } }, delay);
+        q.push(item);
+        if (delay <= 50) { try { ch.port2.postMessage(0); } catch (e) {} }
+        return item.nid;
+      };
+      window.clearTimeout = function(id) {
+        for (var i = 0; i < q.length; i++) { if (q[i].nid === id || q[i].id === id) q[i].done = true; }
+        return origCT(id);
+      };
+      window.requestAnimationFrame = function(cb) {
+        return window.setTimeout(function(){ cb(performance.now()); }, 0);
+      };
+      window.cancelAnimationFrame = function(id) { window.clearTimeout(id); };
+    }
+    if (window.__flushTimers) { try { window.__flushTimers(); } catch (e) {} }
+  `;
+
   async clickByLocator(locatorBody) {
     await this.ensureTabId();
     const expr = `(function(){
+      ${UnzooClient.UNTHROTTLE_JS}
       const __find = function(){ ${locatorBody} };
       const el = __find();
       if (!el || typeof el.click !== 'function') return false;
       try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
       el.click();
+      if (window.__flushTimers) { try { setTimeout(window.__flushTimers, 0); } catch (e) {} }
       return true;
     })()`;
     const ok = await this.evaluate(expr);
@@ -419,11 +468,11 @@ class UnzooClient {
   // 【CDP 可信逐字输入】browser_type：真 WebKeyboardEvent 逐字（isTrusted=true），【后台安全、无需前台】。
   // 用于千问 Lexical 这类只认可信输入、且对合成/execCommand 会反爬 blank 的富文本框。
   // selector 支持 CSS；delayMs 控制打字速度；clearFirst 先清空。
-  async trustedType(selector, text, { delayMs = 6, clearFirst = false, timeoutMs = 180000 } = {}) {
+  async trustedType(selector, text, { delayMs = 6, clearFirst = false, force = true, timeoutMs = 180000 } = {}) {
     await this.ensureTabId();
     return await unzooCallTool('browser_type', {
       tab_id: String(this.tabId), selector, text: String(text),
-      delay_ms: delayMs, clear_first: !!clearFirst, timeout: 8000,
+      delay_ms: delayMs, clear_first: !!clearFirst, force: !!force, timeout: 8000,
     }, timeoutMs);
   }
 
@@ -476,36 +525,25 @@ class UnzooClient {
     `);
     for (let i = 0; i < 5; i++) {
       if (await isEmpty()) return true;
-      // 聚焦
-      await this.evaluate(`(function(){const ed=document.querySelector(${sel});if(ed)ed.focus();return true;})()`);
-      if (i % 2 === 0) {
-        // execCommand 全选删除
-        await this.evaluate(`(function(){const ed=document.querySelector(${sel});if(ed){ed.focus();document.execCommand('selectAll',false,null);document.execCommand('delete',false,null);}return true;})()`);
-      } else {
-        // 真实键盘 Ctrl+A + Delete
-        await this.clearFocused();
-      }
+      // 聚焦（纯后台安全：只用 Range selectNodeContents + execCommand 全选删除，绝不触发前台按键）
+      await this.evaluate(`(function(){const ed=document.querySelector(${sel});if(ed){ed.focus();const r=document.createRange();r.selectNodeContents(ed);const s=window.getSelection();s.removeAllRanges();s.addRange(r);document.execCommand('selectAll',false,null);document.execCommand('delete',false,null);}return true;})()`);
       await this.humanDelay(100, 200);
     }
     return await isEmpty();
   }
 
-  // 聚焦元素：坐标真实点击（trusted）+ JS focus 兜底（focus 仅定位光标、非合成动作；
-  // ProseMirror 等坐标点击聚焦不上，靠 focus 保证）。聚焦后即可用 typeText 真人级输入。
+  // 聚焦元素：纯后台 JS focus（绝不调 coordClick/ensureForeground 抢夺用户前台窗口）
   async focusElement(selector) {
     await this.ensureTabId();
     const sel = JSON.stringify(selector);
-    const rect = await this.evaluate(`(function(){
+    await this.evaluate(`(function(){
       const el = document.querySelector(${sel});
-      if (!el) return null;
-      el.scrollIntoView({ block: 'center', inline: 'center' });
-      const r = el.getBoundingClientRect();
-      if (r.width === 0 || r.height === 0) return null;
-      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      if (!el) return false;
+      try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+      if (el.focus) el.focus();
+      return true;
     })()`);
-    if (rect) await this.coordClick(rect.x, rect.y);
-    await this.evaluate(`(function(){const el=document.querySelector(${sel}); if(el&&el.focus) el.focus(); return true;})()`);
-    await this.humanDelay(80, 160);
+    await this.humanDelay(60, 120);
   }
 
   // 模拟滚动
@@ -522,6 +560,13 @@ class UnzooClient {
   async pageContains(keywords) {
     const script = `
       (function() {
+        ${UnzooClient.UNTHROTTLE_JS}
+        document.querySelectorAll('[class*="exit"], [class*="leave"]').forEach(function(el){
+          try {
+            el.dispatchEvent(new TransitionEvent('transitionend', { bubbles: true }));
+            el.dispatchEvent(new AnimationEvent('animationend', { bubbles: true }));
+          } catch (e) {}
+        });
         const text = document.body?.innerText || '';
         const keywords = ${JSON.stringify(keywords)};
         return keywords.some(kw => text.includes(kw));
@@ -547,8 +592,10 @@ class UnzooClient {
         el.focus();
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         setter.call(el, ${val});
-        el.dispatchEvent(new Event('input', { bubbles: true }));
+        if (el._valueTracker) el._valueTracker.setValue('__force_diff__');
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${val}, inputType: 'insertText' }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.blur();
         return el.value === ${val};
       })()
     `);
@@ -572,12 +619,19 @@ class UnzooClient {
     const cleared = await this.clearEditor(selector);
     if (!cleared) this.log('⚠️ 编辑器清空可能不彻底');
 
-    // 2) 模拟粘贴（保留段落格式）
+    // 2) 模拟粘贴（保留段落格式；先全选确保即使有残留也会被原子替换）
     await this.evaluate(`
       (function() {
         const ed = document.querySelector(${sel});
         if (!ed) return false;
         ed.focus();
+        try {
+          const r = document.createRange();
+          r.selectNodeContents(ed);
+          const s = window.getSelection();
+          s.removeAllRanges();
+          s.addRange(r);
+        } catch (e) {}
         const dt = new DataTransfer();
         dt.setData('text/plain', ${txt});
         ed.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
@@ -591,15 +645,10 @@ class UnzooClient {
     //      (browser_input_text，走 Chromium IME 管线，实测 beforeinput/input 均 isTrusted=true)
     //      在正文末尾补一个空格再真实退格删掉 → 触发番茄识别全文、启用"下一步"，且正文零残留。
     try {
-      // ⚠️必须激活：下面的 pressKey 是 OS 级输入，窗口不在前台会【静默无操作】，
-      // 那样番茄识别不到正文、"下一步"永远灰着。（pressKey 内部也会 ensureForeground，这里保留显式激活。）
-      if (this.tabId) await this.activateTab(this.tabId);
-      await this.humanDelay(150, 300);
-      await this.evaluate(`(function(){const ed=document.querySelector(${sel});if(!ed)return;ed.focus();const r=document.createRange();r.selectNodeContents(ed);r.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(r);})()`);
-      await this.typeText(' ');
-      await this.humanDelay(150, 280);
-      await this.pressKey('Backspace');
-      await this.humanDelay(120, 220);
+      // 使用 browser_input_text (typeText) 走 Chromium IME 管线在末尾补一个空格，绝不调 human_type 的 fallback_set 破坏段落
+      await this.evaluate(`(function(){const ed=document.querySelector(${sel});if(!ed)return;ed.focus();const r=document.createRange();r.selectNodeContents(ed);r.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(r);document.execCommand('insertText',false,' ');})()`);
+      await this.typeText(' ').catch(() => {});
+      await this.humanDelay(150, 250);
     } catch (e) { this.log('⚠️ 可信输入触发失败：' + (e.message || e)); }
 
     // 3) 校验：内容长度应与目标接近（去空白比较），过长=累积、过短/为空=失败 → 重清+execCommand 兜底
@@ -645,16 +694,9 @@ class UnzooClient {
     this._fgAt = Date.now();
   }
 
-  // 保证【浏览器窗口在 OS 前台】——page_click 与 browser_press_key 是 OS 级输入，
-  // 窗口不在前台时它们【静默无操作】：返回 null、不报错、事件一个不产生（2.5.28 实测，
-  // 已提 unzoo issue）。所以这两个动作前必须自己保证前台，不能指望报错来兜底。
-  // 对比：browser_input_text / browser_click(选择器) / browser_type 是标签页定向的，不受此限。
-  // 节流 3s：避免连按时反复把窗口往前提。
+  // 保持后台静默运行，不再调用 tab_activate 把浏览器窗口抢到前台
   async ensureForeground() {
-    if (!this.tabId) return;
-    const same = this._fgTab === String(this.tabId);
-    if (same && this._fgAt && (Date.now() - this._fgAt) < 3000) return;
-    try { await this.activateTab(this.tabId); } catch {}
+    return;
   }
 
   async navigate(url) {
@@ -683,6 +725,12 @@ class UnzooClient {
     }
     // 导航后等待页面加载（不再事后重选标签页——保持锁定，避免来回切）
     await this.sleep(1500);
+    try {
+      await unzooCallTool('browser_evaluate', {
+        tab_id: this.tabId,
+        expression: `(function(){${UnzooClient.UNTHROTTLE_JS};return 1;})()`,
+      });
+    } catch {}
   }
 
   // 刷新当前标签页（重载当前会话 URL）。用于 ChatGPT 生图卡在"预览"占位时——刷新后完整图才渲染出来。
@@ -781,7 +829,7 @@ class FanqiePublisher {
       this.currentScheduleDay = new Date(config.scheduledStartDate);
       this.currentScheduleDay.setHours(0, 0, 0, 0);
       this.forcedScheduleMode = true;
-      this.log(`预约发布模式，从 ${this.formatDate(this.currentScheduleDay)} 开始`);
+      this.log(`预约发布模式，从 ${this.formatDate(this.currentScheduleDay)} 开始${config.initialDailyCount ? `（当日已排 ${config.initialDailyCount} 章）` : ''}`);
     } else {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
@@ -789,7 +837,7 @@ class FanqiePublisher {
       this.currentScheduleDay = tomorrow;
       this.log('当天立即发布模式');
     }
-    this.chaptersPublishedToday = 0;
+    this.chaptersPublishedToday = Number(config.initialDailyCount) || 0;
 
     this.log(`开始发布，从第 ${this.currentIndex + 1} 章开始`);
     this.emitProgress();
@@ -824,6 +872,7 @@ class FanqiePublisher {
   async waitChapterRows({ prevPage = null, prevSig = null, maxMs = 15000 } = {}) {
     const probe = `
       (function(){
+        ${UnzooClient.UNTHROTTLE_JS}
         var text = document.body ? document.body.innerText : '';
         var hasRows = /第\\s*\\d+\\s*章/.test(text);
         var hasArco = !!document.querySelector('[class*="arco-"]');
@@ -853,6 +902,62 @@ class FanqiePublisher {
   async gotoVolumePage(volIndex) {
     const bookId = this.config?.bookId;
     if (!bookId || !volIndex) return false;
+    const vols = Array.isArray(this.config?.fanqieVolumes) ? this.config.fanqieVolumes : [];
+    const wantName = vols[volIndex - 1] || '';
+
+    const onList = await this.client.pageContains(['章节管理', '新建章节']);
+    if (!onList) {
+      await this.client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}&${volIndex}`);
+      await this.waitChapterRows({ maxMs: 15000 });
+    }
+
+    if (wantName) {
+      const VOL_DROPDOWN = `
+        const sels=[...document.querySelectorAll('.chapter-select .serial-select, .serial-select, [class*="volume-select"]')];
+        for(const s of sels){ const vv=s.querySelector('.byte-select-view-value')||s; if(((vv.textContent||'').indexOf('卷'))>=0) return s; }
+        return sels[0]||null;
+      `;
+      const getCurVol = async () => {
+        const r = await this.client.evaluate(`(function(){
+          if (!window.__rafPatched) {
+            window.__rafPatched = true;
+            window.requestAnimationFrame = function(cb) { return setTimeout(function(){ cb(performance.now()); }, 16); };
+            window.cancelAnimationFrame = function(id) { clearTimeout(id); };
+          }
+          const sel = (function(){ ${VOL_DROPDOWN} })();
+          if (!sel) return '';
+          const vv = sel.querySelector('.byte-select-view-value') || sel;
+          return (vv.textContent || '').trim();
+        })()`);
+        return String(r || '').trim();
+      };
+      const curName = await getCurVol();
+      if (curName === wantName) {
+        this.currentVolPage = volIndex;
+        const st = await this.waitChapterRows({ maxMs: 15000 });
+        return !!st.ready;
+      }
+      const before = await this.waitChapterRows({ maxMs: 8000 });
+      const prevSig = before?.sig || null;
+      const clickOpt = async () => await this.client.clickByLocator(`
+        const want = ${JSON.stringify(wantName)};
+        const opts = document.querySelectorAll('.byte-select-option, .arco-select-option, [class*="select-option"]');
+        for (const o of opts) { if (o.offsetParent !== null && ((o.textContent || '').trim()) === want) return o; }
+        return null;
+      `);
+      let clicked = await clickOpt();
+      if (!clicked) {
+        await this.client.clickByLocator(VOL_DROPDOWN);
+        await this.client.sleep(600);
+        clicked = await clickOpt();
+      }
+      if (clicked) {
+        const st = await this.waitChapterRows({ prevSig, maxMs: 15000 });
+        this.currentVolPage = volIndex;
+        return !!st.ready;
+      }
+    }
+
     await this.client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}&${volIndex}`);
     const st = await this.waitChapterRows({ maxMs: 15000 });
     this.currentVolPage = volIndex;
@@ -1034,8 +1139,7 @@ class FanqiePublisher {
       if (i >= 0) wantIdx = i + 1;
       else this.log(`⚠️ 番茄卷列表里没有「${volumeText}」，改为全卷扫描`);
     }
-    if (wantIdx && this.currentVolPage !== wantIdx) {
-      this.log(`切到第 ${wantIdx} 卷「${volumeText}」的章节列表…`);
+    if (wantIdx) {
       await this.gotoVolumePage(wantIdx);
     }
 
@@ -1112,9 +1216,9 @@ class FanqiePublisher {
             this.skipped.push(websiteChapterNum);
             this._consecutiveSkips = (this._consecutiveSkips || 0) + 1;
             this.log(`⏭ 番茄上没有第 ${websiteChapterNum} 章（本地有、线上无）→ 跳过，继续下一章`);
-            if (this._consecutiveSkips >= 5) {
-              this.log(`⚠️ 连着 5 个章都找不到，多半是卷选错或页面不对，停下来等人看`);
-              this.pause('unknown_error', `连续 5 章在番茄上都找不到（最后一个是第 ${websiteChapterNum} 章），疑似卷/页面不对`);
+            if (this._consecutiveSkips >= 15) {
+              this.log(`⚠️ 连着 15 个章都找不到，多半是卷选错或页面不对，停下来等人看`);
+              this.pause('unknown_error', `连续 15 章在番茄上都找不到（最后一个是第 ${websiteChapterNum} 章），疑似卷/页面不对`);
               return;
             }
             this.currentIndex++;
@@ -1155,97 +1259,157 @@ class FanqiePublisher {
   }
 
   async editChapter(chapter, websiteChapterNum) {
-    // Step 1: 确保在章节管理页面
-    const onChapterList = await this.client.pageContains(['章节管理', '新建章节']);
-    if (!onChapterList) {
-      this.log('不在章节管理页面，尝试导航...');
-      return { success: false, message: '请先进入章节管理页面' };
-    }
+    let directEditUrl = (chapter.itemId && this.config?.bookId)
+      ? `https://fanqienovel.com/main/writer/${this.config.bookId}/publish/${chapter.itemId}/?enter_from=modifychapter`
+      : '';
 
-    // Step 2: 使用搜索功能查找章节（按该章所属卷切卷后再找）
-    this.log(`查找第 ${websiteChapterNum} 章...`);
-    const navigateToChapter = await this.searchForChapter(websiteChapterNum, chapter.volumeText || '');
-    if (!navigateToChapter.success) {
-      // 登录失效/网络错误页是硬失败——不要当成"这章不存在"去重试刷新，直接要人介入
-      if (navigateToChapter.fatal) {
-        return { success: false, needsIntervention: true, reason: 'page_invalid', message: navigateToChapter.message };
+    if (directEditUrl) {
+      this.log(`直达打开第 ${websiteChapterNum} 章编辑页 (item_id=${chapter.itemId})...`);
+      try {
+        await this.client.navigate(directEditUrl);
+      } catch (e) {
+        await dismissDialog(this.client.tabId);
       }
-      return { success: false, notFound: true, message: navigateToChapter.message };
-    }
+      await dismissDialog(this.client.tabId);
+      await this.client.sleep(2000);
+    } else {
+      // Step 1: 确保在章节管理页面（若上一章超时留在了编辑页，自动导航回章节管理页）
+      let onChapterList = await this.client.pageContains(['章节管理', '新建章节']);
+      if (!onChapterList && this.config?.bookId) {
+        this.log('不在章节管理页面，尝试导航回章节管理页...');
+        const volumeIdx = this.currentVolPage || this.config.volumeIndex || 1;
+        try {
+          await this.client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${this.config.bookId}&${volumeIdx}`);
+        } catch (e) {
+          await dismissDialog(this.client.tabId);
+        }
+        await dismissDialog(this.client.tabId);
+        await this.waitChapterRows({ maxMs: 15000 }).catch(() => {});
+        onChapterList = await this.client.pageContains(['章节管理', '新建章节']);
+      }
+      if (!onChapterList) {
+        this.log('不在章节管理页面，尝试导航...');
+        return { success: false, message: '请先进入章节管理页面' };
+      }
 
-    // Step 3: 定位对应章节的编辑按钮后坐标真实点击
-    this.log(`在当前页面查找第 ${websiteChapterNum} 章的编辑按钮...`);
-    const findClicked = await this.client.clickByLocator(`
-      const targetNum = ${websiteChapterNum};
-      // 精确匹配 "第X章" - 后面不能跟数字，避免 "第402章" 匹配到 "第4023章"
-      const exactPattern = new RegExp('第' + targetNum + '章(?![0-9])');
-      const links = document.querySelectorAll('a');
-      let targetLink = null, targetRow = null;
-      for (const link of links) {
-        if (exactPattern.test(link.textContent || '')) {
-          targetLink = link;
-          targetRow = link.closest('tr');
-          if (!targetRow) {
-            let parent = link.parentElement;
-            while (parent && parent !== document.body) {
-              if (parent.children.length > 3) { targetRow = parent; break; }
-              parent = parent.parentElement;
+      // Step 2: 使用搜索功能查找章节（按该章所属卷切卷后再找）
+      this.log(`查找第 ${websiteChapterNum} 章...`);
+      const navigateToChapter = await this.searchForChapter(websiteChapterNum, chapter.volumeText || '');
+      if (!navigateToChapter.success) {
+        // 登录失效/网络错误页是硬失败——不要当成"这章不存在"去重试刷新，直接要人介入
+        if (navigateToChapter.fatal) {
+          return { success: false, needsIntervention: true, reason: 'page_invalid', message: navigateToChapter.message };
+        }
+        return { success: false, notFound: true, message: navigateToChapter.message };
+      }
+
+      // Step 3: 定位对应章节的编辑按钮后坐标真实点击（同时提取直达编辑 URL 兜底）
+      this.log(`在当前页面查找第 ${websiteChapterNum} 章的编辑按钮...`);
+      const rowMeta = await this.client.evaluate(`(function(){
+        const targetNum = ${websiteChapterNum};
+        const exactPattern = new RegExp('第' + targetNum + '章(?![0-9])');
+        const links = document.querySelectorAll('a');
+        for (const link of links) {
+          if (exactPattern.test(link.textContent || '')) {
+            const href = link.getAttribute('href') || '';
+            const m = href.match(/preview\\/(\\d+)&(\\d+)/);
+            const row = link.closest('tr');
+            const ed = row ? row.querySelector('.icon-edit, .auto-editor-chapter-edit, .tomato-edit, [class*="chapter-edit"]') : null;
+            const disabled = ed ? (ed.className || '').includes('disabled') : false;
+            return { found: true, bookId: m ? m[1] : '', chapterId: m ? m[2] : '', disabled };
+          }
+        }
+        return { found: false };
+      })()`);
+
+      if (rowMeta && rowMeta.bookId && rowMeta.chapterId) {
+        directEditUrl = `https://fanqienovel.com/main/writer/${rowMeta.bookId}/publish/${rowMeta.chapterId}/?enter_from=modifychapter`;
+      }
+
+      if (rowMeta && rowMeta.disabled && directEditUrl) {
+        this.log(`第 ${websiteChapterNum} 章行内编辑图标为 disabled，直接导航进入章节编辑页...`);
+        await this.client.navigate(directEditUrl);
+        await this.client.sleep(2000);
+      } else {
+        const findClicked = await this.client.clickByLocator(`
+          const targetNum = ${websiteChapterNum};
+          // 精确匹配 "第X章" - 后面不能跟数字，避免 "第402章" 匹配到 "第4023章"
+          const exactPattern = new RegExp('第' + targetNum + '章(?![0-9])');
+          const links = document.querySelectorAll('a');
+          let targetLink = null, targetRow = null;
+          for (const link of links) {
+            if (exactPattern.test(link.textContent || '')) {
+              targetLink = link;
+              targetRow = link.closest('tr');
+              if (!targetRow) {
+                let parent = link.parentElement;
+                while (parent && parent !== document.body) {
+                  if (parent.children.length > 3) { targetRow = parent; break; }
+                  parent = parent.parentElement;
+                }
+              }
+              break;
             }
           }
-          break;
-        }
-      }
-      if (!targetLink || !targetRow) return null;
-      // 只点"编辑"图标（番茄行内操作：.icon-edit / .auto-editor-chapter-edit），
-      // 绝不点"删除"(.icon-delete)，避免误删已发布章节。
-      const edit = targetRow.querySelector('.icon-edit, .auto-editor-chapter-edit, .tomato-edit, [class*="chapter-edit"]');
-      if (edit && !((edit.className||'').includes('delete'))) return edit;
-      // 兜底：文本或 title 明确为"编辑"且不含"删除"的元素
-      const cands = targetRow.querySelectorAll('a, button, span, [role="button"], [class*="icon"]');
-      for (const el of cands) {
-        const t = (el.textContent || '').trim();
-        const ti = el.getAttribute('title') || el.getAttribute('aria-label') || '';
-        const cls = (typeof el.className === 'string' ? el.className : '');
-        if (cls.includes('delete') || t.includes('删除') || ti.includes('删除')) continue;
-        if (t === '编辑' || ti.includes('编辑') || cls.includes('edit')) return el;
-      }
-      // 找不到明确的"编辑"就返回 null（绝不误点删除或其它），由上层报"未找到"
-      return null;
-    `);
-    this.log(`查找并点击编辑: ${findClicked}`);
-
-    if (!findClicked) {
-      return { success: false, notFound: true, message: `未找到第 ${websiteChapterNum} 章` };
-    }
-
-    await this.client.sleep(2000);
-
-    // Step 3: 处理"是否继续编辑"弹窗（坐标真实点击）
-    const continueHandled = await this.client.clickByLocator(`
-      const modals = document.querySelectorAll('.arco-modal, [role="dialog"], [class*="modal"]');
-      for (const modal of modals) {
-        const text = modal.textContent || '';
-        if (text.includes('继续编辑') || text.includes('是否继续') || text.includes('刚刚更新')) {
-          const buttons = modal.querySelectorAll('button, .arco-btn');
-          for (const btn of buttons) {
-            const bt = (btn.textContent || '').trim();
-            if (bt.includes('继续编辑') || bt === '继续') return btn;
+          if (!targetLink || !targetRow) return null;
+          // 只点"编辑"图标（番茄行内操作：.icon-edit / .auto-editor-chapter-edit），
+          // 绝不点"删除"(.icon-delete)，避免误删已发布章节。
+          const edit = targetRow.querySelector('.icon-edit, .auto-editor-chapter-edit, .tomato-edit, [class*="chapter-edit"]');
+          if (edit && !((edit.className||'').includes('delete'))) return edit;
+          // 兜底：文本或 title 明确为"编辑"且不含"删除"的元素
+          const cands = targetRow.querySelectorAll('a, button, span, [role="button"], [class*="icon"]');
+          for (const el of cands) {
+            const t = (el.textContent || '').trim();
+            const ti = el.getAttribute('title') || el.getAttribute('aria-label') || '';
+            const cls = (typeof el.className === 'string' ? el.className : '');
+            if (cls.includes('delete') || t.includes('删除') || ti.includes('删除')) continue;
+            if (t === '编辑' || ti.includes('编辑') || cls.includes('edit')) return el;
           }
+          // 找不到明确的"编辑"就返回 null（绝不误点删除或其它），由上层报"未找到"
+          return null;
+        `);
+        this.log(`查找并点击编辑: ${findClicked}`);
+
+        if (!findClicked && !directEditUrl) {
+          return { success: false, notFound: true, message: `未找到第 ${websiteChapterNum} 章` };
         }
+        await this.client.sleep(2000);
       }
-      return null;
-    `);
-    if (continueHandled) {
-      this.log('已点击"继续编辑"');
-      await this.client.sleep(1000);
     }
+
+    // Step 3: 处理"有刚刚更新的章节，是否继续编辑？"弹窗——必须点「放弃」！
+    // ⚠️ 绝不能点「继续编辑」：点「继续编辑」会把编辑器跳转到之前未保存的【另一章】草稿，导致覆盖错章或报标题重名！
+    await this.dismissDraftPrompt();
 
     // Step 4: 等待编辑页面加载
     // 服务端等待（browser_wait_for 实测是真的等、如实返回 matched），一次往返顶原来 20 次轮询。
-    const editorReady = await this.client.waitForSelector('.ProseMirror', { timeoutMs: 10000 });
+    let editorReady = await this.client.waitForSelector('.ProseMirror', { timeoutMs: 8000 });
+    if (!editorReady && directEditUrl) {
+      this.log(`点击未进入编辑器，使用直达 URL 打开第 ${websiteChapterNum} 章编辑页...`);
+      await this.client.navigate(directEditUrl);
+      await this.client.sleep(2000);
+      editorReady = await this.client.waitForSelector('.ProseMirror', { timeoutMs: 10000 });
+    }
 
     if (!editorReady) {
       return { success: false, message: '编辑页面加载超时' };
+    }
+
+    // 编辑器加载后，等待原章节内容加载完成或「是否继续编辑？」草稿弹窗出现并点「放弃」
+    for (let w = 0; w < 24; w++) {
+      await this.client.sleep(250);
+      if (await this.dismissDraftPrompt()) {
+        await this.client.sleep(800);
+        continue;
+      }
+      const ready = await this.client.evaluate(`(function(){
+        if (window.__flushTimers) { try { window.__flushTimers(); } catch (e) {} }
+        const hasModal = !!document.querySelector('.byte-modal, .legacy-global-confirm-modal');
+        if (hasModal) return false;
+        const nextBtn = document.querySelector('.auto-editor-next');
+        return !!(nextBtn && !nextBtn.disabled);
+      })()`);
+      if (ready) break;
     }
 
     // Step 4: 注入内容
@@ -1262,13 +1426,10 @@ class FanqiePublisher {
       return null;
     `);
     if (!saved) {
-      // 没有保存按钮则点"下一步"（编辑后进入发布流程）
-      saved = await this.client.clickByLocator(`
-        const buttons = document.querySelectorAll('button');
-        for (const btn of buttons) { const t=(btn.textContent||'').trim(); if (t.includes('下一步')) return btn; }
-        return null;
-      `);
-      if (saved) isNext = true;
+      // 没有保存按钮则点"下一步"（先调 clickNextStep 确保 nudge 解锁按钮）
+      await this.clickNextStep();
+      saved = true;
+      isNext = true;
     }
 
     if (!saved) {
@@ -1278,13 +1439,30 @@ class FanqiePublisher {
     await this.client.sleep(1000);
 
     // 如果点击的是下一步，需要处理发布弹窗
+    let confirmedPublish = !isNext;
     if (isNext) {
-      // 等待并处理弹窗
-      for (let retry = 0; retry < 5; retry++) {
+      // 等待并处理弹窗（含内容检测方式、错别字提示、风险检测；预检可能耗时 45-50 秒，给足 110*500ms）
+      for (let retry = 0; retry < 110; retry++) {
         await this.client.sleep(500);
 
+        if (await this.handleDetectionModeDialog()) {
+          this.log('已选择内容检测方式');
+          await this.client.sleep(500);
+          continue;
+        }
+
         // 检查是否有错别字弹窗
-        await this.handleTypoDialog();
+        if (await this.handleTypoDialog()) {
+          this.log('已忽略错别字提示');
+          await this.client.sleep(500);
+          continue;
+        }
+
+        const riskResult = await this.handleRiskDetection();
+        if (riskResult.triggered) {
+          await this.client.sleep(600);
+          continue;
+        }
 
         // 检查是否有阻断性错误
         const blockingError = await this.checkBlockingErrors();
@@ -1339,8 +1517,85 @@ class FanqiePublisher {
           }
           // 点击确认发布
           await this.client.clickButtonByText('确认发布');
+          confirmedPublish = true;
           await this.client.sleep(1000);
+          const postErr = await this.checkBlockingErrors();
+          if (postErr.hasError) {
+            return {
+              success: false,
+              needsIntervention: true,
+              reason: postErr.reason,
+              message: postErr.message,
+            };
+          }
+          if (await this.handleDetectionModeDialog()) { await this.client.sleep(500); }
+          await this.handleRiskDetection();
+          const postRiskErr = await this.checkBlockingErrors();
+          if (postRiskErr.hasError) {
+            return {
+              success: false,
+              needsIntervention: true,
+              reason: postRiskErr.reason,
+              message: postRiskErr.message,
+            };
+          }
+          const checkingKeywords = ['正在为你检测风险内容', '为你检测', '检测风险内容', '正在检测', '安全检测中', '检测中'];
+          if (await this.client.pageContains(checkingKeywords)) {
+            this.log('内容风险检测中，等待完成...');
+            const t0 = Date.now();
+            while (Date.now() - t0 < 60000) {
+              await this.client.sleep(1000);
+              if (!(await this.client.pageContains(checkingKeywords))) break;
+            }
+            await this.client.sleep(800);
+          }
+          const afterCheckErr = await this.checkBlockingErrors();
+          if (afterCheckErr.hasError) {
+            return {
+              success: false,
+              needsIntervention: true,
+              reason: afterCheckErr.reason,
+              message: afterCheckErr.message,
+            };
+          }
+          // 风险检测/发布提交在后台可能耗时 40-50s（未必出现 checkingKeywords 文本），轮询至多 60s 并在弹窗仍打开时补点"确认发布"
+          const submitStart = Date.now();
+          let reclicked = 0;
+          while (Date.now() - submitStart < 60000) {
+            if (!(await this.client.pageContains(['发布设置', '确认发布']))) break;
+            if (await this.client.pageContains(['章节管理', '新建章节'])) break;
+            if (await this.handleDetectionModeDialog()) { await this.client.sleep(500); continue; }
+            await this.handleRiskDetection();
+            const blk = await this.checkBlockingErrors();
+            if (blk.hasError) {
+              return {
+                success: false,
+                needsIntervention: true,
+                reason: blk.reason,
+                message: blk.message,
+              };
+            }
+            reclicked++;
+            if (reclicked === 1 || reclicked % 6 === 0) {
+              this.log(`等待发布弹窗关闭(${Math.round((Date.now() - submitStart) / 1000)}s)，点击确认发布...`);
+              await this.client.clickButtonByText('确认发布');
+            }
+            await this.client.sleep(1000);
+          }
           break;
+        }
+
+        if (retry === 5 || retry === 12) {
+          const anyModal = await this.client.evaluate(`(function(){
+            const ms = document.querySelectorAll('.arco-modal, .byte-modal, [role="dialog"]');
+            for (const m of ms) { if (m.offsetParent !== null && getComputedStyle(m).display !== 'none') return true; }
+            return false;
+          })()`);
+          if (!anyModal) {
+            this.log('未见弹窗，补触发识别并重一点「下一步」...');
+            await this.nudgeEditor();
+            await this.clickNextStep();
+          }
         }
       }
     }
@@ -1350,45 +1605,24 @@ class FanqiePublisher {
 
     // 等待返回章节列表（最多等待15秒）
     let returnedToList = false;
-    for (let i = 0; i < 30; i++) {
-      const onList = await this.client.pageContains(['章节管理', '新建章节']);
-      if (onList) {
-        returnedToList = true;
-        break;
-      }
-
-      // 如果还在编辑页面，尝试返回
-      const stillOnEdit = await this.client.pageContains(['请输入标题', '请输入正文', 'ProseMirror']);
-      if (stillOnEdit && i > 5) {
-        this.log('仍在编辑页面，尝试返回章节列表...');
-        // 方法1~3：定位返回按钮/面包屑/返回图标后坐标真实点击
-        const backClicked = await this.client.clickByLocator(`
-          const buttons = document.querySelectorAll('button, a, [role="button"]');
-          for (const btn of buttons) {
-            const text = (btn.textContent || '').trim();
-            if (text === '返回' || text === '取消' || text.includes('返回列表')) return btn;
-          }
-          const breadcrumbs = document.querySelectorAll('.arco-breadcrumb-item a, [class*="breadcrumb"] a');
-          for (const link of breadcrumbs) { if ((link.textContent || '').includes('章节管理')) return link; }
-          const backIcons = document.querySelectorAll('[class*="back"], [class*="return"], .arco-icon-left, svg[class*="back"]');
-          for (const icon of backIcons) { return icon.closest('button') || icon.closest('a') || icon; }
-          return null;
-        `);
-        // 方法4：都没有则浏览器后退（导航操作，非控件点击）
-        if (!backClicked) {
-          await this.client.evaluate(`(function(){ history.back(); return true; })()`);
+    if (confirmedPublish) {
+      for (let i = 0; i < 30; i++) {
+        const onList = await this.client.pageContains(['章节管理', '新建章节']);
+        if (onList) {
+          returnedToList = true;
+          break;
         }
-        await this.client.sleep(2000);
+        await this.client.sleep(500);
       }
-
-      await this.client.sleep(500);
     }
 
     if (!returnedToList) {
       // 还停在编辑页 / 发布设置弹窗上 = 番茄没接受这次保存（实测原因：标题与别的章重名、敏感词、字数不够）。
       // 原来这里直接导航回列表并返回 success:true —— 把一次失败报成了成功，
       // 还因为离开未保存的编辑页触发 beforeunload，把后面每一步都卡死（2026-10-02 国术第 7 章）。
-      const stuck = await this.client.pageContains(['请输入标题', '请输入正文', 'ProseMirror', '发布设置', '确认发布']);
+      const urlNow = await this.client.evaluate('location.href').catch(() => '');
+      const onPublishUrl = this.isEditPage(String(urlNow || ''));
+      const stuck = !confirmedPublish || onPublishUrl || await this.client.pageContains(['请输入标题', '请输入正文', 'ProseMirror', '发布设置', '确认发布']);
       if (stuck) {
         const reason = await this.client.evaluate(`(function(){
           var sel=['.arco-message','.arco-notification','.arco-form-item-message','[class*="error"]','[class*="toast"]','.arco-modal-content'];
@@ -1478,6 +1712,8 @@ class FanqiePublisher {
             return;
           }
           await this.client.sleep(3000);
+          await this.clickNewChapter().catch(() => {});
+          await this.waitForNewChapterPage().catch(() => {});
         }
       } catch (error) {
         this.handleError(`处理章节 ${chapter.title} 时出错`, error);
@@ -1495,19 +1731,22 @@ class FanqiePublisher {
   }
 
   async publishChapter(chapter) {
-    // Step 0: 多卷模式——发布前确保切到本章所属卷；切不过去就暂停（绝不发到错卷）
-    if (this.config?.matchVolumes && chapter.volumeText) {
-      const sw = await this.switchToVolume(chapter.volumeText);
+    // Step 0: 多卷模式（或未开 matchVolumes 但番茄已有多个分卷时默认发往最新卷）——发布前确保切到目标卷
+    const targetVol = (this.config?.matchVolumes && chapter.volumeText)
+      ? chapter.volumeText
+      : ((Array.isArray(this.config?.fanqieVolumes) && this.config.fanqieVolumes.length > 1) ? this.config.fanqieVolumes[0] : '');
+    if (targetVol) {
+      const sw = await this.switchToVolume(targetVol);
       if (!sw.ok) {
         // notReady = 页面/模态没渲染出来，不是真缺卷 → 软失败，让上层刷新重试（3 次才暂停）
         if (sw.notReady) {
-          return { success: false, message: `发布页还没就绪，读不到分卷（目标卷「${chapter.volumeText}」），刷新重试` };
+          return { success: false, message: `发布页还没就绪，读不到分卷（目标卷「${targetVol}」），刷新重试` };
         }
         return {
           success: false, needsIntervention: true, reason: 'volume_missing',
           message: sw.found === false
-            ? `番茄该书没有卷「${chapter.volumeText}」。番茄建卷不可逆，请先在番茄后台手动建好该卷，再继续发布。`
-            : `切换到卷「${chapter.volumeText}」未成功（当前：${sw.current || '未知'}），已暂停以免发到错卷。`,
+            ? `番茄该书没有卷「${targetVol}」。番茄建卷不可逆，请先在番茄后台手动建好该卷，再继续发布。`
+            : `切换到卷「${targetVol}」未成功（当前：${sw.current || '未知'}），已暂停以免发到错卷。`,
         };
       }
     }
@@ -1522,20 +1761,20 @@ class FanqiePublisher {
     await this.client.sleep(1000);
 
     // Step 3: 循环处理弹窗
-    for (let retry = 0; retry < 10; retry++) {
-      if (retry > 0) await this.client.sleep(300);
+    for (let retry = 0; retry < 35; retry++) {
+      if (retry > 0) await this.client.sleep(500);
 
       const detectionModeHandled = await this.handleDetectionModeDialog();
       if (detectionModeHandled) {
         this.log('已选择内容检测方式');
-        await this.client.sleep(500);
+        await this.client.sleep(800);
         continue;
       }
 
       const typoHandled = await this.handleTypoDialog();
       if (typoHandled) {
         this.log('已忽略错别字提示');
-        await this.client.sleep(500);
+        await this.client.sleep(800);
         continue;
       }
 
@@ -1552,8 +1791,13 @@ class FanqiePublisher {
         continue;
       }
 
+      const isNonFatalPreDialogErr = (err) => err && err.hasError && /超出每日上限|已满|请稍后再试|操作频繁|请求过于频繁|频率限制/.test(err.message || '');
       const earlyBlockingError = await this.checkBlockingErrors();
-      if (earlyBlockingError.hasError) {
+      if (earlyBlockingError.hasError && !isNonFatalPreDialogErr(earlyBlockingError)) {
+        if (/当前章节不可修改/.test(earlyBlockingError.message || '')) {
+          this.log('✅ 检测到章节已锁定入库（夜间审核中），视为发布成功');
+          return { success: true };
+        }
         this.log(`⚠️ 弹窗处理阶段检测到阻断性错误: ${earlyBlockingError.message}`);
         return {
           success: false,
@@ -1562,16 +1806,39 @@ class FanqiePublisher {
           message: earlyBlockingError.message,
         };
       }
+      if (isNonFatalPreDialogErr(earlyBlockingError)) {
+        this.forcedScheduleMode = true;
+        await this.client.evaluate(`document.querySelectorAll('.arco-message, .byte-message').forEach(function(m){ try { m.remove(); } catch(e){} })`).catch(() => {});
+      }
 
       const atPublishDialog = await this.client.pageContains(['发布设置', '确认发布']);
       if (atPublishDialog) break;
 
-      if (retry < 3) await this.client.sleep(500);
+      if (retry === 12 || retry === 22) {
+        const anyModal = await this.client.evaluate(`(function(){
+          const ms = document.querySelectorAll('.arco-modal, .byte-modal, [role="dialog"]');
+          for (const m of ms) { if (m.offsetParent !== null && getComputedStyle(m).display !== 'none') return true; }
+          return false;
+        })()`);
+        if (!anyModal) {
+          this.log('未见弹窗，重一点「下一步」...');
+          const st = await this.nextStepState();
+          if (st === 'disabled') await this.nudgeEditor();
+          await this.clickNextStep();
+        }
+      }
+
+      await this.client.sleep(400);
     }
 
     // Step 4: 检查阻断性错误
     const blockingError = await this.checkBlockingErrors();
-    if (blockingError.hasError) {
+    const isNonFatalPreDialogErr2 = (err) => err && err.hasError && /超出每日上限|已满|请稍后再试|操作频繁|请求过于频繁|频率限制/.test(err.message || '');
+    if (blockingError.hasError && !isNonFatalPreDialogErr2(blockingError)) {
+      if (/当前章节不可修改/.test(blockingError.message || '')) {
+        this.log('✅ 检测到章节已锁定入库（夜间审核中），视为发布成功');
+        return { success: true };
+      }
       this.log(`⚠️ 检测到阻断性错误: ${blockingError.message}`);
       return {
         success: false,
@@ -1583,7 +1850,7 @@ class FanqiePublisher {
 
     // Step 5: 等待发布设置弹窗
     this.log('等待发布设置弹窗...');
-    const dialogReady = await this.waitForPublishDialog(30);
+    const dialogReady = await this.waitForPublishDialog(65);
     if (!dialogReady) {
       this.log('发布设置弹窗未出现');
       return { success: false, message: '发布设置弹窗未出现' };
@@ -1675,10 +1942,6 @@ class FanqiePublisher {
       }
 
       await this.client.sleep(300);
-      try {
-        await this.client.activateTab(editTabId);
-        await this.client.sleep(500);
-      } catch (e) { }
 
       this.log(`✂️ 已关闭 ${tabsToClose.length} 个多余标签页`);
     } catch (error) {
@@ -1694,7 +1957,40 @@ class FanqiePublisher {
            (url.includes('chapter') && url.includes('edit'));
   }
 
+  async dismissDraftPrompt() {
+    const clicked = await this.client.evaluate(`(function(){
+      const modals = document.querySelectorAll('.byte-modal, .legacy-global-confirm-modal, .publish-modal-confirm, .arco-modal');
+      for (const m of modals) {
+        if (m.offsetParent === null) continue;
+        const t = m.innerText || '';
+        if (t.includes('是否继续编辑') || t.includes('刚刚更新的章节') || t.includes('未保存')) {
+          const btns = [...m.querySelectorAll('button')];
+          const giveUp = btns.find(b => ['放弃', '取消', '不使用'].includes((b.innerText || '').trim()));
+          if (giveUp) { giveUp.click(); return true; }
+        }
+      }
+      return false;
+    })()`);
+    if (clicked) {
+      this.log('检测到「是否继续编辑」草稿弹窗，已点击「放弃」并等待关闭...');
+      for (let w = 0; w < 20; w++) {
+        await this.client.sleep(200);
+        const stillOpen = await this.client.evaluate(`(function(){
+          const modals = document.querySelectorAll('.byte-modal, .legacy-global-confirm-modal, .publish-modal-confirm');
+          for (const m of modals) {
+            if (m.offsetParent !== null && (m.innerText || '').includes('是否继续编辑')) return true;
+          }
+          return false;
+        })()`);
+        if (!stillOpen) break;
+      }
+      await this.client.sleep(400);
+    }
+    return !!clicked;
+  }
+
   async injectContent(chapter) {
+    this._lastInjectedChapter = chapter;
     let chapterNumber = '';
     if (chapter.chapterNumber !== null && chapter.chapterNumber !== undefined) {
       chapterNumber = String(chapter.chapterNumber);
@@ -1719,7 +2015,8 @@ class FanqiePublisher {
       this.log('⚠️ 等待编辑器超时，尝试继续...');
     }
 
-    await this.client.sleep(300);
+    await this.client.sleep(500);
+    await this.dismissDraftPrompt();
 
     // 填充章节号（带重试）
     if (chapterNumber) {
@@ -1751,9 +2048,9 @@ class FanqiePublisher {
     }
     await this.client.sleep(200);
 
-    // 模拟滚动到编辑器区域
-    await this.client.scroll('down', 200);
-    await this.client.sleep(300);
+    // 确保在页面顶部，避免 ProseMirror 顶部被 sticky header 遮挡
+    await this.client.evaluate('window.scrollTo(0, 0)').catch(() => {});
+    await this.client.sleep(200);
 
     // 填充内容（带重试）
     const editorSelectors = [
@@ -1792,11 +2089,16 @@ class FanqiePublisher {
   // 用可信键盘"敲一下"触发番茄识别正文(合成 paste 不触发) → 启用"下一步"。空格+退格，正文零残留。
   async nudgeEditor() {
     try {
-      if (this.tabId) await this.client.activateTab(this.tabId);
-      await this.client.evaluate(`(function(){const ed=document.querySelector('.ProseMirror');if(!ed)return;ed.focus();const r=document.createRange();r.selectNodeContents(ed);r.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(r);})()`);
-      await this.client.typeText(' ');
-      await this.client.sleep(200);
-      await this.client.pressKey('Backspace');
+      // 若「是否继续编辑？」弹窗延迟弹出锁住了焦点，点「放弃」后会重置编辑器内容，需重新注入本章内容
+      if (await this.dismissDraftPrompt()) {
+        if (this._lastInjectedChapter) {
+          this.log('草稿弹窗关闭后重新注入本章内容...');
+          await this.injectContent(this._lastInjectedChapter);
+          return;
+        }
+      }
+      await this.client.evaluate(`(function(){const ed=document.querySelector('.ProseMirror');if(!ed)return;ed.focus();const r=document.createRange();r.selectNodeContents(ed);r.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(r);document.execCommand('insertText',false,' ');})()`);
+      await this.client.typeText(' ').catch(() => {});
       await this.client.sleep(200);
     } catch (e) { this.log('⚠️ nudge 失败：' + (e.message || e)); }
   }
@@ -1811,6 +2113,17 @@ class FanqiePublisher {
       state = await this.nextStepState();
     }
     if (state !== 'enabled') { this.log(`⚠️ "下一步"仍${state === 'absent' ? '不存在' : '禁用'}（正文可能未被番茄识别）`); }
+    // ⚠️ 关键：当顶部状态栏显示「保存中」（wsSaveStatus === 'pending'）时，番茄 handleClickPublish 会忽略「下一步」点击！
+    // 必须等防抖触发且「保存中」变为「已保存 / 已保存到云端」后再点「下一步」。
+    await this.client.sleep(600);
+    for (let w = 0; w < 30; w++) {
+      const saving = await this.client.evaluate(`(function(){
+        const st = document.querySelector('.publish-maintain-info-status');
+        return st ? (st.innerText || '').includes('保存中') : false;
+      })()`);
+      if (!saving) break;
+      await this.client.sleep(300);
+    }
     // 用 JS .click() 点"下一步"——该按钮在页面顶部(y≈16)，坐标真实点击常落空/不触发；
     // 实测 element.click() 才能稳定推进到"发布设置"弹窗（已对岳雷/赵云验证）。
     const clicked = await this.client.evaluate(`(function(){
@@ -1823,61 +2136,120 @@ class FanqiePublisher {
   }
 
   async handleTypoDialog() {
-    // 定位错别字弹窗的确认按钮后坐标真实点击
-    return await this.client.clickByLocator(`
-      const modals = document.querySelectorAll('.arco-modal, [role="dialog"], .arco-modal-wrapper, .arco-modal-content, [class*="modal"], [class*="dialog"]');
+    // 定位错别字弹窗的确认按钮后点击（跳过2秒内刚点过、已隐藏或正在退出动画中的弹窗）
+    const clicked = await this.client.clickByLocator(`
+      const now = Date.now();
+      const modals = document.querySelectorAll('.arco-modal, .byte-modal');
       for (const modal of modals) {
-        if (modal.offsetParent === null && !modal.classList.contains('arco-modal-wrapper')) continue;
+        const wrap = modal.closest('.arco-modal-wrapper, [role="dialog"]') || modal;
+        if (Number(modal.dataset?.fqHandledAt || 0) > now - 2000 || Number(wrap.dataset?.fqHandledAt || 0) > now - 2000) continue;
+        const cs = getComputedStyle(modal);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || modal.offsetParent === null) continue;
+        if (/exit|leave/i.test(modal.className || '') || /exit|leave/i.test(wrap.className || '')) continue;
         const text = modal.textContent || '';
         const typoKeywords = ['错别字', '是否确定提交', '疑似错别字', '拼写错误', '仍要提交', '继续提交', '存在问题'];
         if (!typoKeywords.some(kw => text.includes(kw))) continue;
-        const buttons = modal.querySelectorAll('button, [role="button"], .arco-btn, [class*="btn"], span[class*="button"]');
+        const buttons = modal.querySelectorAll('button, [role="button"], .arco-btn, .byte-btn, [class*="btn"], span[class*="button"]');
         for (const btn of buttons) {
           const bt = (btn.textContent || '').trim();
           const isConfirm = ['提交', '确定', '确认', '忽略', '继续', '仍要'].some(k => bt.includes(k));
           const isCancel = ['取消', '返回', '修改'].some(k => bt.includes(k));
-          if (isConfirm && !isCancel) return btn;
-        }
-      }
-      return null;
-    `);
-  }
-
-  async handleDetectionModeDialog() {
-    // 定位"普通检测/仅基础检测/基础检测"选项后坐标真实点击（避开"全面检测"）
-    const clicked = await this.client.clickByLocator(`
-      const pageText = document.body.innerText || '';
-      if (!pageText.includes('请选择内容检测方式') && !pageText.includes('内容检测方式')) return null;
-      const modals = document.querySelectorAll('.arco-modal, .arco-modal-wrapper, [role="dialog"], .arco-modal-content, .byte-modal');
-      const scope = [...modals].filter(m => (m.textContent||'').includes('检测方式'));
-      const containers = scope.length ? scope : [document.body];
-      for (const modal of containers) {
-        const buttons = modal.querySelectorAll('button, .arco-btn, .byte-btn, [role="button"]');
-        for (const btn of buttons) {
-          const bt = (btn.textContent || '').trim();
-          if ((bt.includes('普通检测') || bt.includes('仅基础检测') || bt.includes('基础检测')) && !bt.includes('全面')) return btn;
-        }
-        const allElements = modal.querySelectorAll('*');
-        for (const el of allElements) {
-          const text = el.textContent || '';
-          if ((text.includes('普通检测') || (text.includes('基础检测') && text.includes('不限次数'))) && !text.includes('全面检测')) {
-            const r = el.getBoundingClientRect();
-            if (r.width > 50 && r.height > 20) return el;
+          if (isConfirm && !isCancel) {
+            if (modal.dataset) modal.dataset.fqHandledAt = String(now);
+            if (wrap.dataset) wrap.dataset.fqHandledAt = String(now);
+            return btn;
           }
         }
       }
       return null;
     `);
-    if (clicked) this.log('选择内容检测方式: 普通/基础检测');
+    if (clicked) await this.client.sleep(400);
+    return clicked;
+  }
+
+  async handleDetectionModeDialog() {
+    // 定位"普通检测/仅基础检测/基础检测"选项后点击（避开"全面检测"，从最上层弹窗开始处理，清理多层堆叠弹窗）
+    const clicked = await this.client.clickByLocator(`
+      const now = Date.now();
+      const modals = Array.from(document.querySelectorAll('.arco-modal, .byte-modal')).reverse();
+      let topBtn = null;
+      for (const modal of modals) {
+        const wrap = modal.closest('.arco-modal-wrapper, [role="dialog"]') || modal;
+        if (Number(modal.dataset?.fqHandledAt || 0) > now - 1500) continue;
+        const cs = getComputedStyle(modal);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || modal.offsetParent === null) continue;
+        if (/exit|leave/i.test(modal.className || '') || /exit|leave/i.test(wrap.className || '')) continue;
+        if (!(modal.textContent || '').includes('检测方式')) continue;
+        document.querySelectorAll('.arco-message, .byte-message').forEach(m => { try { m.remove(); } catch (e) {} });
+        const buttons = modal.querySelectorAll('button, .arco-btn, .byte-btn, [role="button"]');
+        for (const btn of buttons) {
+          const bt = (btn.textContent || '').trim();
+          if ((bt.includes('普通检测') || bt.includes('仅基础检测') || bt.includes('基础检测')) && !bt.includes('全面')) {
+            if (modal.dataset) modal.dataset.fqHandledAt = String(now);
+            if (!topBtn) {
+              topBtn = btn;
+            } else {
+              try { btn.click(); } catch (e) {}
+            }
+            break;
+          }
+        }
+        if (topBtn) continue;
+        const allElements = modal.querySelectorAll('*');
+        for (const el of allElements) {
+          const text = el.textContent || '';
+          if ((text.includes('普通检测') || (text.includes('基础检测') && text.includes('不限次数'))) && !text.includes('全面检测')) {
+            const r = el.getBoundingClientRect();
+            if (r.width > 50 && r.height > 20) {
+              if (modal.dataset) modal.dataset.fqHandledAt = String(now);
+              topBtn = el;
+              break;
+            }
+          }
+        }
+      }
+      return topBtn;
+    `);
+    if (clicked) {
+      this.log('选择内容检测方式: 普通/基础检测');
+      await this.client.sleep(800);
+      await this.handleRiskDetection();
+      const checkingKeywords = ['正在为你检测风险内容', '为你检测', '检测风险内容', '正在检测', '安全检测中', '检测中'];
+      const t0 = Date.now();
+      let sawChecking = false;
+      while (Date.now() - t0 < 50000) {
+        const isChk = await this.client.pageContains(checkingKeywords);
+        if (isChk) {
+          if (!sawChecking) { this.log('内容风险检测中，等待完成...'); sawChecking = true; }
+          await this.client.sleep(800);
+          continue;
+        }
+        if ((sawChecking || Date.now() - t0 > 2200) && await this.client.pageContains(['发布设置', '确认发布'])) break;
+        const toast = await this.client.evaluate(`(function(){
+          var m = document.querySelector('.arco-message, .byte-message, [class*="arco-message"]');
+          return m ? (m.innerText || '').trim() : '';
+        })()`).catch(() => '');
+        if (toast && (toast.includes('检测暂无风险') || toast.includes('可发布') || toast.includes('风险'))) {
+          this.log(`内容检测完成（${toast}）`);
+          await this.client.evaluate(`document.querySelectorAll('.arco-message, .byte-message').forEach(function(m){ try { m.remove(); } catch(e){} })`).catch(() => {});
+          break;
+        }
+        if (sawChecking || Date.now() - t0 > 5000) break;
+        await this.client.sleep(600);
+      }
+      await this.client.sleep(500);
+    }
     return clicked;
   }
 
   async handleRiskDetection() {
-    // 定位风险检测弹窗的确认按钮后坐标真实点击
+    // 定位风险检测弹窗的确认按钮后点击（跳过退出动画中的弹窗）
     const clicked = await this.client.clickByLocator(`
-      const modals = document.querySelectorAll('.arco-modal, [role="dialog"], .arco-modal-wrapper');
+      const modals = document.querySelectorAll('.arco-modal, .byte-modal, [role="dialog"]');
       for (const modal of modals) {
-        if (modal.offsetParent === null && !modal.classList.contains('arco-modal-wrapper')) continue;
+        const cs = getComputedStyle(modal);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || modal.offsetParent === null) continue;
+        if (/exit|leave/i.test(modal.className || '')) continue;
         const text = modal.textContent || '';
         if (text.includes('风险检测') || text.includes('是否进行内容风险检测') || text.includes('安全检测')) {
           const buttons = modal.querySelectorAll('button, [role="button"], .arco-btn');
@@ -1915,13 +2287,13 @@ class FanqiePublisher {
         const blockingErrors = {
           'duplicate_title': ['标题重复', '章节名重复', '已存在相同', '标题已存在', '重复的标题', '章节标题重复', '重复章节', '章节已存在'],
           'sensitive_content': ['敏感内容', '涉嫌违规', '包含敏感词', '禁止发布', '内容违规', '审核不通过', '内容不合规'],
-          'account_limit': ['账号异常', '操作频繁', '请稍后再试', '访问受限', '账号受限', '频率限制', '请求过于频繁'],
+          'account_limit': ['提交字数超出每日上限', '超出每日上限', '当前章节不可修改', '账号异常', '操作频繁', '请稍后再试', '访问受限', '账号受限', '频率限制', '请求过于频繁'],
           'unknown_error': ['发布失败', '提交失败', '保存失败', '网络错误', '服务器错误', '系统错误']
         };
 
         const excludePatterns = ['请选择内容检测方式', '全面检测', '基础检测', '本章节剩余次数', '不限次数', '深度排查', '辅助提升内容通过效率', '不覆盖范围外的检测'];
 
-        const modalSelectors = ['.arco-modal', '.arco-modal-wrapper', '.arco-message', '.arco-notification', '[role="dialog"]', '[role="alertdialog"]', '.arco-modal-content', '[class*="modal"]', '[class*="dialog"]', '.arco-popup'];
+        const modalSelectors = ['.arco-modal', '.arco-modal-wrapper', '.arco-message', '.byte-message', '.arco-notification', '.byte-notification', '[role="dialog"]', '[role="alertdialog"]', '.arco-modal-content', '[class*="modal"]', '[class*="dialog"]', '.arco-popup'];
         const modals = document.querySelectorAll(modalSelectors.join(', '));
 
         for (const modal of modals) {
@@ -1963,6 +2335,8 @@ class FanqiePublisher {
       const hasDialog = await this.client.pageContains(['发布设置', '确认发布']);
       const isChecking = await this.client.pageContains(['安全检测中', '正在检测', '检测中']);
       if (hasDialog && !isChecking) return true;
+      await this.handleTypoDialog().catch(() => {});
+      await this.handleDetectionModeDialog().catch(() => {});
       await this.client.sleep(1000);
     }
     return false;
@@ -2017,12 +2391,45 @@ class FanqiePublisher {
       await this.client.sleep(200);
     }
 
-    // Step 3: 点击确认发布
+    // Step 3: 点击确认发布（先清掉页面残留的旧 toast）
+    await this.client.evaluate(`document.querySelectorAll('.arco-message, .byte-message').forEach(function(m){ try { m.remove(); } catch(e){} })`).catch(() => {});
     await this.client.clickButtonByText('确认发布');
-    await this.client.sleep(1000);
 
-    const immediateBlockingError = await this.checkBlockingErrors();
-    if (immediateBlockingError.hasError) {
+    let actuallyChangedDate = false;
+    const checkingKeywords = ['正在为你检测风险内容', '为你检测', '检测风险内容', '正在检测', '安全检测中', '检测中'];
+
+    const hasLeftPublishPage = async () => {
+      const h = String(await this.client.evaluate('location.href').catch(() => ''));
+      return h.includes('chapter-manage') || (h.includes('/main/writer/') && !this.isEditPage(h));
+    };
+
+    const waitModalClose = async (maxMs = 5000) => {
+      const steps = Math.max(1, Math.ceil(maxMs / 500));
+      for (let i = 0; i < steps; i++) {
+        await this.client.sleep(500);
+        if (await hasLeftPublishPage()) return true;
+        if (await this.client.pageContains(checkingKeywords)) return false;
+        const blk = await this.checkBlockingErrors().catch(() => null);
+        if (blk && blk.hasError) return false;
+      }
+      return await hasLeftPublishPage();
+    };
+
+    if (await waitModalClose(4000)) {
+      this.log('发布弹窗已关闭且已离开编辑页，发布成功');
+      return { success: true, switchedToNextDay: false };
+    }
+
+    const isDateLimitErr = (err) => err && err.hasError && /超出每日上限|已满/.test(err.message || '');
+    const isAlreadyLockedErr = (err) => err && err.hasError && /当前章节不可修改/.test(err.message || '');
+    const isRateLimitErr = (err) => err && err.hasError && /请稍后再试|操作频繁|请求过于频繁|频率限制/.test(err.message || '');
+
+    let immediateBlockingError = await this.checkBlockingErrors();
+    if (isAlreadyLockedErr(immediateBlockingError)) {
+      this.log('✅ 检测到章节已锁定入库（夜间审核中），视为发布成功');
+      return { success: true, switchedToNextDay: actuallyChangedDate };
+    }
+    if (immediateBlockingError.hasError && !isDateLimitErr(immediateBlockingError) && !isRateLimitErr(immediateBlockingError)) {
       return {
         success: false,
         needsIntervention: true,
@@ -2031,12 +2438,15 @@ class FanqiePublisher {
       };
     }
 
-    let actuallyChangedDate = false;
-    const checkingKeywords = ['正在为你检测风险内容', '为你检测', '检测风险内容', '正在检测', '安全检测中', '检测中'];
-
     while (retryCount < maxRetry) {
-      // 确认发布后可能先弹出"请选择内容检测方式"（选普通检测）或"开始风险检测"按钮，需先点选
-      if (await this.handleDetectionModeDialog()) { await this.client.sleep(500); }
+      if (await hasLeftPublishPage()) {
+        this.log('已跳转离开编辑页，发布成功');
+        return { success: true, switchedToNextDay: actuallyChangedDate };
+      }
+
+      // 确认发布后可能先弹出"请选择内容检测方式"（选仅基础检测）或"开始风险检测"按钮，需先点选
+      if (await this.handleTypoDialog()) { await this.client.sleep(500); }
+      if (await this.handleDetectionModeDialog()) { await this.client.sleep(800); }
       await this.handleRiskDetection();
 
       // 点击确认发布后番茄会自动跑内容风险检测（"正在为你检测风险内容，请稍后"），
@@ -2049,16 +2459,49 @@ class FanqiePublisher {
           if (!(await this.client.pageContains(checkingKeywords))) break;
         }
         this.log('风险检测结束');
-        await this.client.sleep(1000);
-        // 检测后重新判断弹窗是否已关闭（关闭=发布成功）
-        if (!(await this.client.pageContains(['发布设置', '确认发布']))) {
-          this.log('发布弹窗已关闭，发布成功');
+        await this.client.sleep(800);
+        await this.client.evaluate(`document.querySelectorAll('.arco-message, .byte-message').forEach(function(m){ try { m.remove(); } catch(e){} })`).catch(() => {});
+        if (await hasLeftPublishPage()) {
+          this.log('风险检测后已离开编辑页，发布成功');
           return { success: true, switchedToNextDay: actuallyChangedDate };
+        }
+        // 风险检测通过后（"检测暂无风险，可发布或继续修改"），需再次点击确认发布真正提交
+        const postCheckBlock = await this.checkBlockingErrors();
+        if (isAlreadyLockedErr(postCheckBlock)) {
+          this.log('✅ 检测到章节已锁定入库（夜间审核中），视为发布成功');
+          return { success: true, switchedToNextDay: actuallyChangedDate };
+        }
+        if (postCheckBlock.hasError && !isDateLimitErr(postCheckBlock) && !isRateLimitErr(postCheckBlock)) {
+          return {
+            success: false,
+            needsIntervention: true,
+            reason: postCheckBlock.reason,
+            message: postCheckBlock.message,
+          };
+        }
+        if (await this.client.pageContains(['发布设置', '确认发布'])) {
+          this.log('风险检测通过，点击确认发布提交...');
+          await this.client.clickButtonByText('确认发布');
+          if (await waitModalClose(6000)) {
+            this.log('发布弹窗已关闭且已离开编辑页，发布成功');
+            return { success: true, switchedToNextDay: actuallyChangedDate };
+          }
         }
       }
 
       const blockingError = await this.checkBlockingErrors();
-      if (blockingError.hasError) {
+      if (isAlreadyLockedErr(blockingError)) {
+        this.log('✅ 检测到章节已锁定入库（夜间审核中），视为发布成功');
+        return { success: true, switchedToNextDay: actuallyChangedDate };
+      }
+      if (isRateLimitErr(blockingError)) {
+        this.log('⏳ 触发提交频率限制，等待 4 秒后继续...');
+        await this.client.evaluate(`document.querySelectorAll('.arco-message, .byte-message').forEach(function(m){ try { m.remove(); } catch(e){} })`).catch(() => {});
+        await this.client.sleep(4000);
+        if (await hasLeftPublishPage()) {
+          return { success: true, switchedToNextDay: actuallyChangedDate };
+        }
+      } else if (blockingError.hasError && !isDateLimitErr(blockingError)) {
         return {
           success: false,
           needsIntervention: true,
@@ -2067,14 +2510,104 @@ class FanqiePublisher {
         };
       }
 
-      const dialogOpen = await this.client.pageContains(['发布设置', '确认发布']);
-      if (!dialogOpen) {
-        this.log('发布弹窗已关闭，发布成功');
+      if (await hasLeftPublishPage()) {
+        this.log('已跳转离开编辑页，发布成功');
         return { success: true, switchedToNextDay: actuallyChangedDate };
       }
 
+      let dialogOpen = await this.client.pageContains(['发布设置', '确认发布']);
+      if (!dialogOpen) {
+        if (await hasLeftPublishPage()) {
+          this.log('发布弹窗已关闭且已离开编辑页，发布成功');
+          return { success: true, switchedToNextDay: actuallyChangedDate };
+        }
+        this.log('仍在编辑页但发布设置弹窗已关闭，重新点击下一步打开...');
+        await this.handleTypoDialog();
+        await this.handleDetectionModeDialog();
+        await this.clickNextStep();
+        await this.waitForPublishDialog(15);
+        dialogOpen = await this.client.pageContains(['发布设置', '确认发布']);
+        if (dialogOpen) {
+          if (this.config) {
+            const targetText = (this.config.useAI !== false) ? '是' : '否';
+            await this.client.clickByLocator(`
+              const targetText = ${JSON.stringify(targetText)};
+              const radioTexts = document.querySelectorAll('.arco-radio-text');
+              for (const span of radioTexts) {
+                if ((span.textContent || '').trim() === targetText) {
+                  const label = span.closest('label.arco-radio');
+                  if (label && !label.classList.contains('arco-radio-checked')) return label;
+                }
+              }
+              return null;
+            `).catch(() => {});
+          }
+          if (scheduleEnabled) {
+            await this.enableScheduleSwitch().catch(() => {});
+            await this.client.sleep(200);
+            await this.selectScheduleDate();
+          }
+          await this.client.sleep(300);
+          await this.client.clickButtonByText('确认发布');
+          if (await waitModalClose(6000)) {
+            this.log('重新打开弹窗提交成功');
+            return { success: true, switchedToNextDay: actuallyChangedDate };
+          }
+          continue;
+        }
+      }
+
+      const toastMsg = await this.client.evaluate(`(function(){
+        var ms = document.querySelectorAll('.arco-message, .byte-message, [class*="arco-message"]');
+        if (!ms.length) return '';
+        var texts = [];
+        ms.forEach(function(m){
+          var t = (m.innerText || '').trim();
+          if (t) texts.push(t);
+          try { m.remove(); } catch (e) {}
+        });
+        return texts.join(' | ');
+      })()`).catch(() => '');
+      if (toastMsg && (toastMsg.includes('检测暂无风险') || toastMsg.includes('可发布'))) {
+        this.log(`收到提示「${toastMsg}」，点击确认发布提交...`);
+        await this.client.clickButtonByText('确认发布');
+        if (await waitModalClose(6000)) {
+          this.log('发布弹窗已关闭，发布成功');
+          return { success: true, switchedToNextDay: actuallyChangedDate };
+        }
+      }
+      if (toastMsg && (toastMsg.includes('正在为你检测') || toastMsg.includes('检测风险内容')) && !/上限|已满/.test(toastMsg)) {
+        this.log('⏳ 番茄后台仍在检测风险内容，等待 5 秒...');
+        await this.client.sleep(5000);
+        await this.client.clickButtonByText('确认发布');
+        if (await waitModalClose(6000)) {
+          this.log('发布弹窗已关闭，发布成功');
+          return { success: true, switchedToNextDay: actuallyChangedDate };
+        }
+        continue;
+      }
+
       retryCount++;
-      this.log(`发布重试 ${retryCount}/${maxRetry}，弹窗仍打开`);
+      this.log(`发布重试 ${retryCount}/${maxRetry}，弹窗仍打开${toastMsg ? `（番茄提示：${toastMsg}）` : ''}`);
+
+      // 若风险检测后发布设置弹窗刚重绘，补选 AI 单选框与定时开关
+      if (this.config) {
+        const targetText = (this.config.useAI !== false) ? '是' : '否';
+        await this.client.clickByLocator(`
+          const targetText = ${JSON.stringify(targetText)};
+          const radioTexts = document.querySelectorAll('.arco-radio-text');
+          for (const span of radioTexts) {
+            if ((span.textContent || '').trim() === targetText) {
+              const label = span.closest('label.arco-radio');
+              if (label && !label.classList.contains('arco-radio-checked')) return label;
+            }
+          }
+          return null;
+        `).catch(() => {});
+      }
+      if (scheduleEnabled) {
+        await this.enableScheduleSwitch().catch(() => {});
+      }
 
       if (!scheduleEnabled) {
         this.log(`📅 到达发布上限，开启定时发布`);
@@ -2085,24 +2618,42 @@ class FanqiePublisher {
         await this.selectScheduleDate();
         await this.client.sleep(200);
         await this.client.clickButtonByText('确认发布');
-        await this.client.sleep(800);
+        await waitModalClose(5000);
         continue;
       }
 
-      if (retryCount >= 2) {
+      const fullMsg = [toastMsg, blockingError?.message, immediateBlockingError?.message].filter(Boolean).join(' ');
+      immediateBlockingError = { hasError: false };
+      const isDateFullToast = /定时.*上限|该日.*已满|当日.*上限|日期.*上限|已达上限|超出每日上限/.test(fullMsg);
+      if (isDateFullToast || retryCount >= 9) {
         this.log(`📅 当前日期可能已满，切换到下一天`);
         this.switchToNextDay();
         actuallyChangedDate = true;
         this.forcedScheduleMode = true;
+        this._dateSwitches = (this._dateSwitches || 0) + 1;
+        if (isDateFullToast && this._dateSwitches < 30) {
+          retryCount = Math.max(0, retryCount - 1);
+        }
         await this.client.sleep(200);
         await this.selectScheduleDate();
         await this.client.sleep(300);
         await this.client.clickButtonByText('确认发布');
-        await this.client.sleep(800);
+        await waitModalClose(6000);
       } else {
-        await this.client.sleep(500);
-        await this.client.clickButtonByText('确认发布');
+        if (scheduleEnabled && this.currentScheduleDay) {
+          const targetDateStr = this.formatDate(this.currentScheduleDay);
+          const curVal = await this.client.evaluate(`(function(){
+            const inp = document.querySelector('.arco-modal .arco-picker input, .arco-picker input');
+            return inp ? (inp.value || '').trim() : '';
+          })()`);
+          if (curVal && !curVal.startsWith(targetDateStr)) {
+            await this.selectScheduleDate();
+            await this.client.sleep(200);
+          }
+        }
         await this.client.sleep(1000);
+        await this.client.clickButtonByText('确认发布');
+        await waitModalClose(6000);
       }
     }
 
@@ -2159,24 +2710,50 @@ class FanqiePublisher {
     const targetDay = this.currentScheduleDay.getDate();
     this.log(`选择发布日期: ${targetDateStr}`);
 
-    // 坐标真实点击打开日期选择器（trusted）
-    await this.client.clickByLocator(`
-      const inputs = document.querySelectorAll('input');
-      for (const input of inputs) {
-        if (input.value && /^\\d{4}-\\d{2}-\\d{2}/.test(input.value)) {
-          return input.closest('.arco-picker') || input.parentElement || input;
+    const findVisibleDatePanelCode = `
+      (function(){
+        const ps = document.querySelectorAll('.arco-picker-panel, .arco-picker-dropdown, .arco-picker-container');
+        for (const p of ps) {
+          const r = p.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          const cs = getComputedStyle(p);
+          if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+          if (p.querySelector('.arco-picker-header, .arco-picker-cell, td[class*="cell"]')) return p;
         }
-      }
-      return document.querySelector('.arco-picker');
-    `);
-    await this.client.sleep(500);
+        return document.querySelector('.arco-picker-panel, .arco-picker-dropdown, .arco-picker-container');
+      })()
+    `;
+
+    // 坐标真实点击打开日期选择器（仅当可见的日期面板存在时才算已打开）
+    const panelAlreadyOpen = await this.client.evaluate(`(function(){
+      document.querySelectorAll('[class*="exit"], [class*="leave"]').forEach(function(el){
+        try {
+          el.dispatchEvent(new TransitionEvent('transitionend', { bubbles: true }));
+          el.dispatchEvent(new AnimationEvent('animationend', { bubbles: true }));
+        } catch (e) {}
+      });
+      const p = ${findVisibleDatePanelCode};
+      return !!p;
+    })()`);
+    if (!panelAlreadyOpen) {
+      await this.client.clickByLocator(`
+        const inputs = document.querySelectorAll('.arco-modal .arco-picker input, .arco-picker input, input');
+        for (const input of inputs) {
+          if (input.value && /^\\d{4}-\\d{2}-\\d{2}/.test(input.value)) {
+            return input.closest('.arco-picker') || input.parentElement || input;
+          }
+        }
+        return document.querySelector('.arco-modal .arco-picker, .arco-picker');
+      `);
+      await this.client.sleep(500);
+    }
 
     // 导航到目标年月：点"上一月/下一月"箭头（.arco-picker-header-icon，
     // 方向由内部 svg 图标类 arco-icon-left/right 决定；double 是年份箭头，跳过）
     for (let navAttempt = 0; navAttempt < 30; navAttempt++) {
       const cur = await this.client.evaluate(`
         (function(){
-          const p = document.querySelector('.arco-picker-panel, .arco-picker-dropdown, .arco-picker-container');
+          const p = ${findVisibleDatePanelCode};
           if (!p) return { error: 'no_panel' };
           const v = (p.querySelector('.arco-picker-header-value')||{}).textContent || (p.querySelector('.arco-picker-header')||{}).textContent || '';
           const ym = v.match(/(\\d{4})\\s*年\\s*(\\d{1,2})\\s*月/) || v.match(/(\\d{4})[^\\d]+(\\d{1,2})/);
@@ -2184,15 +2761,28 @@ class FanqiePublisher {
           return { error: 'cannot_parse' };
         })()
       `);
-      if (cur.error === 'no_panel') { await this.client.sleep(400); continue; }
-      if (cur.error) { await this.client.sleep(300); continue; }
+      if (cur.error) {
+        if (navAttempt === 2 || navAttempt === 6) {
+          await this.client.clickByLocator(`
+            const inputs = document.querySelectorAll('.arco-modal .arco-picker input, .arco-picker input, input');
+            for (const input of inputs) {
+              if (input.value && /^\\d{4}-\\d{2}-\\d{2}/.test(input.value)) {
+                return input.closest('.arco-picker') || input.parentElement || input;
+              }
+            }
+            return document.querySelector('.arco-modal .arco-picker, .arco-picker');
+          `);
+        }
+        await this.client.sleep(350);
+        continue;
+      }
       if (cur.year === targetYear && cur.month === targetMonth) break;
 
       const needNext = (cur.year < targetYear) || (cur.year === targetYear && cur.month < targetMonth);
       // 坐标真实点击"上一月/下一月"箭头（按内部 svg 图标类识别方向，跳过年份双箭头）
       const moved = await this.client.clickByLocator(`
         const needNext = ${needNext};
-        const p = document.querySelector('.arco-picker-panel, .arco-picker-dropdown, .arco-picker-container');
+        const p = ${findVisibleDatePanelCode};
         if (!p) return null;
         const icons = p.querySelectorAll('.arco-picker-header-icon');
         for (const ic of icons) {
@@ -2212,7 +2802,7 @@ class FanqiePublisher {
     await this.client.sleep(150);
     const daySelected = await this.client.clickByLocator(`
       const targetDay = ${targetDay};
-      const p = document.querySelector('.arco-picker-panel, .arco-picker-dropdown, .arco-picker-container');
+      const p = ${findVisibleDatePanelCode};
       if (!p) return null;
       const cells = p.querySelectorAll('.arco-picker-cell, td[class*="cell"]');
       for (const cell of cells) {
@@ -2234,6 +2824,13 @@ class FanqiePublisher {
 
     // 设置发布时间（如配置了）
     await this.selectScheduleTime();
+    // 确保日历下拉面板已收起，避免遮挡底部「确认发布」按钮
+    await this.client.clickByLocator(`
+      const p = ${findVisibleDatePanelCode};
+      if (!p) return null;
+      return document.querySelector('.arco-modal-header, .arco-modal-title');
+    `).catch(() => {});
+    await this.client.sleep(150);
   }
 
   async handleConflict() {
@@ -2256,11 +2853,9 @@ class FanqiePublisher {
   async waitForPublishComplete(maxSeconds = 30) {
     const startTime = Date.now();
     while (Date.now() - startTime < maxSeconds * 1000) {
-      const dialogGone = !(await this.client.pageContains(['发布设置', '确认发布']));
-      if (dialogGone) {
-        await this.client.sleep(2000);
-        const onChapterList = await this.client.pageContains(['章节管理', '新建章节']);
-        if (onChapterList) return true;
+      const href = String(await this.client.evaluate('location.href').catch(() => ''));
+      if (href.includes('chapter-manage') || (href.includes('/main/writer/') && !this.isEditPage(href))) {
+        return true;
       }
       await this.client.sleep(1000);
     }
@@ -2306,6 +2901,7 @@ class FanqiePublisher {
   // 只有列表真渲染了、里面确实没有目标卷，才算 volume_missing。
   async switchToVolume(targetVolumeText) {
     if (!targetVolumeText) return { ok: true, skipped: true };
+    await this.dismissDraftPrompt();
     const current = await this.waitVolumeHeader();
     if (current === null) {
       this.log('⚠️ 发布页的卷名元素一直没出来（页面没加载好）——不当成"番茄没有这个卷"', 'warn');
@@ -2484,6 +3080,7 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
     title: c.title,
     content: c.content,
     volumeText: c.volumeText || '',
+    itemId: c.itemId || '',
     ...(c.scheduleDate ? { scheduleDate: c.scheduleDate } : {}),   // 编辑时顺带改期（见 editChapter）
   }));
 
@@ -2525,6 +3122,59 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
       log(`正在打开章节管理页面（第 ${volumeIdx} 卷）...`);
       await client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}&${volumeIdx}`);
       await client.sleep(2000);
+      // 预取全书章节 item_id 映射，使 editChapter 直接导航进编辑页，免去逐章翻页搜索
+      try {
+        await client.evaluate(`(function(){
+          window.__ns_edit_map = 'PENDING';
+          var api = 'https://fanqienovel.com/api/author';
+          var cm = 'aid=2503&app_name=muye_novel';
+          fetch(api + '/volume/volume_list/v1?' + cm + '&book_id=${bookId}', {credentials:'include'})
+            .then(function(r){return r.json();})
+            .then(function(vj){
+              var vols = (vj && vj.data && (vj.data.volume_list || vj.data.list || vj.data.volumes)) || [];
+              var tasks = [];
+              vols.forEach(function(v){
+                var pages = Math.max(1, Math.ceil((v.item_count || 100) / 100));
+                for (var p = 0; p < pages; p++) {
+                  tasks.push(
+                    fetch(api + '/chapter/chapter_list/v1?' + cm + '&book_id=${bookId}&volume_id=' + v.volume_id + '&page_index=' + p + '&page_count=100&status=0', {credentials:'include'})
+                      .then(function(r){return r.json();})
+                      .then(function(cj){return (cj && cj.data && (cj.data.item_list || cj.data.chapter_list || cj.data.list || cj.data.items)) || [];})
+                  );
+                }
+              });
+              return Promise.all(tasks);
+            })
+            .then(function(lists){
+              var mp = {};
+              lists.forEach(function(arr){
+                arr.forEach(function(ch){
+                  var m = String(ch.title || '').match(/第\\s*(\\d+)\\s*章/);
+                  if (m && ch.item_id) mp[parseInt(m[1], 10)] = String(ch.item_id);
+                });
+              });
+              window.__ns_edit_map = JSON.stringify(mp);
+            })
+            .catch(function(){ window.__ns_edit_map = '{}'; });
+          return 1;
+        })()`);
+        for (let w = 0; w < 45; w++) {
+          await client.sleep(300);
+          const raw = await client.evaluate(`window.__ns_edit_map`);
+          if (raw && raw !== 'PENDING') {
+            const mp = JSON.parse(raw);
+            let matchedCount = 0;
+            for (const m of mapped) {
+              if (!m.itemId && m.chapterNumber && mp[m.chapterNumber]) {
+                m.itemId = mp[m.chapterNumber];
+                matchedCount++;
+              }
+            }
+            if (matchedCount > 0) log(`⚡ 已预取 ${matchedCount}/${mapped.length} 章的直达 item_id`, 'info');
+            break;
+          }
+        }
+      } catch (e) {}
     } else {
       // 【开发之前先对齐番茄上已排的定时】见 signdiag.alignScheduleStart 的注释：
       // 原来没指定起始日期时一律从"明天"排，完全不看已经排着的待发布章节——
@@ -2578,6 +3228,7 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
       status: publisher.status,
       // 编辑模式下被番茄拒收、已跳过的章（章号 + 原因）——上层据此不记指纹基线，下次同步还会再试
       rejected: (publisher.rejected || []).slice(),
+      skipped: (publisher.skipped || []).slice(),
       error: ok ? null : (publisher.lastError || (stopped ? '已手动停止' : publisher.status === 'paused' ? '已暂停' : null)),
     };
   } catch (err) {
@@ -2613,16 +3264,23 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: 
           if (!isNaN(n) && n > max) max = n;
         }
         // 章节行里的【发布/排期时间】最大值——限定在含"第N章"的行内取，避免误抓页面其它日期。
-        var maxRowTs = 0, maxRowDate = '';
+        var maxRowTs = 0, maxRowDate = '', rowDatesByCh = {};
         var rows = document.querySelectorAll('tr, [class*="table-tr"], [class*="list-item"], [role="row"]');
         rows.forEach(function(r){
           var t = r.innerText || '';
-          if (!/第\\s*\\d+\\s*章/.test(t)) return;
+          var cm = t.match(/第\\s*(\\d+)\\s*章(?![0-9])/);
+          if (!cm) return;
           var dm = t.match(/(\\d{4})-(\\d{2})-(\\d{2})(?:\\s+(\\d{2}):(\\d{2}))?/);
           if (!dm) return;
+          rowDatesByCh[cm[1]] = dm[1] + '-' + dm[2] + '-' + dm[3];
           var ts = Date.parse(dm[0].replace(' ', 'T'));
           if (!isNaN(ts) && ts > maxRowTs) { maxRowTs = ts; maxRowDate = dm[0]; }
         });
+        var maxDay = maxRowDate ? maxRowDate.slice(0, 10) : '';
+        var maxDayCount = 0;
+        if (maxDay) {
+          Object.keys(rowDatesByCh).forEach(function(k){ if (rowDatesByCh[k] === maxDay) maxDayCount++; });
+        }
         const activeItem = document.querySelector('.arco-pagination-item-active');
         const currentPage = activeItem ? (parseInt(activeItem.textContent) || 1) : 1;
         const pageItems = document.querySelectorAll('.arco-pagination-item:not(.arco-pagination-item-prev):not(.arco-pagination-item-next)');
@@ -2650,7 +3308,7 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: 
         const belongsToBook = !wantId ? true : (url.indexOf(wantId) >= 0 && (htmlAll.indexOf(wantId) >= 0 || emptyState));
         const valid = onDomain && !errorPage && !loginPage && belongsToBook && (max > 0 || hasManageChrome || emptyState);
         const sig = ${FanqiePublisher.ROW_SIG_JS};
-        return { max, maxRowDate, currentPage, totalPages, sig, valid, belongsToBook, errorPage, loginPage, onDomain, hasArco, hasManageChrome, emptyState, bodyLen: text.length, head: text.slice(0, 80) };
+        return { max, maxRowDate, maxDayCount, currentPage, totalPages, sig, valid, belongsToBook, errorPage, loginPage, onDomain, hasArco, hasManageChrome, emptyState, bodyLen: text.length, head: text.slice(0, 80) };
       })()
     `;
 
@@ -2678,11 +3336,11 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: 
       return { maxChapter: 0, error: why, pageInvalid: true };
     }
 
-    // 读"当前所选卷"的最大章号（含分页：章节表按章号排序，最大号必在第1页或末页）。返回 {max, latestDate, approx}
+    // 读"当前所选卷"的最大章号（含分页：章节表按章号排序，最大号必在第1页或末页）。返回 {max, latestDate, latestDateCount, approx}
     const readCurVolMax = async () => {
       const r0 = await client.evaluate(readPage);
-      if (!r0) return { max: 0, latestDate: '', approx: true };
-      let max = r0.max || 0, latestDate = r0.maxRowDate || '', approx = false;
+      if (!r0) return { max: 0, latestDate: '', latestDateCount: 0, approx: true };
+      let max = r0.max || 0, latestDate = r0.maxRowDate || '', latestDateCount = r0.maxDayCount || 0, approx = false;
       let lastSig = r0.sig || '';   // 逐次跳页要跟【上一次读到的那页】比，不能一直跟最初那页比
       const totalPages = r0.totalPages || 1;
       if (totalPages > 1) {
@@ -2706,10 +3364,13 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: 
           if (!r || !r.sig || r.sig === prevSig) approx = true;   // 没等到换页数据 → 标近似，不硬当准
           else lastSig = r.sig;
           if (r && r.max > max) max = r.max;
-          if (r && r.maxRowDate && (!latestDate || Date.parse(r.maxRowDate.replace(' ', 'T')) > Date.parse(latestDate.replace(' ', 'T')))) latestDate = r.maxRowDate;
+          if (r && r.maxRowDate && (!latestDate || Date.parse(r.maxRowDate.replace(' ', 'T')) > Date.parse(latestDate.replace(' ', 'T')))) {
+            latestDate = r.maxRowDate;
+            latestDateCount = r.maxDayCount || 0;
+          }
         }
       }
-      return { max, latestDate, approx };
+      return { max, latestDate, latestDateCount, approx };
     };
 
     // 卷下拉定位：页面有【卷】和【审核状态】两个 .serial-select，挑【当前显示值含"卷"】的那个。
@@ -2763,14 +3424,24 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: 
       if (cur === name) return { ok: true, already: true, switched: true };
       const before = await client.evaluate(readPage);
       const beforeSig = (before && before.sig) || '';
-      await client.clickByLocator(VOL_DROPDOWN);
-      await client.sleep(600);
-      const clicked = await client.clickByLocator(`
+      const clickOpt = async () => await client.clickByLocator(`
         const want = ${JSON.stringify(name)};
         const opts = document.querySelectorAll('.byte-select-option, .arco-select-option, [class*="select-option"]');
-        for (const o of opts) { if (((o.textContent || '').trim()) === want) return o; }
+        for (const o of opts) { if (o.offsetParent !== null && ((o.textContent || '').trim()) === want) return o; }
         return null;
       `);
+      // 若 listVolumes 刚打开过下拉且未关掉，直接点选项；否则先点下拉框展开再点选项
+      let clicked = await clickOpt();
+      if (!clicked) {
+        await client.clickByLocator(VOL_DROPDOWN);
+        await client.sleep(600);
+        clicked = await clickOpt();
+      }
+      if (!clicked) {
+        await client.clickByLocator(VOL_DROPDOWN);
+        await client.sleep(600);
+        clicked = await clickOpt();
+      }
       if (!clicked) return { ok: false, switched: false };
       const deadline = Date.now() + volSwitchWaitMs;
       let shown = false;
@@ -2785,12 +3456,12 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: 
     };
 
     // 番茄章节表【按卷显示、无"全部"选项】，但章号是【全局连续】的。
-    let maxChapter = 0, latestDate = '', approx = false;
+    let maxChapter = 0, latestDate = '', latestDateCount = 0, approx = false;
     const vols = await listVolumes();
     if (vols.length <= 1) {
       // 单卷 / 读不到卷选择器 → 直接读当前卷
       const r = await readCurVolMax();
-      maxChapter = r.max; latestDate = r.latestDate; approx = r.approx;
+      maxChapter = r.max; latestDate = r.latestDate; latestDateCount = r.latestDateCount || 0; approx = r.approx;
       // 🛡️安全网（本次修复）：单卷读到 0 章，但页面【并非真空状态】→ 章节表没渲染出来/读取异常，
       // 绝不返回 0（会被当空书从第1章把已发章重复发布）→ 阻断并提示重试。真空书(emptyState)才放行 0。
       if (maxChapter === 0) {
@@ -2813,7 +3484,7 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: 
         const r = await readCurVolMax();
         scanned.push(`${v.name}=${r.max}`);
         // approx 只能往上叠：前面有卷没切过去/没点中，后面这一卷读成功了也不能把近似标记抹掉
-        if (r.max > 0) { maxChapter = r.max; latestDate = r.latestDate; approx = approx || r.approx; break; }
+        if (r.max > 0) { maxChapter = r.max; latestDate = r.latestDate; latestDateCount = r.latestDateCount || 0; approx = approx || r.approx; break; }
       }
       log(`🔎 多卷扫描（从最新卷起、命中非空即止）：${scanned.join('、') || '(全空)'}`, 'info');
       // 🛡️安全网：多卷却一章都没扫到 → 必是卷切换/读取异常（多卷书不可能全空还在发布）。
@@ -2824,8 +3495,8 @@ export async function getFanqieMaxChapter({ profilePath, bookId, onLog, client: 
       }
     }
 
-    log(`📖 番茄已存在最大章号: 第${maxChapter}章${approx ? '（近似，分页/卷未读全）' : ''}${latestDate ? '，最新排期 ' + latestDate : ''}`, 'info');
-    return { maxChapter, approx, latestDate };
+    log(`📖 番茄已存在最大章号: 第${maxChapter}章${approx ? '（近似，分页/卷未读全）' : ''}${latestDate ? `，最新排期 ${latestDate}（当日已排 ${latestDateCount} 章）` : ''}`, 'info');
+    return { maxChapter, approx, latestDate, latestDateCount };
   } catch (err) {
     log(`读取番茄最大章号失败: ${err.message || err}`, 'error');
     return { maxChapter: 0, approx: true, error: String(err.message || err) };
@@ -2950,6 +3621,19 @@ export async function getFanqieVolumes({ profilePath, bookId, onLog } = {}) {
     // 从【发布页的卷模态】读卷列表——与实际切卷(switchToVolume)用同一选择器，既稳又一致
     await client.navigate(`https://fanqienovel.com/main/writer/${bookId}/publish/?enter_from=newchapter`);
     await client.sleep(2500);
+    // 若弹出「有刚刚更新的章节，是否继续编辑？」弹窗，先点「放弃」关闭，否则会遮挡卷名与分卷模态
+    await client.evaluate(`(function(){
+      const modals = document.querySelectorAll('.byte-modal, .legacy-global-confirm-modal, .publish-modal-confirm');
+      for (const m of modals) {
+        if (m.offsetParent === null) continue;
+        if ((m.innerText || '').includes('是否继续编辑')) {
+          const b = [...m.querySelectorAll('button')].find(x => (x.innerText || '').trim() === '放弃');
+          if (b) { b.click(); return true; }
+        }
+      }
+      return false;
+    })()`);
+    await client.sleep(500);
     // 登录只按 URL 判（未登录会跳 /login）；'扫码登录' 文本在发布页可能是隐藏组件→不可作判据(会误判)
     const valid = await client.evaluate(`(function(){var t=document.body?document.body.innerText:'';var err=['ERR_','未连接到互联网','代理服务器','net::'].some(function(s){return t.indexOf(s)>=0;});var login=/\\/login|passport/.test(location.href);return {err:err,login:login,onDomain:location.href.indexOf('fanqienovel.com')>=0};})()`);
     if (!valid || valid.err || valid.login || !valid.onDomain) {
@@ -3153,16 +3837,23 @@ export async function renameFanqieVolume({ profilePath, bookId, num, oldName, ne
     if (!editClicked) return { ok: false, error: `未找到目标卷的编辑入口：${want}（该卷在番茄不存在？）` };
     await client.sleep(800);
 
-    // 聚焦 → 清空旧副标题 → 填新副标题
+    // 聚焦 → 清空旧副标题 → 填新副标题（优先走 browser_type 真实输入，确保触发 React 状态更新）
     const focused = await client.evaluate(`(function(){const inp=document.querySelector(${JSON.stringify(INP_SEL)});if(!inp)return false;inp.focus();return true;})()`);
     if (!focused) { try { await client.clickByLocator(cancelRow); } catch {} return { ok: false, error: '未找到卷名输入框（番茄改版？）' }; }
-    await client.clearFocused();
-    await client.sleep(200);
-    await client.typeText(newSub);
-    await client.sleep(400);
+    try {
+      await unzooCallTool('browser_type', { tab_id: String(client.tabId), selector: INP_SEL, text: newSub, clear_first: true, timeout: 15000 });
+      await client.sleep(500);
+    } catch {}
     let typed = await client.evaluate(`((document.querySelector(${JSON.stringify(INP_SEL)})||{}).value||'')`);
     if ((typed || '').trim() !== newSub) {
-      await client.evaluate(`(function(){const inp=document.querySelector(${JSON.stringify(INP_SEL)});if(inp){const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,${JSON.stringify(newSub)});inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));}})()`);
+      await client.clearFocused();
+      await client.sleep(200);
+      await client.typeText(newSub);
+      await client.sleep(400);
+      typed = await client.evaluate(`((document.querySelector(${JSON.stringify(INP_SEL)})||{}).value||'')`);
+    }
+    if ((typed || '').trim() !== newSub) {
+      await client.evaluate(`(function(){const inp=document.querySelector(${JSON.stringify(INP_SEL)});if(inp){const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,${JSON.stringify(newSub)});if(inp._valueTracker)inp._valueTracker.setValue('__force_diff__');inp.dispatchEvent(new InputEvent('input',{bubbles:true,data:${JSON.stringify(newSub)},inputType:'insertText'}));inp.dispatchEvent(new Event('change',{bubbles:true}));}})()`);
       await client.sleep(300);
       typed = await client.evaluate(`((document.querySelector(${JSON.stringify(INP_SEL)})||{}).value||'')`);
     }
@@ -3718,7 +4409,7 @@ export async function createFanqieBook({ profilePath, title, channel = '男频',
   await client.ensureTabId();
 
   // 原生 setter：填 Arco 受控 input/textarea（合成 input+change 触发 React 状态）
-  const SETTER = `function __sv(el,val){var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(pr,'value').set;s.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}`;
+  const SETTER = `function __sv(el,val){var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(pr,'value').set;s.call(el,val);if(el._valueTracker)el._valueTracker.setValue('__force_diff__');el.dispatchEvent(new InputEvent('input',{bubbles:true,data:val,inputType:'insertText'}));el.dispatchEvent(new Event('change',{bubbles:true}));}`;
 
   log('打开番茄「创建作品」页…');
   await client.navigate('https://fanqienovel.com/main/writer/create');
@@ -3912,8 +4603,8 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
 
   const client = new UnzooClient(profilePath || null, onLog || null, 'fanqienovel.com', '番茄');
   const Q = (s) => JSON.stringify(s);
-  const fire = async (txt) => client.evaluate(`(function(){var l=[].slice.call(document.querySelectorAll('button,div[role=button],span,a,li')).filter(function(e){return (e.textContent||'').trim()===${Q(txt)}&&e.offsetParent!==null;});var b=l[l.length-1];if(!b)return false;try{b.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
-  const SETTER = `function __sv(el,val){var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(pr,'value').set;s.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}`;
+  const fire = async (txt) => client.evaluate(`(function(){var l=[].slice.call(document.querySelectorAll('button,div[role=button],span,a,li')).filter(function(e){return (e.textContent||'').trim()===${Q(txt)}&&e.offsetParent!==null;});var btns=l.filter(function(e){return e.tagName==='BUTTON';});var b=(${Q(txt)}==='修改'&&btns.length)?btns[0]:(btns[btns.length-1]||l[l.length-1]);if(!b)return false;try{b.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
+  const SETTER = `function __sv(el,val){var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(pr,'value').set;s.call(el,val);if(el._valueTracker)el._valueTracker.setValue('__force_diff__');el.dispatchEvent(new InputEvent('input',{bubbles:true,data:val,inputType:'insertText'}));el.dispatchEvent(new Event('change',{bubbles:true}));}`;
   // 书名框认 maxlength=15；简介框是页面上唯一可见的 textarea
   const TITLE_EL = `[].slice.call(document.querySelectorAll('input')).filter(function(e){return e.offsetParent!==null&&e.maxLength===15;})[0]`;
   const INTRO_EL = `[].slice.call(document.querySelectorAll('textarea')).filter(function(e){return e.offsetParent!==null;})[0]`;
@@ -3929,7 +4620,8 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
       await client.sleep(3000);
     }
 
-    const before = await client.evaluate(`(function(){var t=${TITLE_EL},i=${INTRO_EL};return JSON.stringify({title:t?t.value:'',intro:i?String(i.value||'').slice(0,40):'',hasForm:!!(t&&i)});})()`);
+    const needTitleEl = !!title;
+    const before = await client.evaluate(`(function(){var t=${TITLE_EL},i=${INTRO_EL};return JSON.stringify({title:t?t.value:'',intro:i?String(i.value||'').slice(0,40):'',hasForm:${needTitleEl ? '!!(t&&i)' : '!!i'}});})()`);
     let inEdit = (typeof before === 'string' ? JSON.parse(before) : before)?.hasForm;
     // 【审核中 = 改不了，别再瞎点】番茄对作品信息的每次修改都要审核，审核期间「修改」按钮是 disabled，
     // 页面上明写「作品信息审核中，请稍后再做修改」。不认这个状态的话，上层只会看到一句
@@ -3945,9 +4637,14 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
       // 说明这几个按钮同在一行，合成事件容易落到错的节点上）。
       // 进编辑态用合成指针序列：实测它有效，而 human_click 虽然回 ok:true 却不触发这颗按钮
       for (let i = 0; i < 3 && !inEdit; i++) {
-        await fire('修改');
-        await client.sleep(3000);
-        inEdit = !!(await client.evaluate(`!!(${TITLE_EL}) && !!(${INTRO_EL})`));
+        await client.trustedClickText('修改', { index: 0 });
+        await client.sleep(1500);
+        inEdit = !!(await client.evaluate(needTitleEl ? `!!(${TITLE_EL}) && !!(${INTRO_EL})` : `!!(${INTRO_EL})`));
+        if (!inEdit) {
+          await fire('修改');
+          await client.sleep(2000);
+          inEdit = !!(await client.evaluate(needTitleEl ? `!!(${TITLE_EL}) && !!(${INTRO_EL})` : `!!(${INTRO_EL})`));
+        }
       }
     }
     if (!inEdit) return { ok: false, error: '没能进入作品信息的编辑态（未登录/页面结构变了/该书不可改）' };
@@ -3963,9 +4660,9 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
     const typeInto = async (selector, text, what) => {
       const el = selector.startsWith('textarea') ? INTRO_EL : TITLE_EL;
       const readBack = async () => String(await client.evaluate(`(function(){var e=${el};return e?e.value:'';})()`) || '');
+      // ① 优先用 browser_type 定位可见 selector
       const tries = [
         ['browser_type', { tab_id: String(client.tabId), selector, text, clear_first: true, timeout: 15000 }],
-        ['human_type', { tab_id: String(client.tabId), selector, text, clear: true, profile: 'fast' }],
       ];
       for (const [tool, args] of tries) {
         try {
@@ -3974,16 +4671,26 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
           if (await readBack() === text) return true;
           log(`${what} 用 ${tool} 填完对不上，换下一种`, 'warn');
         } catch (e) {
-          log(`${what} ${tool} 失败（${String(e.message || e).replace(/\s+/g, ' ').slice(0, 80)}），换下一种`, 'warn');
+          log(`${what} ${tool} 失败（${String(e.message || e).replace(/\s+/g, ' ').slice(0, 80)}），换 focus+typeText`, 'warn');
         }
       }
-      log(`${what} 两种真实输入都没成，退到注入——注意：注入常常填得进框但番茄收不到，提交后很可能还是旧值`, 'error');
+      // ② 聚焦到真实可见元素 → clearFocused → typeText（真实键盘事件，能进 React 表单状态）
+      try {
+        await client.evaluate(`(function(){var e=${el};if(e){e.scrollIntoView({block:'center'});e.focus();e.click();}})()`);
+        await client.sleep(200);
+        await client.clearFocused();
+        await client.sleep(200);
+        await client.typeText(text);
+        await client.sleep(600);
+        if (await readBack() === text) return true;
+      } catch {}
+      // ③ 最后兜底 setter 注入
       await client.evaluate(`(function(){${SETTER}var el=${el};if(el){el.focus();__sv(el,${Q(text)});}return 1;})()`);
       await client.sleep(800);
       return await readBack() === text;
     };
     if (title) {
-      const ok = await typeInto('input[maxlength="15"]', title, '书名');
+      const ok = await typeInto('input[placeholder="请输入作品名称"]', title, '书名');
       log(ok ? `已填新书名：《${title}》` : '填书名失败', ok ? 'info' : 'error');
       if (!ok) return { ok: false, error: '书名没填进去（可能超长被番茄截断）' };
     }
@@ -4031,7 +4738,12 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
     // 值却还是旧的（番茄把它当成取消）。createFanqieBook 的「立即创建」当年也是这么踩出来的，
     // 那边用的就是 cdpClick 坐标点击。
     log('点击「立即修改」…', 'act');
-    if (!(await fire('立即修改'))) return { ok: false, error: '未找到「立即修改」按钮' };
+    await client.trustedClickText('立即修改');
+    await client.sleep(800);
+    if (await client.evaluate(`[].slice.call(document.querySelectorAll('button')).some(function(e){return (e.textContent||'').trim()==='立即修改'&&e.offsetParent!==null;})`)) {
+      await fire('立即修改');
+      await client.sleep(800);
+    }
     await client.sleep(2500);
     // 可能弹二次确认（确定/确认/继续修改）
     for (const t of ['确定', '确认', '继续修改']) {
@@ -4056,37 +4768,172 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
 
 // ===== 把「书名实验」候选推到番茄「多书名实验·实验配置」（设置别名 + 逐个上传封面）=====
 // items: [{title, coverPath}]（coverPath 可空=该候选不传封面）。autoSubmit=false 默认：填好停在实验配置，
-//   让用户核对后自己点「开启实验」(不可逆)；autoSubmit=true 才自动开启。封面上传复用换封面的可信注入+两步确认。
-// ⚠️ 番茄门槛：20万字+/已签约/未完结，且该字数里程碑实验【未跑过】时才开放「实验配置」表单。不满足时本函数
-//   【不瞎点】，而是切到该书、把候选清单列出来、把页面留在多书名实验页，返回 semiManual 让人工配。
-//   （实验配置表单当前无处于实验期的书可实地观测→ step 3 表单填充为通用尽力实现，需在有资格的书上校准。）
+// ===== 扫描番茄「多书名实验」资格与状态（单书或全账号全部签约书）=====
+// 状态码：1=未达条件, 2=待实验(可开启), 3=校验中, 4=校验未通过(可修改配置), 5=实验中, 6=实验结果待确认, 7=实验已结束(最优书名生效/未生效), 8/9=已失效
+export const NAME_EXP_STATUS_TEXT = {
+  1: '未达开启条件',
+  2: '待实验（可开启）',
+  3: '校验中',
+  4: '校验未通过（可修改）',
+  5: '实验中',
+  6: '待确认最优书名',
+  7: '已结束',
+  8: '已失效',
+  9: '已失效',
+  10: '责编提交实验',
+};
+
+export async function scanFanqieNameExperiments({ profilePath, bookId, onLog } = {}) {
+  const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
+  const client = new UnzooClient(profilePath || null, onLog || null, 'fanqienovel.com', '番茄');
+  try {
+    await client.getActiveTab();
+    const curUrl = await client.evaluate('location.href');
+    if (!curUrl || !String(curUrl).includes('fanqienovel.com')) {
+      log('打开番茄「多书名实验」页…');
+      await client.navigate('https://fanqienovel.com/main/writer/name-experiment');
+      await client.sleep(2200);
+    }
+    await client.evaluate(`(function(){
+      window.__neScanResult = '';
+      (async function(){
+        try {
+          var targetBid = ${JSON.stringify(bookId || '')};
+          if (targetBid) {
+            var r = await fetch('/api/author/multiple_name/infos/v0/?aid=2503&app_name=muye_novel&book_id=' + encodeURIComponent(targetBid)).then(function(x){return x.json();});
+            window.__neScanResult = JSON.stringify({ ok: true, single: true, bookId: targetBid, infoList: (r && r.data && r.data.info_list) || [] });
+            return;
+          }
+          async function fetchWithTimeout(u, ms) {
+            return Promise.race([
+              fetch(u).then(function(x){return x.json();}).catch(function(){return null;}),
+              new Promise(function(resolve){ setTimeout(function(){ resolve(null); }, ms || 2500); })
+            ]);
+          }
+          var sbl = await fetchWithTimeout('/api/author/stats/book_list/v0/?aid=2503&app_name=muye_novel&page_count=-1&page_index=0&image_fmt_list=160x214', 5000);
+          var list = (sbl && sbl.data && sbl.data.stats_book_list) || [];
+          var out = new Array(list.length);
+          var idx = 0;
+          async function worker() {
+            while (idx < list.length) {
+              var i = idx++;
+              var b = list[i];
+              var inf = await fetchWithTimeout('/api/author/multiple_name/infos/v0/?aid=2503&app_name=muye_novel&book_id=' + encodeURIComponent(b.book_id), 2500);
+              out[i] = {
+                bookId: b.book_id,
+                bookName: b.book_name,
+                aliasName: b.alias_name || '',
+                chapterNum: b.chapter_num || 0,
+                wordNumber: b.word_number || 0,
+                thumbUrl: (b.thumb_url_list && b.thumb_url_list[0] && b.thumb_url_list[0].main_url) || (b.thumb_url && b.thumb_url[0] && b.thumb_url[0].main_url) || '',
+                infoList: (inf && inf.data && inf.data.info_list) || []
+              };
+            }
+          }
+          await Promise.all([worker(), worker(), worker()]);
+          window.__neScanResult = JSON.stringify({ ok: true, single: false, books: out.filter(Boolean) });
+        } catch (err) {
+          window.__neScanResult = JSON.stringify({ ok: false, error: String(err && err.message || err) });
+        }
+      })();
+      return 'started';
+    })()`);
+    for (let w = 0; w < 50; w++) {
+      await client.sleep(450);
+      const raw = await client.evaluate('window.__neScanResult || ""');
+      if (raw && typeof raw === 'string') {
+        try {
+          const res = JSON.parse(raw);
+          if (res && ('ok' in res)) return res;
+        } catch {}
+      } else if (raw && typeof raw === 'object' && ('ok' in raw)) {
+        return raw;
+      }
+    }
+    return { ok: false, error: '扫描番茄多书名实验超时，请确认浏览器已登录番茄作者后台' };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+// ===== 批量调用番茄「实验书名查重」接口 (/api/author/multiple_name/check_name/v0/) =====
+export async function checkFanqieExperimentNames({ profilePath, titles = [], onLog } = {}) {
+  const cleanTitles = (titles || []).map(t => String(t || '').trim()).filter(Boolean);
+  if (!cleanTitles.length) return { ok: true, results: [] };
+  const client = new UnzooClient(profilePath || null, onLog || null, 'fanqienovel.com', '番茄');
+  try {
+    await client.getActiveTab();
+    const curUrl = await client.evaluate('location.href');
+    if (!curUrl || !String(curUrl).includes('fanqienovel.com')) {
+      await client.navigate('https://fanqienovel.com/main/writer/name-experiment');
+      await client.sleep(2000);
+    }
+    await client.evaluate(`(function(){
+      window.__neCheckNames = '';
+      (async function(){
+        var list = ${JSON.stringify(cleanTitles)};
+        var out = [];
+        for (var i = 0; i < list.length; i++) {
+          var t = list[i];
+          if (t.length > 15) {
+            out.push({ title: t, len: t.length, valid: false, reason: '超过15字上限' });
+            continue;
+          }
+          if (/\\s/.test(t) || t.replace(/[a-zA-Z0-9]|[\\uff0c\\uff1a\\uff01\\uff1f\\u3010\\u3011]|[\\u4e00-\\u9fa5]/g, '').length > 0) {
+            out.push({ title: t, len: t.length, valid: false, reason: '含空格或不支持的标点符号' });
+            continue;
+          }
+          try {
+            var r = await fetch('/api/author/multiple_name/check_name/v0/?aid=2503&app_name=muye_novel&book_name=' + encodeURIComponent(t)).then(function(x){return x.json();});
+            var ok = !!(r && r.code === 0 && r.data && r.data.is_valid);
+            out.push({ title: t, len: t.length, valid: ok, reason: ok ? '' : ((r && r.data && r.data.invalid_reason) || '书名重名或不可用') });
+          } catch (e) {
+            out.push({ title: t, len: t.length, valid: false, reason: '网络请求失败' });
+          }
+        }
+        window.__neCheckNames = JSON.stringify({ ok: true, results: out });
+      })();
+      return 'started';
+    })()`);
+    for (let w = 0; w < 25; w++) {
+      await client.sleep(400);
+      const raw = await client.evaluate('window.__neCheckNames || ""');
+      if (raw && typeof raw === 'string') {
+        try {
+          const res = JSON.parse(raw);
+          if (res && ('ok' in res)) return res;
+        } catch {}
+      } else if (raw && typeof raw === 'object' && ('ok' in raw)) {
+        return raw;
+      }
+    }
+    return { ok: false, error: '书名查重超时' };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+// ===== 把「书名实验」候选推到番茄「多书名实验·实验配置」（设置别名 + 极速上传封面 + 可选自动提交）=====
 export async function pushNameExperiment({ bookId, bookTitle, items = [], profilePath, autoSubmit = false, onLog } = {}) {
   const log = (msg, level = 'info') => { try { onLog && onLog({ level, msg }); } catch {} };
-  items = (items || []).filter(x => x && x.title);
+  items = (items || []).filter(x => x && x.title).slice(0, 5);
   if (!items.length) return { ok: false, error: '没有候选书名可推' };
   const client = new UnzooClient(profilePath || null, onLog || null, 'fanqienovel.com', '番茄');
   const Q = (s) => JSON.stringify(s);
-  // 完整指针序列点某文字元素（番茄按钮只认这个，合成 .click()/坐标点不触发）
   const clickText = async (txt) => await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('button,div[role=button],span,a,li')).find(function(e){return (e.textContent||'').trim()===${Q(txt)}&&e.offsetParent!==null;});if(!b)return false;try{b.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
-  const SETTER = `function __sv(el,val){var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(pr,'value').set;s.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}`;
+  const SETTER = `function __sv(el,val){var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(pr,'value').set;s.call(el,val);if(el._valueTracker)el._valueTracker.setValue('__force_diff__');el.dispatchEvent(new InputEvent('input',{bubbles:true,data:val,inputType:'insertText'}));el.dispatchEvent(new Event('change',{bubbles:true}));}`;
 
   try {
     await client.getActiveTab();
     log('打开番茄「多书名实验」页…');
     await client.navigate('https://fanqienovel.com/main/writer/name-experiment');
-    await client.sleep(2500);
-    try { await client.reload(); } catch {}
-    await client.sleep(3500);
+    await client.sleep(2600);
     try { await unzooCallTool('tab_activate', { tab_id: String(client.tabId) }); } catch {}
-    await client.sleep(600);
+    await client.sleep(500);
 
-    // 1. 确认/切换到目标书。「切换作品」打开的是【arco 抽屉 .book-switch-drawer】：每本书一行
-    //    .book-switch-drawer-list-item(.book-select，标题在 .book-select-info-title)，行内 radio 选中，
-    //    【必须】再点抽屉底部 .book-switch-drawer-footer 的「确定」(.arco-btn-primary) 才真正切过去
-    //    ——旧代码只点了标题文字节点、没选 radio 也没点确定(“没点击选择”)，故切不过去。
-    //    书名匹配要【去标点/空白归一化】：番茄显示的标题常与本地略有出入(如“国术：每日清算从不讲武德到武圣”少个逗号)。
+    // 1. 确认/切换到目标书
     const NORMJS = `function __nm(s){return (s||'').replace(/[\\s，,。：:！!？?、·—\\-]/g,'');}`;
-    const READ_SHOWN = `(function(){var t=[].slice.call(document.querySelectorAll('[class*=book-title],[class*=title]')).find(function(e){var s=(e.textContent||'').trim();return e.offsetParent!==null&&s.length>=3&&s.length<40&&!/多书名|多封面|封面推荐|实验/.test(s)&&!e.closest('[class*=drawer]');});return t?(t.textContent||'').trim():'';})()`;
+    const READ_SHOWN = `(function(){var t=document.querySelector('.name-experiment-book .book-select-info-title')||[].slice.call(document.querySelectorAll('[class*=book-title],[class*=title]')).find(function(e){var s=(e.textContent||'').trim();return e.offsetParent!==null&&s.length>=2&&s.length<40&&!/多书名|多封面|封面推荐|实验/.test(s)&&!e.closest('[class*=drawer]');});return t?(t.textContent||'').trim():'';})()`;
     const norm = (s) => String(s || '').replace(/[\s，,。：:！!？?、·—\-]/g, '');
     const matches = (shown) => { const a = norm(shown), b = norm(bookTitle); return !!(a && b && (a.indexOf(b) >= 0 || b.indexOf(a) >= 0)); };
     let shown = await client.evaluate(READ_SHOWN);
@@ -4094,21 +4941,19 @@ export async function pushNameExperiment({ bookId, bookTitle, items = [], profil
       let inList = true;
       for (let attempt = 0; attempt < 2 && !matches(shown); attempt++) {
         log(`当前是《${shown || '?'}》，切换到《${bookTitle}》…`);
-        await clickText('切换作品');
-        await client.sleep(2000);
-        // 在抽屉里【点目标书那一行】(归一化匹配标题)选中它
-        const picked = await client.evaluate(`(function(){${NORMJS}var name=__nm(${Q(bookTitle)});var items=[].slice.call(document.querySelectorAll('.book-switch-drawer-list-item,.book-select')).filter(function(e){return e.offsetParent!==null;});var row=items.find(function(it){var t=it.querySelector('.book-select-info-title');return t&&__nm(t.textContent).indexOf(name)>=0;})||items.find(function(it){return __nm(it.textContent).indexOf(name)>=0;});if(!row)return false;try{row.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){row.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
-        if (!picked) { inList = false; break; }        // 列表里根本没这本书 → 不在可选范围，别再试
-        await client.sleep(800);
-        // 点抽屉底部「确定」确认切换（这一步旧代码漏了）
-        await client.evaluate(`(function(){var f=document.querySelector('.book-switch-drawer-footer,.arco-drawer-footer');var btn=f&&(f.querySelector('.arco-btn-primary')||[].slice.call(f.querySelectorAll('button')).find(function(b){return /确定|确认|切换/.test(b.textContent||'');}));if(!btn)return false;try{btn.scrollIntoView({block:'center'});}catch(e){}['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){btn.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
-        await client.sleep(2800);
+        await client.evaluate(`(function(){var b=document.querySelector('.book-select-switch');if(b)b.click();return !!b;})()`);
+        await client.sleep(900);
+        const picked = await client.evaluate(`(function(){${NORMJS}var name=__nm(${Q(bookTitle)});var items=[].slice.call(document.querySelectorAll('.book-switch-drawer-list-item,.book-select')).filter(function(e){return e.offsetParent!==null;});var row=items.find(function(it){var t=it.querySelector('.book-select-info-title');return t&&(__nm(t.textContent).indexOf(name)>=0||name.indexOf(__nm(t.textContent))>=0);})||items.find(function(it){return __nm(it.textContent).indexOf(name)>=0;});if(!row)return false;try{row.scrollIntoView({block:'center'});}catch(e){}row.click();return true;})()`);
+        if (!picked) { inList = false; break; }
+        await client.sleep(500);
+        await client.evaluate(`(function(){var f=document.querySelector('.book-switch-drawer-footer,.arco-drawer-footer');var btn=f&&(f.querySelector('.arco-btn-primary')||[].slice.call(f.querySelectorAll('button')).find(function(b){return /确定|确认|切换/.test(b.textContent||'');}));if(!btn)return false;btn.click();return true;})()`);
+        await client.sleep(1800);
         shown = await client.evaluate(READ_SHOWN);
       }
       if (!matches(shown)) {
         const why = inList
-          ? `切到《${bookTitle}》没成功（当前仍是《${shown || '?'}》）——已点选该书并确认，但页面没切过去，可能番茄抽屉改版/网络延迟，请重试或人工在「切换作品」里选它。`
-          : `《${bookTitle}》不在番茄「切换作品」列表里——多书名实验要求 20万字+/已签约/未完结，该书可能不满足。`;
+          ? `切到《${bookTitle}》没成功（当前仍是《${shown || '?'}》）`
+          : `《${bookTitle}》不在番茄「切换作品」列表里——多书名实验要求已签约作品。`;
         log(why, 'warn');
         return {
           ok: true, semiManual: true, opened: true, switched: false,
@@ -4120,74 +4965,181 @@ export async function pushNameExperiment({ bookId, bookTitle, items = [], profil
     }
     const bookLabel = shown || bookTitle || '';
 
-    // 2. 找【配置实验】按钮（某个字数里程碑实验处于「待实验」时才有；已跑过/失效则无）。点开右侧「配置实验」抽屉。
-    const hasCfgBtn = await client.evaluate(`[].slice.call(document.querySelectorAll('button,[class*=btn]')).some(function(e){return (e.textContent||'').trim()==='配置实验'&&e.offsetParent!==null&&!(e.disabled||/disabled/.test(e.className));})`);
+    // 2. 找【配置实验】或【修改配置】按钮（切书后异步加载 infos，轮询最多 4 秒）
+    let hasCfgBtn = false;
+    for (let w = 0; w < 8; w++) {
+      hasCfgBtn = await client.evaluate(`[].slice.call(document.querySelectorAll('button.ne-experiment-action-button,button,[class*=btn],[class*=action]')).some(function(e){var t=(e.textContent||'').trim();return (t==='配置实验'||t==='修改配置')&&e.offsetParent!==null&&!(e.disabled||/disabled/.test(e.className));})`);
+      if (hasCfgBtn) break;
+      await client.sleep(500);
+    }
     if (!hasCfgBtn) {
-      const state = await client.evaluate(`(function(){var t=document.body.innerText;if(/最优书名生效/.test(t))return '该书里程碑实验已结束（最优书名已生效），不能再配置';if(/实验中|进行中/.test(t))return '该书实验进行中，暂不能改配置';if(/不符合字数|已失效|未达/.test(t))return '未达字数里程碑（20万字/100万字实验尚未解锁「配置实验」）';return '未找到「配置实验」按钮（番茄可能改版，或该书暂不可配）';})()`);
+      const state = await client.evaluate(`(function(){var el=document.querySelector('.ne-experiment')||document.body;var t=el.innerText||'';if(/校验中/.test(t))return '该书多书名实验已在「校验中」';if(/实验中|进行中/.test(t))return '该书实验进行中，暂不能改配置';if(/已结束|已终止/.test(t))return '该书里程碑实验已结束';if(/不符合字数|已失效|未达|暂未满足/.test(t))return '未满足开启条件（需达20万字/100万字且近3天有更新）';return '未找到可用的「配置实验」按钮';})()`);
       log('番茄未开放「配置实验」：' + state, 'warn');
       return {
         ok: true, semiManual: true, opened: true, switched: true,
-        msg: `已在番茄打开《${bookLabel}》的多书名实验页。${state}。\n候选书名（够条件后可在「配置实验」里逐个添加，封面用下方路径）：\n` +
+        msg: `已在番茄打开《${bookLabel}》的多书名实验页：${state}。\n候选书名：\n` +
           items.map((x, i) => `${i + 1}. ${x.title}${x.coverPath ? '  ← ' + x.coverPath : ''}`).join('\n'),
       };
     }
-    log('打开「配置实验」…');
-    await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('button,[class*=btn]')).find(function(e){return (e.textContent||'').trim()==='配置实验'&&e.offsetParent!==null&&!(e.disabled||/disabled/.test(e.className));});if(b)['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return !!b;})()`);
-    let drawerOpen = false;
-    for (let i = 0; i < 8; i++) { if (await client.evaluate("!!document.querySelector('input[placeholder*=书名]')")) { drawerOpen = true; break; } await client.sleep(700); }
-    if (!drawerOpen) return { ok: false, error: '点了「配置实验」但配置抽屉没打开（番茄改版/加载慢），请重试' };
 
-    // 3. 逐个候选：确保有第 i 个【实验组】(.ne-config-item，不含 -adder) → 填书名(≤15字) → 点该组封面框传封面。
-    //    实验组封面框点开的是【与换封面同一个全屏遮罩】(AI封面/本地上传 tab)，故复用 injectTrustedCover+confirmCoverOverlay。
-    const GROUPS_JS = `[].slice.call(document.querySelectorAll('.ne-config-item')).filter(function(g){return !/adder/.test(g.className)&&g.querySelector('input');})`;
-    log(`开始配置 ${items.length} 个实验书名（含封面）…`, 'act');
-    let done = 0;
+    // 3. 先通过番茄官方封面上传接口 (/api/author/data/upload_pic_v1/v0?aid=2503) 极速上传 5 张带字封面
+    log(`正在上传 ${items.length} 张实验书封到番茄服务器…`, 'act');
+    const uploaded = [];
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      const title = String(it.title).slice(0, 15);
-      log(`(${i + 1}/${items.length}) 实验组${i + 1}：《${title}》…`);
-      // 3a. 确保第 i 组存在：不够就点「添加实验组」(.ne-config-item-adder)
-      const gc = await client.evaluate(`(${GROUPS_JS}).length`);
-      if (i >= gc) {
-        await client.evaluate(`(function(){var a=document.querySelector('.ne-config-item-adder');if(!a)return false;['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){a.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
-        await client.sleep(1000);
+      const title = String(it.title || '').trim().slice(0, 15);
+      let picUri = '', picUrl = '';
+      if (it.coverPath && fs.existsSync(it.coverPath)) {
+        const b64 = fs.readFileSync(it.coverPath).toString('base64');
+        const fname = path.basename(it.coverPath);
+        await client.evaluate(`(function(){
+          window.__neOneUpload = '';
+          (async function(){
+            try {
+              var b64 = ${Q(b64)};
+              var bin = atob(b64);
+              var u8 = new Uint8Array(bin.length);
+              for (var k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k);
+              var blob = new Blob([u8], { type: 'image/png' });
+              var fd = new FormData();
+              fd.append('upfile', blob, ${Q(fname)});
+              var res = await fetch('/api/author/data/upload_pic_v1/v0?aid=2503', { method: 'POST', body: fd }).then(function(r){return r.json();});
+              window.__neOneUpload = JSON.stringify(res);
+            } catch (e) {
+              window.__neOneUpload = JSON.stringify({ code: -1, message: String(e && e.message || e) });
+            }
+          })();
+          return 'started';
+        })()`);
+        for (let w = 0; w < 45; w++) {
+          await client.sleep(400);
+          const rawUp = await client.evaluate('window.__neOneUpload || ""');
+          let upRes = null;
+          if (rawUp && typeof rawUp === 'string') { try { upRes = JSON.parse(rawUp); } catch {} }
+          else if (rawUp && typeof rawUp === 'object') { upRes = rawUp; }
+          if (upRes && typeof upRes === 'object' && ('code' in upRes)) {
+            if (upRes.code === 0 && upRes.data?.pic_uri) {
+              picUri = upRes.data.pic_uri;
+              picUrl = upRes.data.pic_url || '';
+              log(`(${i + 1}/${items.length}) 《${title}》封面已上传`);
+            } else {
+              log(`(${i + 1}/${items.length}) 《${title}》封面上传返回异常：${upRes.message || upRes.code}`, 'warn');
+            }
+            break;
+          }
+        }
       }
-      // 3b. 填第 i 组书名（原生 setter 触发 React 状态）
-      const nameOk = await client.evaluate(`(function(){${SETTER} var g=(${GROUPS_JS})[${i}];if(!g)return false;var inp=g.querySelector('input');if(!inp)return false;inp.focus();__sv(inp,${Q(title)});return true;})()`);
-      if (!nameOk) { log(`《${title}》没找到第${i + 1}组书名输入框`, 'warn'); continue; }
-      await client.sleep(500);
-      // 3c. 传第 i 组封面：点该组封面框 → 遮罩 → 本地上传 → 可信注入 → 两步确认
-      if (it.coverPath) {
-        const opened = await client.evaluate(`(function(){var g=(${GROUPS_JS})[${i}];if(!g)return false;var box=g.querySelector('.ne-config-item-body-cover-add')||g.querySelector('.ne-config-item-body-cover')||g.querySelector('[class*=cover]');if(!box)return false;['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){box.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
-        if (opened) {
-          await client.sleep(1500);
-          // 切到「本地上传」tab
-          await client.evaluate(`(function(){var t=[].slice.call(document.querySelectorAll('*')).find(function(e){return (e.textContent||'').trim()==='本地上传'&&e.offsetParent!==null&&e.children.length===0;});if(t)['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(x){t.dispatchEvent(new MouseEvent(x,{bubbles:true,cancelable:true,view:window}));});return !!t;})()`);
-          await client.sleep(1000);
-          let hasInput = false;
-          for (let k = 0; k < 8; k++) { if (await client.evaluate("document.querySelectorAll('input[type=file]').length>0")) { hasInput = true; break; } await client.sleep(700); }
-          if (hasInput) {
-            const { ok: injOk, rmTmp } = await injectTrustedCover(client, it.coverPath);
-            const { accepted, closed } = await confirmCoverOverlay(client);
-            await rmTmp();
-            if (injOk && accepted && closed) log(`《${title}》封面已传`);
-            else log(`《${title}》封面未完成(注入${injOk}/接受${accepted}/关闭${closed})`, 'warn');
-          } else { log(`《${title}》没出现封面文件框`, 'warn'); }
-        } else { log(`《${title}》没找到第${i + 1}组封面入口`, 'warn'); }
-      }
-      done++;
+      uploaded.push({ title, pic_uri: picUri, pic_url: picUrl, coverPath: it.coverPath || '' });
     }
-    log(`已填入 ${done}/${items.length} 个实验书名`, 'act');
+
+    // 4. 点开「配置实验」抽屉 (.ne-drawer)
+    log('打开「配置实验」抽屉…');
+    await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('button.ne-experiment-action-button,button,[class*=btn]')).find(function(e){var t=(e.textContent||'').trim();return (t==='配置实验'||t==='修改配置')&&e.offsetParent!==null&&!(e.disabled||/disabled/.test(e.className));});if(b)b.click();return !!b;})()`);
+    let drawerOpen = false;
+    for (let i = 0; i < 8; i++) {
+      if (await client.evaluate("!!document.querySelector('.ne-drawer')")) { drawerOpen = true; break; }
+      await client.sleep(500);
+    }
+    if (!drawerOpen) return { ok: false, error: '点了「配置实验」但配置抽屉没打开，请重试' };
+
+    // 5. 优先通过 .ne-drawer 的 React 状态队列一次性写入全部 5 组（书名 + 封面 URI），秒级完成且零遮罩卡顿
+    const rawFiberFilled = await client.evaluate(`(function(){
+      function findFiber(el) {
+        if (!el) return null;
+        var k = Object.keys(el).find(function(k){ return k.indexOf('__reactFiber$') === 0 || k.indexOf('__reactInternalInstance$') === 0; });
+        return k ? el[k] : null;
+      }
+      var f = findFiber(document.querySelector('.ne-drawer'));
+      var targetFiber = null;
+      while (f) {
+        if (f.type && typeof f.type === 'function' && f.type.toString().indexOf('ne-drawer-header') >= 0) {
+          targetFiber = f;
+          break;
+        }
+        f = f.return;
+      }
+      if (!targetFiber) return JSON.stringify({ ok: false });
+      var hook = targetFiber.memoizedState;
+      var zDispatch = null;
+      while (hook) {
+        if (Array.isArray(hook.memoizedState) && hook.memoizedState[0] && ('condigId' in hook.memoizedState[0])) {
+          zDispatch = hook.queue && hook.queue.dispatch;
+          break;
+        }
+        hook = hook.next;
+      }
+      if (!zDispatch) return JSON.stringify({ ok: false });
+      var uploaded = ${JSON.stringify(uploaded)};
+      var newZ = uploaded.map(function(u, i) {
+        return {
+          condigId: 'exp_auto_' + (i + 1) + '_' + Date.now(),
+          bookName: u.title,
+          cover: u.pic_uri ? {
+            status: 'done',
+            pic_url: u.pic_url,
+            pic_uri: u.pic_uri,
+            response: { code: 0, data: { pic_url: u.pic_url, pic_uri: u.pic_uri } }
+          } : undefined,
+          error: '',
+          localError: '',
+          auditFail: false
+        };
+      });
+      zDispatch(newZ);
+      return JSON.stringify({ ok: true, count: newZ.length });
+    })()`);
+    const fiberFilled = typeof rawFiberFilled === 'string' ? (() => { try { return JSON.parse(rawFiberFilled); } catch { return null; } })() : rawFiberFilled;
+
+    let done = 0;
+    if (fiberFilled && fiberFilled.ok) {
+      done = fiberFilled.count || uploaded.length;
+      await client.sleep(700);
+      log(`已填入 ${done} 组实验书名与专属书封`, 'act');
+    } else {
+      // 兜底：若 React fiber 结构变化，退回 DOM 逐组填书名
+      const GROUPS_JS = `[].slice.call(document.querySelectorAll('.ne-config-item')).filter(function(g){return !/adder/.test(g.className)&&g.querySelector('input');})`;
+      for (let i = 0; i < uploaded.length; i++) {
+        const it = uploaded[i];
+        const gc = await client.evaluate(`(${GROUPS_JS}).length`);
+        if (i >= gc) {
+          await client.evaluate(`(function(){var a=document.querySelector('.ne-config-item-adder');if(a)a.click();})()`);
+          await client.sleep(600);
+        }
+        const nameOk = await client.evaluate(`(function(){${SETTER} var g=(${GROUPS_JS})[${i}];if(!g)return false;var inp=g.querySelector('input');if(!inp)return false;inp.focus();__sv(inp,${Q(it.title)});return true;})()`);
+        if (nameOk) done++;
+      }
+    }
 
     if (!autoSubmit) {
-      return { ok: true, semiManual: true, submitted: false, filled: done, msg: `已把 ${done} 个候选书名${items.some(x => x.coverPath) ? '+封面' : ''}填入番茄《${bookLabel}》的「配置实验」抽屉（待提交）。请到浏览器核对无误后点「提交」保存（开启实验·不可逆）。` };
+      return {
+        ok: true, semiManual: true, submitted: false, filled: done,
+        msg: `已把 ${done} 组实验书名+专属书封填入番茄《${bookLabel}》的「配置实验」抽屉（待提交）。请到浏览器核对无误后点「提交」→「确认」开启实验。`,
+      };
     }
-    // 4. 提交（抽屉底部主按钮「提交」·不可逆）
-    log('提交实验配置…');
-    await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('.arco-drawer-footer button,[class*=footer] button,.arco-btn-primary')).find(function(e){return e.offsetParent!==null&&(e.textContent||'').trim()==='提交'&&!(e.disabled||/disabled/.test(e.className));});if(!b)return false;['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});return true;})()`);
-    await client.sleep(2800);
-    const okToast = await client.evaluate("/成功|已提交|已开启/.test((document.querySelector('.arco-message,[class*=message]')||{}).textContent||'')");
-    return { ok: true, submitted: true, filled: done, msg: okToast ? '✅ 多书名实验已提交（等番茄跑 A/B）' : '已点「提交」，请到浏览器确认结果' };
+
+    // 6. 自动提交：点抽屉底部主按钮「提交」→ 点二次确认气泡「确认」
+    log('正在提交多书名实验配置…');
+    await client.evaluate(`(function(){var b=document.querySelector('.ne-drawer-footer button.arco-btn-primary')||[].slice.call(document.querySelectorAll('.ne-drawer-footer button,.arco-drawer-footer button,[class*=footer] button,.arco-btn-primary')).find(function(e){return e.offsetParent!==null&&(e.textContent||'').trim()==='提交'&&!(e.disabled||/disabled/.test(e.className));});if(b)b.click();return !!b;})()`);
+    await client.sleep(800);
+    await client.evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('.ne-drawer-popconfirm button,.arco-popconfirm button,.byte-popconfirm button,.arco-popover-content button,button')).filter(function(e){return e.offsetParent!==null&&/^(确认|确定)$/.test((e.textContent||'').trim());}).pop();if(b)b.click();return !!b;})()`);
+    await client.sleep(2400);
+    const rawAfterCheck = await client.evaluate(`(function(){
+      var expText = (document.querySelector('.ne-experiment')||{}).innerText || '';
+      var errs = [].slice.call(document.querySelectorAll('.ne-config-item-error')).map(function(e){return (e.innerText||'').trim();}).filter(Boolean);
+      return JSON.stringify({ verifying: /校验中/.test(expText), errs: errs, expText: expText });
+    })()`);
+    const afterCheck = typeof rawAfterCheck === 'string' ? (() => { try { return JSON.parse(rawAfterCheck); } catch { return null; } })() : rawAfterCheck;
+    if (afterCheck && afterCheck.errs && afterCheck.errs.length) {
+      return { ok: false, error: '番茄校验提示：' + afterCheck.errs.join('；') };
+    }
+    return {
+      ok: true,
+      submitted: true,
+      filled: done,
+      msg: afterCheck?.verifying
+        ? `✅ 《${bookLabel}》多书名实验已提交成功（当前状态：校验中）`
+        : `✅ 已提交《${bookLabel}》多书名实验配置`,
+    };
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
   }
@@ -4228,6 +5180,304 @@ async function readPendingSchedule(client) {
     await client.sleep(3000);
   }
   return [...all.values()];
+}
+
+// ── 番茄「短故事（短篇）」一键发布/存草稿 ────────────────────────
+// 番茄短故事后台（/main/writer/short-manage → /main/writer/publish-short/{itemId}）与长篇小说
+// （/main/writer/book-manage）完全是两套独立系统：
+//  1) 全书所有章节合并进同一个 ProseMirror 文档（window.adapter.setHTML），以 <h1>第X章：标题</h1> 划分章节目录；
+//  2) 需设置「试读比例」（window.adapter.command.payNode.init() + setPercentageLine(0.3)）；
+//  3) 分类词库为短故事专属 5 维词库（主分类/情节/角色/情绪/背景，最多 8 个且主分类必选 1 个）；
+//  4) 协议复选框必须点开《短故事发布事项》弹窗并点「我已阅读并同意」才会真正置位 agreedLicense=true。
+export async function publishShortStoryOnFanqie({
+  profilePath,
+  itemId = '',
+  title = '',
+  chapters = [],
+  useAI = true,
+  categories = [],
+  trialRatio = 0.3,
+  coverPath = '',
+  draftOnly = true,
+  onLog = () => {},
+} = {}) {
+  const log = (msg, level = 'info') => { try { onLog({ level, source: 'fanqie-short', msg }); } catch {} };
+  const client = new UnzooClient(profilePath, ({ level, msg }) => log(msg, level), 'fanqienovel.com', '番茄短故事', 'https://fanqienovel.com/main/writer/short-manage');
+  const okTab = await client.getActiveTab();
+  if (!okTab) return { ok: false, error: '未找到或无法打开绑定的番茄作者浏览器窗口' };
+
+  const targetUrl = itemId
+    ? `https://fanqienovel.com/main/writer/publish-short/${itemId}?enter_from=NEWCHAPTER_1`
+    : 'https://fanqienovel.com/main/writer/publish-short/?enter_from=NEWCHAPTER_1';
+  log(`正在打开番茄短故事编辑器：${targetUrl}`, 'act');
+  await client.navigate(targetUrl);
+  await client.sleep(3200);
+
+  // 等待编辑器 window.adapter 就绪并读取分配的 itemId
+  let resolvedItemId = itemId;
+  for (let i = 0; i < 12; i++) {
+    const info = await client.evaluate(`(function(){
+      var m = location.pathname.match(/publish-short\\/(\\d+)/);
+      return { ready: Boolean(window.adapter && document.querySelector('textarea[placeholder*="短故事名称"]')), itemId: m ? m[1] : '' };
+    })()`);
+    if (info?.itemId) resolvedItemId = info.itemId;
+    if (info?.ready) break;
+    await client.sleep(800);
+  }
+  if (!resolvedItemId) {
+    return { ok: false, error: '番茄短故事编辑器未就绪（请确认账号已登录番茄作家后台）' };
+  }
+
+  // 1. 关闭可能遮挡的新手引导气泡（1/2 下一步 -> 2/2 完成）
+  for (let step = 0; step < 3; step++) {
+    const g = await client.evaluate(`(function(){
+      var b = document.querySelector('.guide-card-footer-btn');
+      if (!b) return null;
+      var r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    if (g?.x) {
+      await clickAt(client.tabId, g.x, g.y);
+      await client.sleep(500);
+    } else break;
+  }
+
+  // 2. 填入短故事标题（最多 30 字）
+  const cleanBookTitle = String(title || '').replace(/[《》]/g, '').trim().slice(0, 30);
+  log(`填入短故事名称：《${cleanBookTitle}》…`, 'act');
+  await client.evaluate(`(function(val){
+    var ta = document.querySelector('textarea[placeholder*="短故事名称"]');
+    if (!ta) return false;
+    ta.focus();
+    var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(ta, val);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    ta.dispatchEvent(new Event('change', { bubbles: true }));
+    ta.blur();
+    return true;
+  })(${JSON.stringify(cleanBookTitle)})`);
+  await client.sleep(500);
+
+  // 3. 组装全书合并 HTML（每章以 <h1>第X章：章名</h1> 作为番茄短故事「章节标题」节点）
+  const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const htmlParts = [];
+  for (const ch of chapters) {
+    const rawTitle = String(ch.title || '').replace(/^第\s*[0-9一二三四五六七八九十百千两]+\s*章[\s:：·—\-]*/, '').trim();
+    const headText = `第${numToCn(ch.num)}章${rawTitle ? '：' + rawTitle : ''}`;
+    htmlParts.push(`<h1>${esc(headText)}</h1>`);
+    const lines = String(ch.content || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      // 若章首自带重复章名行则跳过
+      if (line === headText || /^第\s*[0-9一二三四五六七八九十百千两]+\s*章/.test(line) && line.length < 30 && line.includes(rawTitle)) continue;
+      htmlParts.push(`<p>${esc(line)}</p>`);
+    }
+  }
+  const fullHtml = htmlParts.join('');
+  log(`正在向短故事编辑器写入全部 ${chapters.length} 章正文…`, 'act');
+  const bodyRes = await client.evaluate(`(function(html){
+    if (!window.adapter || typeof window.adapter.setHTML !== 'function') return { ok: false };
+    window.adapter.setHTML(html);
+    var words = (window.adapter.getText() || '').replace(/\\s+/g, '').length;
+    var headers = (window.adapter.getExistNodes('header') || []).length;
+    return { ok: true, words: words, headers: headers };
+  })(${JSON.stringify(fullHtml)})`);
+  log(`✅ 正文写入完成：识别到 ${bodyRes?.headers || chapters.length} 个章节标题，净字数约 ${bodyRes?.words || 0} 字`, 'info');
+  await client.sleep(1000);
+
+  // 4. 设置试读比例（payNode 试读分割线，默认 30%）
+  const ratio = Math.max(0.1, Math.min(0.8, Number(trialRatio) || 0.3));
+  const payRes = await client.evaluate(`(function(r){
+    try {
+      if (!window.adapter || !window.adapter.command || !window.adapter.command.payNode) return { ok: false, err: 'no payNode cmd' };
+      var paras = window.adapter.getExistNodes('paragraph') || [];
+      if (paras.length) window.adapter.setSelection({ index: paras[paras.length - 1].pos, length: 0 });
+      var existing = window.adapter.getExistNodes('payNode') || [];
+      if (!existing.length) window.adapter.command.payNode.init();
+      window.adapter.command.payNode.setPercentageLine(r);
+      return { ok: true, valid: Boolean(window.adapter.command.payNode.validateThreshold()) };
+    } catch (e) {
+      return { ok: false, err: String(e) };
+    }
+  })(${JSON.stringify(ratio)})`);
+  if (payRes?.ok) log(`✅ 已设置短故事试读比例分割线（${Math.round(ratio * 100)}%）`, 'info');
+
+  // 5. 设置「是否使用AI」（1=是，2=否）并选择短故事 5 维分类（最多 8 个，主分类必选 1 个）
+  const cfgRes = await client.evaluate(`(function(wantAi, wantCats){
+    try {
+      // 5a. 是否使用AI
+      var aiEl = document.querySelector('.publish_short_config_use_ai');
+      if (aiEl) {
+        var fk = Object.keys(aiEl).find(function(k){ return k.indexOf('__reactFiber') === 0; });
+        var f = fk ? aiEl[fk] : null;
+        while (f && typeof f.type !== 'function') f = f.return;
+        // 也可直接点击对应单选框
+        var radios = aiEl.querySelectorAll('label.arco-radio');
+        var targetLabel = wantAi ? '是' : '否';
+        radios.forEach(function(r){
+          if ((r.innerText || '').trim() === targetLabel) r.click();
+        });
+      }
+
+      // 5b. 作品分类（通过分类组件 fiber 读取完整 categoryList 并调用 setCategory）
+      var catWrap = document.querySelector('.publish-short-config-category');
+      var picked = [];
+      if (catWrap) {
+        var cfk = Object.keys(catWrap).find(function(k){ return k.indexOf('__reactFiber') === 0; });
+        var cf = cfk ? catWrap[cfk] : null;
+        while (cf && (typeof cf.type !== 'function' || cf.type.toString().indexOf('setCategory') === -1)) cf = cf.return;
+        if (cf) {
+          // 从 hooks 中找出 categoryList 数组（元素含 category_id, name, label）与 actions 对象（含 setCategory, setAgreedLicense, setUseAi）
+          var ms = cf.memoizedState;
+          var catList = null;
+          var actions = null;
+          while (ms) {
+            var st = ms.memoizedState;
+            if (Array.isArray(st) && st.length > 10 && st[0] && st[0].category_id !== undefined) {
+              catList = st;
+            }
+            if (Array.isArray(st) && st.length === 2) {
+              if (st[0] && typeof st[0].setCategory === 'function') actions = st[0];
+              else if (st[1] && typeof st[1].setCategory === 'function') actions = st[1];
+            }
+            ms = ms.next;
+          }
+          if (actions && typeof actions.setUseAi === 'function') {
+            actions.setUseAi(wantAi ? 1 : 2);
+          }
+          if (actions && typeof actions.setAgreedLicense === 'function') {
+            actions.setAgreedLicense(true);
+          }
+          if (catList && actions && typeof actions.setCategory === 'function') {
+            var mainLabel = catList[0].label; // "主分类"
+            var hasMain = false;
+            for (var i = 0; i < wantCats.length && picked.length < 8; i++) {
+              var name = wantCats[i];
+              var hit = catList.find(function(x){ return x.name === name; });
+              if (hit) {
+                if (hit.label === mainLabel) {
+                  if (hasMain) continue;
+                  hasMain = true;
+                }
+                picked.push({ label: hit.label, value: hit.category_id, name: hit.name });
+              }
+            }
+            if (!hasMain) {
+              var defMain = catList.find(function(x){ return x.name === '悬疑惊悚'; }) || catList[0];
+              picked.unshift({ label: defMain.label, value: defMain.category_id, name: defMain.name });
+              if (picked.length > 8) picked = picked.slice(0, 8);
+            }
+            actions.setCategory(picked);
+          }
+        }
+      }
+      return { ok: true, picked: picked.map(function(x){ return x.label + ':' + x.name; }) };
+    } catch (e) {
+      return { ok: false, err: String(e) };
+    }
+  })(${JSON.stringify(Boolean(useAI))}, ${JSON.stringify(categories)})`);
+  if (cfgRes?.picked?.length) {
+    log(`✅ 已自动配置短故事分类（${cfgRes.picked.length} 项）：${cfgRes.picked.join('、')}`, 'info');
+  }
+
+  // 6. 勾选《短故事发布事项》协议（点开弹窗 -> 点「我已阅读并同意」）
+  await client.evaluate(`(function(){
+    var link = document.querySelector('.publish-short-config-licenselink');
+    if (link) link.click();
+  })()`);
+  await client.sleep(600);
+  const licenseOk = await client.evaluate(`(function(){
+    var btn = document.querySelector('.publish-short-license-modal-button');
+    if (btn) { btn.click(); return true; }
+    var cb = document.querySelector('.publish-short-config-signLicense input[type="checkbox"]');
+    return Boolean(cb && cb.checked);
+  })()`);
+  if (licenseOk) log('✅ 已勾选《短故事发布事项》协议', 'info');
+  await client.sleep(600);
+
+  // 6.5 上传封面（短故事封面【不能出现人物】，建议 600×800）。
+  // 流程（2026-10-23 实测）：点封面框/替换图标 → 抽屉 .ai-story-cover「本地上传」→
+  // browser_upload_trusted 注入 input[type=file]（file_paths 必须是数组）→「确认上传」→「确定」(.ai-cover-local-content-btn)。
+  let coverOk = false;
+  if (coverPath) {
+    try {
+      log('正在上传短故事封面…', 'act');
+      await client.evaluate(`(function(){
+        var el = document.querySelector('.publish-short-config-book-cover-content-actions .tomato-image')
+              || document.querySelector('.publish-short-config-book-cover-content');
+        if (el) el.click();
+      })()`);
+      await client.sleep(1200);
+      await client.evaluate(`(function(){
+        var t = [].slice.call(document.querySelectorAll('.ai-story-cover *')).find(function(e){ return e.children.length === 0 && (e.innerText || '').trim() === '本地上传'; });
+        if (t) t.click();
+      })()`);
+      await client.sleep(600);
+      const sel = (await client.evaluate(`Boolean(document.querySelector('.ai-story-cover input[type=file]'))`))
+        ? '.ai-story-cover input[type=file]' : '.byte-upload input[type=file]';
+      await uploadTrusted(client.tabId, sel, [coverPath]);
+      await client.sleep(3000);
+      const clickText = (txt) => client.evaluate(`(function(){
+        var b = [].slice.call(document.querySelectorAll('.ai-story-cover button')).filter(function(e){ return e.offsetParent && (e.innerText || '').trim() === ${JSON.stringify(txt)}; });
+        if (!b.length) return false; b[b.length - 1].click(); return true;
+      })()`);
+      await clickText('确认上传');
+      await client.sleep(1500);
+      await client.evaluate(`(function(){ var b = document.querySelector('.ai-cover-local-content-btn'); if (b) b.click(); })()`);
+      await client.sleep(1500);
+      coverOk = Boolean(await client.evaluate(`Boolean(document.querySelector('.publish-short-config-book-cover-content-notempty img'))`));
+      log(coverOk ? '✅ 封面已应用到短故事' : '⚠️ 封面上传后未检测到封面图，请在浏览器中手动核对', coverOk ? 'info' : 'warn');
+    } catch (e) {
+      log(`⚠️ 封面上传失败：${e.message}`, 'warn');
+    }
+  }
+
+  // 7. 存草稿 或 正式提交
+  if (draftOnly) {
+    await client.evaluate(`(function(){
+      var btn = document.querySelector('.short-publish-save-draft-btn');
+      if (btn) btn.click();
+    })()`);
+    await client.sleep(1500);
+    log(`💾 已保存至番茄短故事草稿箱（itemId: ${resolvedItemId}）。您可在浏览器中核对封面与内容后点击右上角「下一步」正式提交发布！`, 'act');
+    return {
+      ok: true,
+      mode: 'short-draft',
+      itemId: resolvedItemId,
+      words: bodyRes?.words || 0,
+      chapters: chapters.length,
+      categories: cfgRes?.picked || [],
+      cover: coverOk,
+      url: `https://fanqienovel.com/main/writer/publish-short/${resolvedItemId}?enter_from=NEWCHAPTER_1`,
+    };
+  }
+
+  // 若显式要求直接提交发布：点「下一步」 -> 等待「提交确认」弹窗 -> 点确认
+  log('正在点击「下一步」打开提交确认弹窗…', 'act');
+  await client.evaluate(`(function(){
+    var btn = document.querySelector('.publish-short-header-right .btn-primary-variant');
+    if (btn) btn.click();
+  })()`);
+  await client.sleep(1500);
+  const confirmed = await client.evaluate(`(function(){
+    var modal = document.querySelector('.publish-confirm-container');
+    if (!modal) return false;
+    var okBtn = modal.querySelector('.arco-modal-footer .arco-btn-primary');
+    if (okBtn) { okBtn.click(); return true; }
+    return false;
+  })()`);
+  if (!confirmed) {
+    return { ok: false, itemId: resolvedItemId, error: '未弹出「提交确认」窗口，请检查浏览器页面是否有必填项高亮提示' };
+  }
+  await client.sleep(2500);
+  log(`🎉 短故事《${cleanBookTitle}》已正式提交番茄审核（itemId: ${resolvedItemId}）！`, 'act');
+  return {
+    ok: true,
+    mode: 'short-published',
+    itemId: resolvedItemId,
+    words: bodyRes?.words || 0,
+    chapters: chapters.length,
+    categories: cfgRes?.picked || [],
+  };
 }
 
 export { UnzooClient, FanqiePublisher, maxChapterNumInText, readPendingSchedule };

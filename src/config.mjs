@@ -5,7 +5,7 @@ import { CONFIG_DIR, CONFIG_FILE, LOG_DIR, DEFAULT_WORKSPACE } from './paths.mjs
 
 const DEFAULTS = {
   workspace: DEFAULT_WORKSPACE,      // 书库根目录
-  defaultModel: 'codex',             // codex | claude | gemini | trae
+  defaultModel: 'agy',               // agy | codex | claude | gemini | trae
   proxyNode: 'auto',                 // unterm 代理节点名；'auto' = 用 proxy.json 里的 current_node
   enableProxy: true,                 // 启动实例时是否开代理
   untermAgentName: 'claude-code',    // 连 MCP 时自报的受信 agent 名（解锁 session.input 写操作）
@@ -25,12 +25,12 @@ const DEFAULTS = {
     proxy: 'http://127.0.0.1:7897',  // 访问 generativelanguage.googleapis.com 走的代理（国内必需）；'' = 直连
     imageModel: 'imagen-4.0-fast-generate-001',
     textModel: 'gemini-2.5-flash',   // promptModel='gemini' 时用它（API）写出图提示词
-    promptModel: 'codex',            // 写"英文出图提示词"用哪个模型：codex/claude=CLI无头(更会描述画面)；gemini=旧的API
+    promptModel: 'agy',              // 写"英文出图提示词"用哪个模型：agy/codex/claude=CLI无头(更会描述画面)；gemini=旧的API
   },
   // 大纲编辑审核：作者写完大纲(立项/每卷)→换另一个模型当主编无头审稿→作者按意见修订再开写。
   editorReview: {
     enabled: true,                   // 关闭则作者写完大纲直接开写(autopilot 续写哨兵会自动放行)
-    model: 'auto',                   // 'auto'=自动选一个与作者不同的可用模型；也可指定 codex|claude|gemini
+    model: 'agy',                    // 'auto'=自动选一个与作者不同的可用模型；也可指定 agy|codex|claude|gemini
     // 单次审稿超时。【180 秒不够】2026-09-19 实测：claude 审一份 1 万字的
     // 设定+卷大纲要 120 秒，而真实审稿的 prompt 往往更大（立项那次是 9 万字）。
     // 当时的表现就是「主编 claude 审稿失败（Claude Code 审稿超时）」——

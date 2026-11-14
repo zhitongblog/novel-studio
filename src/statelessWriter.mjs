@@ -10,43 +10,78 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { getModel, detectModel, resolveBin } from './models.mjs';
-import { planCliInvocation } from './planner.mjs';
+import { getModel, detectModel, resolveBin, trustAgyWorkspace } from './models.mjs';
+import { planCliInvocation, prepareCliInvocation, looksNetworkFailure, getNetMode, rememberNetMode } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { buildBatchPack } from './contextpack.mjs';
 import { bookStats, getBook, participationOf } from './books.mjs';
 import { gitSnapshot, refreshContext } from './scaffold.mjs';
-import { reviewOutline, parseReviewItems } from './editor.mjs';   // 卷边界大纲审稿门复用长驻那套主编无头审稿
+import { reviewOutline, parseReviewItems, planNetMode } from './editor.mjs';   // 卷边界大纲审稿门复用长驻那套主编无头审稿
 import { setPending, takeResume } from './pending.mjs';   // 参与模式：卷口挂起等用户逐条挑 / 用户拍板后恢复
 import { deslopRange } from './deslop.mjs';   // 写后强制排版矫正闸：治「……」雪球+逐句换行，断掉自我模仿的滚雪球
+import { syncChapterIndex } from './afterbatch.mjs';   // 写后自动补齐 chapter_index.md 漏登章节
 import { pacingGate } from './pacing.mjs';   // 写后节奏闸：治章长超标/事务流程当主线/量级不换挡/章末假钩子
 import { runwayEnough } from './cadence.mjs';   // 写作总闸：番茄排期够了就不再续写
 import { scanRegister, scanRhythm } from './chapgate.mjs';   // 口语密度闸
 import { oralMode } from './oralgate.mjs';   // 口语闸书级设置：off / report / fix
 import { inspect as inspectLedger, needsSeed, ensureStructure, seedInstruction, snapshotGate } from './ledgersnap.mjs';   // 台账当前态快照：治「每批喂的是开篇旧账」
 
-// 各模型"无头 + 自动批准文件读写"的参数。
-// 参数摆法统一走 planner.planCliInvocation（三条无头路径共用一份，别各写各的）。
+function killTree(cp) {
+  if (!cp || !cp.pid) return;
+  if (process.platform === 'win32') {
+    try { spawn('taskkill', ['/T', '/F', '/PID', String(cp.pid)], { stdio: 'ignore', windowsHide: true }); return; } catch {}
+  }
+  try { cp.kill('SIGTERM'); } catch {}
+}
 
-// 异步跑一次无头模型（不阻塞事件循环）。prompt 走 stdin，cwd = 书目录（模型据此读写本书文件）。
-function runHeadless(model, prompt, { cwd, cfg, timeoutMs = 900000, onChunk }) {
+function spawnHeadlessOnce(model, prompt, { cwd, cfg, timeoutMs = 900000, onChunk, netMode }) {
   const m = getModel(model);
   if (!m) return Promise.reject(new Error('未知模型：' + model));
   const env = { ...process.env };
-  if (cfg?.enableProxy) { const px = proxyUrl(); if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; } }
+  const px = proxyUrl();
+  if (netMode === 'proxy' && px) {
+    env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px;
+  } else if (netMode === 'direct') {
+    delete env.HTTP_PROXY; delete env.HTTPS_PROXY; delete env.ALL_PROXY;
+    delete env.http_proxy; delete env.https_proxy; delete env.all_proxy;
+  }
   return new Promise((resolve) => {
-    let out = '', err = '', killed = false;
+    let out = '', err = '', killed = false, done = false;
     const bin = resolveBin(model) || m.bin;
-    const { args, viaStdin, useShell } = planCliInvocation(model, prompt, bin);
-    const child = spawn(bin, args, { cwd, env, shell: useShell, windowsHide: true });
-    const timer = setTimeout(() => { killed = true; try { child.kill('SIGTERM'); } catch {} }, timeoutMs);
-    if (viaStdin) { try { child.stdin.write(prompt); child.stdin.end(); } catch {} }
-    else { try { child.stdin.end(); } catch {} }
-    child.stdout.on('data', d => { const s = d.toString(); out += s; if (onChunk) try { onChunk(s); } catch {} });
-    child.stderr.on('data', d => { err += d.toString(); });
-    child.on('error', e => { clearTimeout(timer); resolve({ ok: false, out, err: err + '\n' + e.message, killed }); });
-    child.on('close', code => { clearTimeout(timer); resolve({ ok: code === 0 && !killed, code, out, err, killed }); });
+    const { args, viaStdin, useShell, cleanup } = prepareCliInvocation(model, prompt, bin, { cwd, cfg });
+    const finish = (res) => { if (done) return; done = true; clearTimeout(timer); cleanup(); resolve(res); };
+    const child = spawn(bin, args, {
+      cwd, env, shell: useShell, windowsHide: true,
+      stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    });
+    const timer = setTimeout(() => {
+      killed = true;
+      killTree(child);
+      finish({ ok: false, code: -1, out, err: err + '\n[timeout]', killed: true });
+    }, timeoutMs);
+    if (viaStdin && child.stdin) { try { child.stdin.write(prompt); child.stdin.end(); } catch {} }
+    child.stdout && child.stdout.on('data', d => { const s = d.toString(); out += s; if (onChunk) try { onChunk(s); } catch {} });
+    child.stderr && child.stderr.on('data', d => { err += d.toString(); });
+    child.on('error', e => finish({ ok: false, out, err: err + '\n' + e.message, killed }));
+    child.on('close', code => finish({ ok: code === 0 && !killed, code, out, err, killed }));
   });
+}
+
+// 各模型"无头 + 自动批准文件读写"的参数。
+// 参数摆法统一走 planner.prepareCliInvocation（三条无头路径共用一份，别各写各的）。
+
+// 异步跑一次无头模型（不阻塞事件循环）。cwd = 书目录（模型据此读写本书文件）。
+async function runHeadless(model, prompt, { cwd, cfg, timeoutMs = 900000, onChunk }) {
+  if (model === 'agy' && cwd) { try { trustAgyWorkspace(cwd); } catch {} }
+  const { first, second } = planNetMode(model, cfg, getNetMode);
+  const r1 = await spawnHeadlessOnce(model, prompt, { cwd, cfg, timeoutMs, onChunk, netMode: first });
+  if (r1.ok) { rememberNetMode(model, first); return r1; }
+  if (!r1.killed && looksNetworkFailure((r1.out || '') + '\n' + (r1.err || ''))) {
+    const r2 = await spawnHeadlessOnce(model, prompt, { cwd, cfg, timeoutMs, onChunk, netMode: second });
+    if (r2.ok) rememberNetMode(model, second);
+    return r2;
+  }
+  return r1;
 }
 
 // 自纠进度心跳。
@@ -273,6 +308,7 @@ export async function writeBatchStateless({ book, model, cfg, count = 3, dryRun 
     const dr = deslopRange(book.dir, (before.maxChapter || 0) + 1, after.maxChapter || 0, onLog);
     if (dr.touched) onLog({ level: 'act', msg: `🧹 排版矫正闸：本批 ${dr.touched}/${dr.files} 章已矫正（防「……」雪球）` });
   } catch (e) { onLog({ level: 'warn', msg: '排版矫正闸异常（不阻断）：' + (e.message || e) }); }
+  try { syncChapterIndex(book.dir, onLog); } catch {}
 
   // ⏱ 写后节奏闸：排版能用代码直接改（deslop），节奏不能——拆章要起章名、补爽点要写情节，只有作者自己动笔。
   // 所以这里只量指标，量出事故就【当批退回自纠】：趁本批还没变成下一批的上下文，先把病章改干净，

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { getModel, detectAll , resolveBin , canRunHeadless } from './models.mjs';
-import { planCliInvocation, looksNetworkFailure, getNetMode, rememberNetMode } from './planner.mjs';
+import { planCliInvocation, prepareCliInvocation, headlessCwd, looksNetworkFailure, getNetMode, rememberNetMode } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { orderByHealth, noteReviewerOk, noteReviewerFail, classifyFail } from './reviewerhealth.mjs';
 
@@ -29,7 +29,7 @@ export function stripNoise(s) {
 // 2026-09-19 实证：codex 额度用尽时，它先打启动横幅、再把【整个 prompt 原样回显】(29KB)，
 // 最后一行才吐 "ERROR: You've hit your usage limit"。旧版只看前 600 字，
 // 于是这 29KB 垃圾被当成一份合格审稿【存了下来】——审稿"成功"，报告里一条真意见都没有。
-const FATAL_RE = /(hit your usage limit|usage limit|quota exceeded|insufficient (quota|credit)|rate limit exceeded|no auth type|not authenticated|configure an auth|--auth-type|please (configure|log ?in|sign ?in)|invalid api key|401 unauthorized|未(登录|认证|配置)|请先(登录|配置|设置))/i;
+const FATAL_RE = /(hit your usage limit|usage limit|quota exceeded|individual quota reached|credits balance is too low|insufficient (quota|credit)|rate limit exceeded|no auth type|not authenticated|authentication (failed|required|expired)|verify your account to continue|configure an auth|--auth-type|please (configure|log ?in|log back in|sign ?in)|invalid api key|401 unauthorized|未(登录|认证|配置)|请先(登录|配置|设置))/i;
 // CLI 自曝家门的横幅：出现这些说明我们拿到的是 CLI 的自述，不是模型的回答
 const BANNER_RE = /(Reading prompt from stdin|OpenAI Codex v[\d.]+|^workdir:|^sandbox:|^approval:|^reasoning effort:)/im;
 const USAGE_RE = /^(usage:|error\b|错误[:：]|unknown (option|argument|command)|invalid (option|argument|value)|missing required|参数错误|command not found|not recognized)/im;
@@ -63,15 +63,12 @@ export function invalidReview(out, prompt) {
   return false;
 }
 
-// 审稿人候选（按优先级、去重、只取可用）：首选 cfg 指定；否则优先【与作者不同】的独立模型，快而稳的排前
-// （gemini/qwen），claude 因偶发无头慢/超时排后，作者同模型兜底最后。reviewOutline 逐个尝试，超时/失败自动换下一个。
+// 审稿人候选（按优先级、去重、只取可用）：首选 cfg 指定；否则优先【与作者不同】的独立模型，
+// 按健康度排序，作者同模型兜底最后。reviewOutline 逐个尝试，超时/失败自动换下一个。
 export function reviewerCandidates(authorModel, cfg) {
   const avail = detectAll().filter(m => m.available).map(m => m.id);
   const out = [];
-  // 【跑不了无头的模型不能当审稿人】审稿是一次性非交互调用，而 agy 的凭据不落盘、
-  // 每次 -p 都要人贴授权码（见 models.canRunHeadless）。它进候选的唯一结果是白等一轮超时，
-  // 还要在日志里留一条让人困惑的"agy 输出无效"。2026-09-19 实测：四个候选里它排最后，
-  // 前三个都废了之后还要再废它一次，作者看到的就是"审稿功能无效"。
+  // 【跑不了无头的模型不能当审稿人】审稿是一次性非交互调用（见 models.canRunHeadless）。
   const push = (id) => { if (id && avail.includes(id) && canRunHeadless(id) && !out.includes(id)) out.push(id); };
   const want = cfg?.editorReview?.model;
   // 作者显式指定的永远第一，且【不参与健康排序】——他指定了就是他说了算
@@ -83,7 +80,7 @@ export function reviewerCandidates(authorModel, cfg) {
   // 别对着某一刻的环境过拟合。顺序交给 orderByHealth 按实际战绩排。
   const rest = [];
   const pushRest = (id) => { if (id && avail.includes(id) && canRunHeadless(id) && !out.includes(id) && !rest.includes(id)) rest.push(id); };
-  for (const id of ['codex', 'gemini', 'qwen', 'claude']) if (id !== authorModel) pushRest(id);
+  for (const id of ['agy', 'codex', 'gemini', 'qwen', 'claude']) if (id !== authorModel) pushRest(id);
   pushRest(authorModel);   // 同模型独立审兜底
   out.push(...orderByHealth(rest));
   return out.length ? out : [authorModel];
@@ -108,7 +105,18 @@ export function planNetMode(model, cfg, remembered = null) {
   return { proxyOn, mayFlip: true };
 }
 
-function spawnModelOnce(model, prompt, timeoutMs, proxyOn) {
+function killTree(cp) {
+  if (!cp) return;
+  try {
+    if (process.platform === 'win32' && cp.pid) {
+      spawn('taskkill', ['/T', '/F', '/PID', String(cp.pid)], { windowsHide: true, stdio: 'ignore' });
+    } else {
+      cp.kill('SIGKILL');
+    }
+  } catch {}
+}
+
+function spawnModelOnce(model, prompt, timeoutMs, proxyOn, cfg) {
   return new Promise((resolve, reject) => {
     const m = getModel(model);
     if (!m) return reject(new Error('未知模型：' + model));
@@ -122,22 +130,32 @@ function spawnModelOnce(model, prompt, timeoutMs, proxyOn) {
     // 别在这儿再抄一份。抄一份的代价已经付过了：这里原来是裸 ['-p']，claude 无头跑起来
     // 一遇到要用工具就被自动拒绝（「headless mode cannot prompt」），一个字都不产出。
     const bin = resolveBin(model) || m.bin;
-    const { args, viaStdin, useShell } = planCliInvocation(model, prompt, bin);
-    const cp = spawn(bin, args, { env, cwd: os.tmpdir(), shell: useShell, windowsHide: true });
-    let out = '', err = '';
-    const to = setTimeout(() => { try { cp.kill(); } catch {} reject(new Error(m.name + ' 审稿超时')); }, timeoutMs);
-    cp.stdout.on('data', d => (out += d));
-    cp.stderr.on('data', d => (err += d));
-    cp.on('error', e => { clearTimeout(to); reject(e); });
-    cp.on('close', () => { clearTimeout(to); resolve(out + (err ? '\n' + err : '')); });
-    if (viaStdin) { try { cp.stdin.write(prompt); cp.stdin.end(); } catch (e) { clearTimeout(to); reject(e); } }
-    else { try { cp.stdin.end(); } catch {} }
+    const cwd = headlessCwd();
+    const { args, viaStdin, useShell, cleanup } = prepareCliInvocation(model, prompt, bin, { cwd, cfg });
+    const cp = spawn(bin, args, {
+      env, cwd, shell: useShell, windowsHide: true,
+      stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    });
+    let out = '', err = '', settled = false;
+    const finish = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(to);
+      cleanup();
+      fn(val);
+    };
+    const to = setTimeout(() => { killTree(cp); finish(reject, new Error(m.name + ' 审稿超时')); }, timeoutMs);
+    cp.stdout && cp.stdout.on('data', d => (out += d));
+    cp.stderr && cp.stderr.on('data', d => (err += d));
+    cp.on('error', e => finish(reject, e));
+    cp.on('close', () => finish(resolve, out + (err ? '\n' + err : '')));
+    if (viaStdin && cp.stdin) { try { cp.stdin.write(prompt); cp.stdin.end(); } catch (e) { finish(reject, e); } }
   });
 }
 
 export async function runModelOnceAsync(model, prompt, cfg, timeoutMs = 180000) {
   const { proxyOn, mayFlip } = planNetMode(model, cfg, getNetMode(model));
-  const out = await spawnModelOnce(model, prompt, timeoutMs, proxyOn);
+  const out = await spawnModelOnce(model, prompt, timeoutMs, proxyOn, cfg);
   if (!looksNetworkFailure(out)) {
     rememberNetMode(model, proxyOn ? 'proxy' : 'direct');   // 记住这次成功的模式，下次先用它
     return out;
@@ -145,7 +163,7 @@ export async function runModelOnceAsync(model, prompt, cfg, timeoutMs = 180000) 
   if (!mayFlip) return out;
   // 像网络/地区问题 → 把代理翻过来再试一次（别靠猜，也别写死：哪种配置能用本来就会变）
   const flipped = !proxyOn;
-  const out2 = await spawnModelOnce(model, prompt, timeoutMs, flipped);
+  const out2 = await spawnModelOnce(model, prompt, timeoutMs, flipped, cfg);
   if (!looksNetworkFailure(out2)) { rememberNetMode(model, flipped ? 'proxy' : 'direct'); return out2; }
   return out2;   // 两种都不行 → 报后一次（更接近当前网络的真相）
 }

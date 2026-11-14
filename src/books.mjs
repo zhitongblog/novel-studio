@@ -464,19 +464,74 @@ function cnToInt(s) {
 }
 function readBible(dir) { try { return fs.readFileSync(path.join(dir, 'novel_bible.md'), 'utf8'); } catch { return ''; } }
 
-// 规划总卷数：standards.volumes，否则 bible「卷数：N」(支持中文数字)。未知 0。
-export function plannedVolumes(book) {
-  const sv = parseInt(book?.standards?.volumes, 10);
-  if (sv > 0) return sv;
-  const m = readBible(book.dir).match(/卷数[：:]\s*[约共]?\s*([0-9一二三四五六七八九十两]+)/);
-  return m ? cnToInt(m[1]) : 0;
+// 解析目标总字数字符串（如 "5万字"、"15万"、"50000"）→ 汉字数（未知返回 0）。
+export function parseTotalWords(s) {
+  if (!s) return 0;
+  const str = String(s).trim();
+  const m = str.match(/(\d+(?:\.\d+)?)\s*(万|千|亿)?/);
+  if (!m) return 0;
+  let v = parseFloat(m[1]);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  if (m[2] === '亿') v *= 100000000;
+  else if (m[2] === '万') v *= 10000;
+  else if (m[2] === '千') v *= 1000;
+  else if (v < 500) v *= 10000;   // 裸填 "5" / "150" 默认按万字算（与 UI #nbWords 一致）
+  return Math.round(v);
 }
-// 每卷约章数：standards.chaptersPerVolume，否则 bible「每卷约章数：N」。未知 0。
+
+// 据目标总字数与用户填入的卷数，算出合理的卷数与每卷章数（防 5 万字短篇顶着 UI 默认 30 卷立项成"一卷一章"）。
+// 返回 { volumes, chaptersPerVolume, totalChapters, isShortStory }。
+export function suggestVolumesForWords(totalWords, explicitVolumes, explicitCpv) {
+  const words = parseTotalWords(totalWords);
+  const expV = parseInt(explicitVolumes, 10) || 0;
+  const expC = parseInt(explicitCpv, 10) || 0;
+  const isShortStory = words > 0 && words <= 300000;
+  if (!isShortStory) {
+    const v = expV > 0 ? expV : 30;
+    const cpv = expC > 0 ? expC : (words > 0 ? Math.max(10, Math.round((words / 3200) / v)) : 0);
+    return { volumes: v, chaptersPerVolume: cpv, totalChapters: cpv ? v * cpv : 0, isShortStory: false };
+  }
+  // 短篇/中短篇（≤30万字）：按单章约 3000–3500 字估算总章数，每卷 5–8 章最稳（绝不能一卷只有 1 章）
+  const estChapters = Math.max(3, Math.round(words / 3300));
+  // 每卷至少 4 章（约 1.2–1.5 万字），算出该字数能支撑的卷数上限
+  const maxSensibleVols = Math.max(1, Math.ceil(words / 12000));
+  const recommendedVols = words <= 20000 ? 1
+    : words <= 55000 ? 2
+    : words <= 90000 ? 4
+    : words <= 150000 ? 6
+    : 10;
+  // 若用户没填卷数，或留着 UI 默认的 30 卷未改（超过合理上限），自动收敛到合理卷数
+  let v = expV > 0 ? expV : recommendedVols;
+  if (v >= 25 && v > maxSensibleVols) v = Math.min(recommendedVols, maxSensibleVols);
+  else if (v > maxSensibleVols) v = maxSensibleVols;
+  const cpv = expC > 0 ? expC : Math.max(3, Math.round(estChapters / Math.max(1, v)));
+  return { volumes: v, chaptersPerVolume: cpv, totalChapters: v * cpv, isShortStory: true };
+}
+
+// 规划总卷数：standards.volumes（短篇若误存 30 则按字数修正），否则 bible「卷数：N」(支持中文数字)。未知 0。
+export function plannedVolumes(book) {
+  const m = readBible(book?.dir || '').match(/卷数[：:]\s*[约共]?\s*([0-9一二三四五六七八九十两]+)/);
+  const bibleV = m ? cnToInt(m[1]) : 0;
+  const sv = parseInt(book?.standards?.volumes, 10) || 0;
+  const words = parseTotalWords(book?.standards?.totalWords);
+  if (words > 0 && words <= 300000) {
+    if (bibleV > 0 && bibleV <= 20) return bibleV;
+    return suggestVolumesForWords(book?.standards?.totalWords, sv).volumes;
+  }
+  if (sv > 0) return sv;
+  return bibleV;
+}
+// 每卷约章数：standards.chaptersPerVolume，否则 bible「每卷约章数：N」，短篇兜底按总字数/卷数折算。未知 0。
 function chaptersPerVol(book) {
   const c = parseInt(book?.standards?.chaptersPerVolume, 10);
   if (c > 0) return c;
-  const m = readBible(book.dir).match(/每卷约?章数[：:]\s*[约]?\s*([0-9一二三四五六七八九十百两]+)/);
-  return m ? cnToInt(m[1]) : 0;
+  const m = readBible(book?.dir || '').match(/每卷约?章数[：:]\s*[约]?\s*([0-9一二三四五六七八九十百两]+)/);
+  if (m) { const n = cnToInt(m[1]); if (n > 0) return n; }
+  const words = parseTotalWords(book?.standards?.totalWords);
+  if (words > 0 && words <= 300000) {
+    return suggestVolumesForWords(book?.standards?.totalWords, plannedVolumes(book)).chaptersPerVolume;
+  }
+  return 0;
 }
 // 规划总章数（判断是否临近结尾的可靠口径）：目标章数 ＞ bible「全书章数」＞ 卷数×每卷章数。未知 0。
 export function plannedTotalChapters(book) {
@@ -594,16 +649,19 @@ export function createBook(opts, cfg) {
     // 规划模式要在 scaffold 之前定下来：freehand 的骨架不铺大纲模板、bible 模板也只有手法三节
     planMode: ['discovery', 'freehand'].includes(opts.planMode) ? opts.planMode : 'compass',
     createdAt: new Date().toISOString(),
-    standards: {
-      totalWords: opts.totalWords || '',
-      volumes: opts.volumes || '',
-      chaptersPerVolume: opts.chaptersPerVolume || '',
-      batchSize: opts.batchSize || 3,
-      targetCharsLo: opts.targetCharsLo || 3000,
-      targetCharsHi: opts.targetCharsHi || 3600,
-      minChars: opts.minChars || 3000,
-      system: opts.system || '',
-    },
+    standards: (() => {
+      const sug = suggestVolumesForWords(opts.totalWords, opts.volumes, opts.chaptersPerVolume);
+      return {
+        totalWords: opts.totalWords || '',
+        volumes: sug.isShortStory ? String(sug.volumes) : (opts.volumes || ''),
+        chaptersPerVolume: sug.isShortStory ? String(sug.chaptersPerVolume) : (opts.chaptersPerVolume || ''),
+        batchSize: opts.batchSize || 3,
+        targetCharsLo: opts.targetCharsLo || 3000,
+        targetCharsHi: opts.targetCharsHi || 3600,
+        minChars: opts.minChars || 3000,
+        system: opts.system || '',
+      };
+    })(),
   };
   scaffoldBook(book);
   upsertBook(book);

@@ -18,15 +18,24 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { loadFingerprint, driftOf, driftInstruction } from './stylefp.mjs';
 import { chapterFilesInRange } from './deslop.mjs';
+import { parseTotalWords } from './books.mjs';
 
 // —— 事务流程词表：这些东西当背景质感可以，当整章主线就是流水账 ——
 const PAPERWORK = ['单据', '抬头', '报价', '比价', '执照', '验收', '结款', '备案', '发票', '收据',
   '对账', '盘点', '清点', '登记', '手续', '批文', '公文', '卷宗', '账本', '账目', '存根', '凭据',
   '采购单', '介绍信', '盖章', '签字', '经手人', '工商', '税务', '报销'];
 
+// 悬疑/刑侦/破案题材豁免词：查案必须翻卷宗、查登记、看签字/经手人/存根，不能把查案当成经商流水账判事故
+const MYSTERY_GENRE_RE = /(悬疑|刑侦|破案|推理|凶案|碎尸|法医|探案|神探|命案|缉凶|公案|灵异|怪谈)/;
+const PAPERWORK_MYSTERY_EXEMPT = new Set([
+  '卷宗', '备案', '签字', '经手人', '登记', '凭据', '公文', '执照', '存根', '盘点', '清点', '手续', '介绍信', '盖章',
+]);
+const PAPERWORK_MYSTERY = PAPERWORK.filter(w => !PAPERWORK_MYSTERY_EXEMPT.has(w));
+
 // 章名另有一份更宽的词表：章名只有几个字，口语说法（「这单得挂我妈名下」「这活能不能走厂里的账」）
 // 用正式词表扫不出来，但章名叫这个就说明整章主线是那张单子。章名短，放宽不易误伤。
 const PAPERWORK_TITLE = [...PAPERWORK, '名下', '单子', '这单', '那单', '走账', '入账', '账上', '抵账', '上单'];
+const PAPERWORK_TITLE_MYSTERY = [...PAPERWORK_MYSTERY, '走账', '入账', '账上', '抵账', '上单'];
 
 // —— 假钩子词表：章末总结/抒情/预告，skill.mjs 明令判废 ——
 const FAKE_HOOK = ['才刚刚开始', '拉开了序幕', '等待着他', '等待着我', '命运', '注定', '谁也没想到',
@@ -161,9 +170,12 @@ export function inspectChapter(fp, num, std = {}) {
   const last = paras[paras.length - 1] || '';
 
   // 事务流程密度：章名命中是强信号（整章就叫这个名字），正文按每千字命中数算
-  const inTitle = PAPERWORK_TITLE.filter(w => title.includes(w));
+  // 悬疑/刑侦题材剔除「卷宗/登记/签字」等查案必用词，只抓纯报账词
+  const pwTitleList = std.isMystery ? PAPERWORK_TITLE_MYSTERY : PAPERWORK_TITLE;
+  const pwBodyList = std.isMystery ? PAPERWORK_MYSTERY : PAPERWORK;
+  const inTitle = pwTitleList.filter(w => title.includes(w));
   let hits = 0;
-  for (const w of PAPERWORK) hits += (raw.split(w).length - 1);
+  for (const w of pwBodyList) hits += (raw.split(w).length - 1);
   const per1k = chars ? (hits / chars) * 1000 : 0;
   const paperwork = inTitle.length > 0 || per1k >= 3;
 
@@ -186,10 +198,18 @@ export function inspectChapter(fp, num, std = {}) {
 // 扫一段章号区间，出体检结论。lookback：往前多看几章，用来判断「连续」类问题与量级曲线。
 export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {}) {
   const tgt = refTargets(bookDir);   // 这本书范本量出来的目标值（没范本就是 null）
+  let bibleHead = '';
+  try { bibleHead = fs.readFileSync(path.join(bookDir, 'novel_bible.md'), 'utf8').slice(0, 2500); } catch {}
+  const isMystery = Boolean(std.isMystery) || MYSTERY_GENRE_RE.test(String(std.genre || '') + '\n' + bibleHead);
+  const bibleWordsMatch = bibleHead.match(/总字数[：:]\s*([^\n|]+)/);
+  const totalWords = parseTotalWords(std.totalWords || (bibleWordsMatch ? bibleWordsMatch[1] : ''));
+  const isShortStory = totalWords > 0 && totalWords <= 150000;
+  const effStd = { ...std, isMystery };
+
   const files = chapterFilesInRange(bookDir, Math.max(1, from - lookback), to);
   const all = [];
   for (const { num, path: fp } of files) {
-    try { all.push(inspectChapter(fp, num, std)); } catch { /* 读不了就跳过，闸不阻断写作 */ }
+    try { all.push(inspectChapter(fp, num, effStd)); } catch { /* 读不了就跳过，闸不阻断写作 */ }
   }
   const fresh = all.filter(c => c.num >= from);
   const issues = [];
@@ -240,8 +260,8 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
     });
   }
 
-  // 3) 量级换挡——重生/经商/升级类的命脉：读者要看见数字往上走
-  const moneys = all.filter(c => c.money > 0);
+  // 3) 量级换挡——重生/经商/升级类的命脉：读者要看见数字往上走（悬疑/刑侦破案与 ≤15万字短篇不按钱数升级衡量）
+  const moneys = (!isMystery && !isShortStory) ? all.filter(c => c.money > 0) : [];
   if (moneys.length >= 6) {
     const half = Math.ceil(moneys.length / 2);
     const earlyMax = Math.max(...moneys.slice(0, half).map(c => c.money));
@@ -270,16 +290,18 @@ export function pacingScan(bookDir, from, to = 0, { std = {}, lookback = 6 } = {
   // 有范本 → 阈值从范本量；没范本 → 退回写死的默认值。
   // 放宽的余量给得比较松（短句 +12 个百分点、长句打 6 折）：闸是拦【明显跑偏】的，
   // 不是拿范本当标尺去卡每一章，那会把书写成范本的复读机。
+  // 特例：若范本本身是「单句成段/手机快读」（avgPara <= 22），强行要求补 25 字以上长句会毁掉快读节奏，故豁免 longRatio 下限。
   const RT = tgt || null;
+  const isFastReadRef = Boolean(RT && RT.avgPara <= 22);
   const LIM = {
     // 【改过】原来 shortRatio 用 Math.max(0.45, …)、numPer/baRatio 直接写死——
     // 等于给范本留了一层开发者的地板：范本短句只占 20% 的书，闸仍按 45% 判，范本失效。
     // 数目密度和句式扎堆也一样是文风（有的书就爱报数、有的书就爱用「把」字句），
     // 一律改成有范本时从范本量，没范本才退回写死的默认值。
-    shortRatio: S.shortRatio ?? (RT ? RT.shortRatio + 0.12 : 0.45),
+    shortRatio: S.shortRatio ?? (RT ? (isFastReadRef ? Math.max(RT.shortRatio + 0.15, 0.58) : RT.shortRatio + 0.12) : 0.45),
     numPer: S.numPer ?? (RT && RT.numPer < 9999 ? Math.round(RT.numPer * 0.6) : 150),
     baRatio: S.baRatio ?? (RT ? RT.baRatio + 0.03 : 0.05),
-    longRatio: S.longRatio ?? (RT ? RT.longRatio * 0.6 : 0.08),
+    longRatio: S.longRatio ?? (RT ? (isFastReadRef ? 0 : RT.longRatio * 0.6) : 0.08),
     avgPara: RT ? RT.avgPara * 1.5 : 0, // 段落密度：只有有范本时才判（0=不判）
   };
   const bad = { short: [], num: [], ba: [], flat: [], para: [] };

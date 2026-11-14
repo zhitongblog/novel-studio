@@ -218,8 +218,18 @@ export async function importFromFanqie({ profilePath, bookId, title, model, onLo
   }
   if (named.length) log('info', `卷名已随书导入：${named.join('、')}`);
 
-  // 配好番茄发布配置 → 完结收口/完本感言可直接用
-  try { setBookPublish(book.slug, { profilePath, bookId, bookName: book.title }); } catch {}
+  // 配好番茄发布配置 → 完结收口/完本感言可直接用，且默认记录已发最大章号、开启按卷对齐、关闭重写覆盖防误伤
+  const maxImportedNum = idxNums.length ? Math.max(...idxNums) : done;
+  try {
+    setBookPublish(book.slug, {
+      profilePath,
+      bookId,
+      bookName: book.title,
+      publishedMax: maxImportedNum,
+      matchVolumes: true,
+      syncRewrites: false,
+    });
+  } catch {}
 
   log('act', `✅ 导入完成：《${book.title}》${plan.length} 卷 / ${done} 章${failed ? `（${failed} 章正文为空已跳过）` : ''}。番茄发布配置已自动绑定，可直接用完结收口/完本感言。`);
   log('act', '从番茄导入结束');

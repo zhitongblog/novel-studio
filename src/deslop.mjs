@@ -22,6 +22,9 @@ const hasDialogue = (s) => /[「」『』“”"]/.test(s);
 // 范本里省略号密的书，把它全换成句号就是在改这本书的语气。
 function normPunct(s, killEllipsis = true) {
   return (killEllipsis ? s.replace(/…+/g, '。') : s)
+    .replace(/[*＊]+/g, '')
+    .replace(/`([^`\n]+)`/g, '$1').replace(/`/g, '')
+    .replace(/~~([^~\n]+)~~/g, '$1').replace(/__([^_\n]+)__/g, '$1')
     .replace(/。{2,}/g, '。')
     .replace(/，。/g, '。').replace(/。，/g, '。')
     .replace(/、。/g, '。')
@@ -31,14 +34,143 @@ function normPunct(s, killEllipsis = true) {
     .trim();
 }
 
+// ── 一键清除 AI 痕迹（确定性净化：专治正文 .txt 里的 * 号、Markdown 标记、章尾套壳、机械分割线与解释腔套话） ──
+// 返回 { text, changed, stats: { stars, headings, dividers, endTags, slopPhrases, stackedPunct, total } }
+export function cleanAiTraces(raw) {
+  const orig = String(raw || '').replace(/\r\n/g, '\n');
+  let s = orig;
+
+  // 统计各类 AI 痕迹数量
+  const codeFences = (s.match(/^\s*```[a-zA-Z0-9_-]*\s*$/gm) || []).length;
+  const headings = (s.match(/^\s*#{1,6}\s+/gm) || []).length
+    + (/^\s*第\s*[0-9零一二三四五六七八九十百千]+\s*[章节回][^\n。！？]{0,40}\n+/.test(s) ? 1 : 0);
+  const dividers = (s.match(/^\s*([-_]{3,}|—{3,}|─{3,}|={3,}|[*＊\s]{3,})\s*$/gm) || []).length;
+  const endTags = (s.match(/^\s*[（(【［\-—]*\s*(本章完|全章完|本集完|未完待续)\s*[）)】］\-—。！!]*\s*$/gm) || []).length
+    + (s.match(/[（(【［]\s*(本章完|全章完|本集完|未完待续)\s*[）)】］]\s*$/g) || []).length;
+
+  // 1. 清除代码块围栏 ```
+  s = s.replace(/^\s*```[a-zA-Z0-9_-]*\s*$/gm, '');
+  // 2. 清除 AI 寒暄开场白（若模型误吐在文件开头）
+  s = s.replace(/^\s*(好的[，,。！]?|以下是[^\n]*正文[：:]*|这是为您[^\n]*)\n+/i, '');
+  // 3. 清除行首 Markdown # 标题符与首行重复章名
+  s = s.replace(/^\s*#{1,6}\s+/gm, '');
+  s = s.replace(/^\s*第\s*[0-9零一二三四五六七八九十百千]+\s*[章节回][^\n。！？]{0,40}\n+/, '');
+  // 4. 清除独立成行的机械分割线（--- / *** / === / ———）
+  s = s.replace(/^\s*([-_]{3,}|—{3,}|─{3,}|={3,}|[*＊]{3,})\s*$/gm, '');
+  // 5. 清除（本章完）/【本章完】/（未完待续）等章尾套壳标记
+  s = s.replace(/^\s*[（(【［\-—]*\s*(本章完|全章完|本集完|未完待续)\s*[）)】］\-—。！!]*\s*$/gm, '');
+  s = s.replace(/[（(【［]\s*(本章完|全章完|本集完|未完待续)\s*[）)】］]\s*$/g, '');
+
+  // 6. 清除全部 * 号 / ＊ 号（含 **加粗**、*斜体* 及散落星号）与行内 Markdown 符号（`、~~、__）
+  const stars = (s.match(/[*＊]+/g) || []).length;
+  const inlineMd = (s.match(/`|~~|__/g) || []).length;
+  s = s.replace(/[*＊]+/g, '');
+  s = s.replace(/`([^`\n]+)`/g, '$1').replace(/`/g, '');
+  s = s.replace(/~~([^~\n]+)~~/g, '$1').replace(/__([^_\n]+)__/g, '$1');
+
+  // 7. 清除典型 AI 解释腔前缀与机械神态套话
+  const slopRe = /(^|[。！？\n\s])(不得不说|值得一提的是|显而易见|总而言之|换句话说|某种程度上)[，,]\s*/g;
+  const slopPhrases = (s.match(slopRe) || []).length;
+  s = s.replace(slopRe, '$1');
+
+  // 8. 规整叠标点与多余空行
+  const punctRe = /。{2,}|，。|。，|、。|？。|！。/g;
+  const stackedPunct = (s.match(punctRe) || []).length;
+  s = s
+    .replace(/。{2,}/g, '。')
+    .replace(/，。/g, '。').replace(/。，/g, '。')
+    .replace(/、。/g, '。')
+    .replace(/？。/g, '？').replace(/！。/g, '！')
+    .split('\n')
+    .map(line => line.replace(/[ \t]+$/g, ''))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim() + '\n';
+
+  const total = stars + codeFences + headings + dividers + endTags + inlineMd + slopPhrases + stackedPunct;
+  const changed = s.trim() !== orig.trim();
+  return {
+    text: s,
+    changed,
+    stats: {
+      stars,
+      headings: headings + codeFences,
+      dividers,
+      endTags,
+      inlineMd,
+      slopPhrases,
+      stackedPunct,
+      total,
+    },
+  };
+}
+
+// 净化单个章节文件；changed 才写盘
+export function cleanFileAiTraces(fp) {
+  let raw;
+  try { raw = fs.readFileSync(fp, 'utf8'); } catch { return { file: fp, changed: false, error: 'read' }; }
+  const r = cleanAiTraces(raw);
+  if (r.changed) {
+    try { fs.writeFileSync(fp, r.text, 'utf8'); } catch { return { file: fp, changed: false, error: 'write' }; }
+  }
+  return { file: path.basename(fp), changed: r.changed, ...r.stats };
+}
+
+// 一键清除整本书（或指定章号区间）的 AI 痕迹
+export function cleanBookAiTraces(bookDir, { from = 1, to = 0, onLog = () => {} } = {}) {
+  const files = chapterFilesInRange(bookDir, from, to);
+  let touched = 0;
+  let stars = 0, headings = 0, dividers = 0, endTags = 0, inlineMd = 0, slopPhrases = 0, stackedPunct = 0, total = 0;
+  const touchedNums = [];
+  for (const { num, path: fp } of files) {
+    const r = cleanFileAiTraces(fp);
+    if (r.changed) {
+      touched++;
+      touchedNums.push(num);
+      stars += r.stars || 0;
+      headings += r.headings || 0;
+      dividers += r.dividers || 0;
+      endTags += r.endTags || 0;
+      inlineMd += r.inlineMd || 0;
+      slopPhrases += r.slopPhrases || 0;
+      stackedPunct += r.stackedPunct || 0;
+      total += r.total || 0;
+    }
+  }
+  if (touched > 0) {
+    const parts = [];
+    if (stars) parts.push(`* 号 ${stars} 处`);
+    if (endTags) parts.push(`章尾套壳 ${endTags} 处`);
+    if (dividers) parts.push(`机械分割线 ${dividers} 处`);
+    if (headings) parts.push(`标题/围栏 ${headings} 处`);
+    if (inlineMd) parts.push(`Markdown符 ${inlineMd} 处`);
+    if (slopPhrases) parts.push(`解释腔套话 ${slopPhrases} 处`);
+    if (stackedPunct) parts.push(`叠标点 ${stackedPunct} 处`);
+    onLog({
+      level: 'info',
+      msg: `🧹 一键清除AI痕迹完成：共扫描 ${files.length} 章，净化 ${touched} 章（清除 ${parts.join('、') || '格式杂项'}）`,
+    });
+  } else {
+    onLog({ level: 'info', msg: `🧹 一键清除AI痕迹：扫描 ${files.length} 章，全部干净无残留` });
+  }
+  return {
+    files: files.length,
+    touched,
+    touchedNums,
+    stats: { stars, headings, dividers, endTags, inlineMd, slopPhrases, stackedPunct, total },
+  };
+}
+
 // 核心：把整章正文矫正。返回 { text, changed, stats:{ellBefore, cplBefore, cplAfter} }
 export function deslopText(raw, { mergeUnder = 35, killEllipsis = true } = {}) {
-  const src = String(raw || '').replace(/\r\n/g, '\n');
+  const pre = cleanAiTraces(raw);
+  const src = pre.text;
+  const origRaw = String(raw || '').replace(/\r\n/g, '\n');
   const blocks = src.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean);
 
-  const ellBefore = (src.match(/…+/g) || []).length;
-  const lb = src.split('\n').filter(l => l.trim());
-  const charsAll = src.replace(/\s/g, '').length;
+  const ellBefore = (origRaw.match(/…+/g) || []).length;
+  const lb = origRaw.split('\n').filter(l => l.trim());
+  const charsAll = origRaw.replace(/\s/g, '').length;
   const cplBefore = Math.round(charsAll / Math.max(1, lb.length));
 
   const paras = [];
@@ -58,8 +190,8 @@ export function deslopText(raw, { mergeUnder = 35, killEllipsis = true } = {}) {
   const text = paras.join('\n\n') + '\n';
   const outLines = text.split('\n').filter(l => l.trim());
   const cplAfter = Math.round(text.replace(/\s/g, '').length / Math.max(1, outLines.length));
-  const changed = text.trim() !== src.trim();
-  return { text, changed, stats: { ellBefore, cplBefore, cplAfter } };
+  const changed = text.trim() !== origRaw.trim();
+  return { text, changed, stats: { ellBefore, cplBefore, cplAfter, starsBefore: pre.stats.stars } };
 }
 
 // 病判定：给上层决定「是否已相对干净、可跳过」——但闸默认对每章都跑（幂等），此函数仅供日志/阈值。

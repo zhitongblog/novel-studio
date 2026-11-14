@@ -12,7 +12,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { loadConfig } from './config.mjs';
-import { getModel } from './models.mjs';
+import { getModel, resolveBin } from './models.mjs';
+import { prepareCliInvocation, headlessCwd } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { generateLocalImage, LOCAL_NEGATIVE } from './imagelocal.mjs';
 import { unloadLocalText, detectGpu } from './localai.mjs';
@@ -23,6 +24,9 @@ import { chatComplete } from './apichat.mjs';
 //    都是糊成乱码的假字。书名是我们后期 canvas 叠上去的，底图必须【干净无字】。故【绝不用 poster/book cover 这类版式词】，
 //    只描述"单人特写插画·纯净背景"。文字提示用温和的 no text/no letters(说太多反而诱发文字)。配合 sanitizeArtPrompt 兜底剥词。
 export const ART_ENFORCE = ', the main character is a Chinese person with East Asian facial features (NOT western or caucasian), authentic Chinese historical setting and costume true to the era, Chinese guofeng aesthetic, cinematic dramatic lighting, highly detailed digital painting, vertical 3:4 full-frame single character portrait, plain clean uncluttered background, no text, no letters, no watermark, no signature';
+
+// 番茄「短故事（短篇）」封面硬约束：平台明确规定「作品封面不能出现人物」，必须走无人物意境静物/场景插画
+export const SHORT_ART_ENFORCE = ', authentic Chinese setting and objects true to the era, cinematic dramatic lighting, moody atmospheric still-life and environment illustration, vertical composition with clean dark upper space, strictly NO people, NO human figures, NO faces, NO hands, no text, no letters, no watermark, no signature';
 
 // 兜底剥掉会诱发文字的【版式词】(poster/book cover/movie poster/typography/title/credits…)，换成"人物特写插画"或删掉。
 // 不管 cover_prompt 或模型输出里混进这些词，送进 Imagen 前都清一遍——避免画成带乱码假字的海报/实体书。
@@ -43,15 +47,25 @@ export function stripCtrl(s) {
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ''); // 控制字符(保留 \t\n\r)
 }
 
-// 用 CLI 模型(codex/claude)无头跑一段提示，返回原始输出。用于写"英文出图提示词"。
+// 用 CLI 模型(agy/codex/claude)无头跑一段提示，返回原始输出。用于写"英文出图提示词"。
 export function runCliPrompt(model, prompt, cfg, timeoutMs = 120000) {
   const m = getModel(model);
   if (!m) return '';
   const env = { ...process.env };
   if (cfg?.enableProxy) { const px = proxyUrl(); if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; } }
-  const args = model === 'codex' ? ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'] : ['-p'];
-  const r = spawnSync(m.bin, args, { encoding: 'utf8', timeout: timeoutMs, input: prompt, cwd: os.tmpdir(), env, maxBuffer: 8 * 1024 * 1024, shell: true, windowsHide: true });
-  return (r.stdout || '') + '\n' + (r.stderr || '');
+  const bin = resolveBin(model) || m.bin;
+  const cwd = headlessCwd();
+  const { args, viaStdin, useShell, cleanup } = prepareCliInvocation(model, prompt, bin, { cwd, cfg });
+  try {
+    const r = spawnSync(bin, args, {
+      encoding: 'utf8', timeout: timeoutMs,
+      ...(viaStdin ? { input: prompt } : { stdio: ['ignore', 'pipe', 'pipe'] }),
+      cwd, env, maxBuffer: 8 * 1024 * 1024, shell: useShell, windowsHide: true,
+    });
+    return (r.stdout || '') + '\n' + (r.stderr || '');
+  } finally {
+    cleanup();
+  }
 }
 
 // 从 CLI 输出里抽出英文出图提示词：丢中文行、codex/claude CLI 横幅日志，去重(codex 常打印两遍)，拼成一句。
@@ -91,7 +105,11 @@ function curlJson(url, bodyObj, timeoutSec = 90) {
   let r, out = {}, lastErr = '';
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt > 0) { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 800 * attempt); } catch {} }   // 同步退避(无CPU空转)
-    r = spawnSync('curl', args, { encoding: 'utf8' });
+    // 若本地代理端口未开(exit 7)，第 2 次起去掉 -x 直连尝试
+    const runArgs = (attempt >= 1 && r && r.status === 7 && g.proxy)
+      ? args.filter((a, i) => a !== '-x' && args[i - 1] !== '-x')
+      : args;
+    r = spawnSync('curl', runArgs, { encoding: 'utf8' });
     try { out = JSON.parse(fs.readFileSync(respF, 'utf8')); } catch (e) { out = { _raw: (() => { try { return fs.readFileSync(respF, 'utf8').slice(0, 300); } catch { return ''; } })() }; }
     if (out.predictions || out.candidates) break;   // 成功
     if (out.error) break;                            // API 业务错(key/配额等)，重试无用，直接抛
@@ -225,7 +243,7 @@ async function localArtPrompt(book, cfg, zh) {
 }
 
 // 生成封面底图：Imagen 出 3:4 竖图，默认存到 book.dir/cover_bg.png（可用 outFile 另存，供多封面实验用），返回 {file, prompt, w, h}。
-export async function generateCoverBg(book, { prompt, outFile, onLog = () => {} } = {}) {
+export async function generateCoverBg(book, { prompt, outFile, noPerson = false, aspectRatio = '3:4', onLog = () => {} } = {}) {
   const cfg = loadConfig();
   const backend = cfg.image?.backend || 'gemini';
   let buf, artPrompt;
@@ -247,8 +265,11 @@ export async function generateCoverBg(book, { prompt, outFile, onLog = () => {} 
     buf = await generateLocalImage({ prompt: artPrompt, negative: cfg.image?.negative || LOCAL_NEGATIVE, cfg, onLog });
   } else {
     const g = gcfg();
-    artPrompt = sanitizeArtPrompt((prompt && prompt.trim()) || buildArtPromptSync(book));   // 剥掉 poster/book cover 等诱发文字的版式词
-    const body = { instances: [{ prompt: artPrompt }], parameters: { sampleCount: 1, aspectRatio: '3:4' } };
+    const rawPrompt = (prompt && prompt.trim())
+      ? (sanitizeArtPrompt(prompt.trim()) + (noPerson ? SHORT_ART_ENFORCE : ''))
+      : buildArtPromptSync(book);
+    artPrompt = sanitizeArtPrompt(rawPrompt);   // 剥掉 poster/book cover 等诱发文字的版式词
+    const body = { instances: [{ prompt: artPrompt }], parameters: { sampleCount: 1, aspectRatio: aspectRatio || '3:4' } };
     const j = curlJson(`${HOST}/models/${g.imageModel}:predict?key=${g.apiKey}`, body, 120);
     const b64 = j.predictions?.[0]?.bytesBase64Encoded || j.predictions?.[0]?.image?.bytesBase64Encoded;
     if (!b64) throw new Error('未返回图片（可能被安全策略拦截，换个题材描述再试）');

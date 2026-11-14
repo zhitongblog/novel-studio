@@ -64,12 +64,14 @@ export const MODELS = {
     seedArgs: (instruction, cfg) => {
       const args = [];
       if (!cfg || cfg.agySkipPermissions !== false) args.push('--dangerously-skip-permissions');
+      if (cfg?.agyModel) args.push('--model', String(cfg.agyModel));
+      if (cfg?.agyEffort) args.push('--effort', String(cfg.agyEffort));
       args.push('-i', instruction);
       return args;
     },
-    // ⚠️ agy 装完默认【不在 PATH】里（可用 `agy install` 配好，或由 detectModel 的兜底路径找到）。
-    note: 'Google Antigravity 的 CLI。读本书目录 AGENTS.md 作为写作规范。'
-      + '装完若提示"不在 PATH"，跑一次 `agy install` 配置环境变量，或让程序按默认安装路径自动找。',
+    // ⚠️ agy 装完默认可能不在 PATH 里（或通过 WinGet 安装在 Packages 目录），由 detectModel 的兜底路径自动探测。
+    note: 'Google Antigravity 的 CLI（支持交互窗口与无头省钱模式）。读本书目录 AGENTS.md 作为写作规范。'
+      + '装完若提示"不在 PATH"，跑一次 `agy install` 配置环境变量，或让程序按默认/WinGet 安装路径自动找。',
   },
   gemini: {
     id: 'gemini',
@@ -224,16 +226,31 @@ export function getModel(id) {
 function fallbackBins(id) {
   const home = process.env.USERPROFILE || process.env.HOME || '';
   const local = process.env.LOCALAPPDATA || (home && path.join(home, 'AppData', 'Local')) || '';
+  const wingetAgy = [];
+  if (local) {
+    wingetAgy.push(path.join(local, 'Microsoft', 'WinGet', 'Links', 'agy.exe'));
+    const pkgDir = path.join(local, 'Microsoft', 'WinGet', 'Packages');
+    try {
+      for (const d of fs.readdirSync(pkgDir)) {
+        if (/^Google\.AntigravityCLI/i.test(d)) wingetAgy.push(path.join(pkgDir, d, 'agy.exe'));
+      }
+    } catch {}
+  }
   const map = {
-    // 实测：agy 1.1.27 装在 %LOCALAPPDATA%\agy\bin\agy.exe，默认不改 PATH
-    agy: [local && path.join(local, 'agy', 'bin', 'agy.exe'), home && path.join(home, '.agy', 'bin', 'agy')],
+    // 实测：agy 可能装在 %LOCALAPPDATA%\agy\bin\agy.exe、WinGet Packages 目录或 ~/.gemini/antigravity-cli/bin
+    agy: [
+      local && path.join(local, 'agy', 'bin', 'agy.exe'),
+      ...wingetAgy,
+      home && path.join(home, '.gemini', 'antigravity-cli', 'bin', 'agy.exe'),
+      home && path.join(home, '.agy', 'bin', 'agy'),
+    ],
     claude: [home && path.join(home, '.local', 'bin', 'claude.exe'), home && path.join(home, '.local', 'bin', 'claude')],
   };
   return (map[id] || []).filter(Boolean);
 }
 
 // 真正拿去 spawn 的可执行文件：PATH 里有就用命令名（便携），没有就用检测到的绝对路径。
-// 血泪：agy 装在 %LOCALAPPDATA%gyin 且【不进 PATH】，detectModel 靠兜底路径认出来了，
+// 血泪：agy 装在 %LOCALAPPDATA% gy in 且【不进 PATH】，detectModel 靠兜底路径认出来了，
 // 但 runModelOnce / launch.ps1 仍然照 m.bin='agy' 去跑 → "'agy' 不是内部或外部命令"，
 // 而那句报错还会被当成"模型的回答"洗进简介里。界面上显示"可用"、一跑就废，最难查。
 export function resolveBin(id) {
@@ -301,14 +318,12 @@ export function trustAgyWorkspace(dir) {
 }
 
 // 这个模型能不能【无头跑】（一次性 spawn、没有窗口、没人能点同意）。
-// agy 不行：它的交互模式(-i)能自动登录，但那份凭据【不落盘】——~/.gemini 下不生成任何 token 文件，
-// 于是非交互的 -p 每次都从零发起 OAuth：打印一条 accounts.google.com 链接、等人贴授权码（60 秒超时），
-// 而授权码与发起登录的进程用 PKCE 绑定，进程一死即作废。后台任务里无解（2026-09-13 实测）。
-// 用处：作者选了「无状态省钱模式」而书绑的是 agy 时，不该白跑一批再报错，
-// 而应该【自动改用有窗口的模式】去写——那条路 agy 是通的（立项实测跑通过）。
+// 演进：早期 agy 1.1.27 的 -p 凭据不落盘且 Windows 下非 TTY 丢 stdout，当时只能排除 agy；
+// 自 agy 1.3.x 起，print 模式已支持静默复用登录态（Print mode: silent auth succeeded）、
+// 继承 settings.json 策略，并修复了 Windows 管道输出与 stdin 阻塞问题，实测可稳定无头运行。
 export function canRunHeadless(modelId) {
   const m = getModel(modelId);
   if (!m) return false;
   if (m.kind === 'web' || m.kind === 'api') return false;   // 这两类本来就不走 spawn
-  return m.id !== 'agy';
+  return !!m.bin;
 }

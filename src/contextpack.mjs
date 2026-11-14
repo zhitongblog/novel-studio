@@ -91,25 +91,43 @@ export function lastChapterTail(book, maxChars = 1800) {
   return { num: best.num, name: (best.name || '').replace(/\.txt$/i, ''), tail, hanzi };
 }
 
-// 近期章名表（去重防撞名用）：优先从 chapter_index.md 取，退回扫文件名。取最后 N 个 + 总数。（导出供 cowrite 复用）
+// 近期章名表（去重防撞名用）：合并 chapter_index.md 与 chapters/ 磁盘文件名（按章号排），防索引漏登导致近期章名失明。
 export function recentChapterNames(book, n = 80) {
-  const names = [];
+  const byNum = new Map();
+  const extra = [];
   const idx = readOr(path.join(book.dir, 'chapter_index.md'));
   if (idx) {
     // 解析表格行：| 章号 | 章名 | ...
     for (const line of idx.split(/\r?\n/)) {
-      const m = line.match(/^\s*\|\s*\d{1,4}\s*\|\s*([^|]+?)\s*\|/);
-      if (m) names.push(m[1].trim());
+      const m = line.match(/^\s*\|\s*(\d{1,4})\s*\|\s*([^|]+?)\s*\|/);
+      if (m) byNum.set(parseInt(m[1], 10), m[2].trim());
     }
   }
-  if (!names.length) {
-    // 退回扫文件名
-    const cdir = path.join(book.dir, 'chapters');
-    const walk = (d) => { let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-      for (const e of es) { if (e.isDirectory()) walk(path.join(d, e.name));
-        else if (/\.txt$/i.test(e.name)) names.push(e.name.replace(/^\d+[_\-]?/, '').replace(/\.txt$/i, '').trim()); } };
-    walk(cdir);
-  }
+  // 同时扫磁盘文件名补齐（模型常漏更 chapter_index.md，只信索引会漏掉刚写的几章）
+  const cdir = path.join(book.dir, 'chapters');
+  const walk = (d) => {
+    let es = [];
+    try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of es) {
+      if (e.isDirectory()) walk(path.join(d, e.name));
+      else if (/\.txt$/i.test(e.name)) {
+        const m = e.name.match(/^(\d{1,4})[_\-\s]*(.*)\.txt$/i);
+        if (m) {
+          const num = parseInt(m[1], 10);
+          const nm = (m[2] || '').trim();
+          if (nm && !byNum.has(num)) byNum.set(num, nm);
+        } else {
+          const nm = e.name.replace(/\.txt$/i, '').trim();
+          if (nm) extra.push(nm);
+        }
+      }
+    }
+  };
+  walk(cdir);
+  const names = [
+    ...[...byNum.entries()].sort((a, b) => a[0] - b[0]).map(([, nm]) => nm),
+    ...extra,
+  ];
   return { total: names.length, recent: names.slice(-n) };
 }
 

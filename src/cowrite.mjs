@@ -13,7 +13,8 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { getModel, detectModel } from './models.mjs';
+import { getModel, detectModel, resolveBin } from './models.mjs';
+import { prepareCliInvocation, headlessCwd } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { lastChapterTail, recentChapterNames } from './contextpack.mjs';
 import { currentVolume, getBook, bookStats, volumeDirName } from './books.mjs';
@@ -37,7 +38,7 @@ import { getSession, removeSession } from './sessions.mjs';
 import { closeWindow } from './unterm.mjs';
 
 // 允许用于共创的模型：能忠实跟住作者具体指令、会写好文的强 CLI。排除弱/网页/API 免费模型。
-export const COWRITE_MODELS = ['claude', 'codex', 'gemini', 'qwen'];
+export const COWRITE_MODELS = ['agy', 'claude', 'codex', 'gemini', 'qwen'];
 
 // 共创的两类活，对模型的要求完全不同：
 //   · 出主意 / 无头写一章 —— 只要「喂 prompt、拿文本」，任何能对话的模型都行（含 API/本地）；
@@ -101,29 +102,32 @@ export function runCowrite(model, prompt, cfg, timeoutMs = 300000) {
     const px = proxyUrl();
     if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; }
   }
-  let args;
-  if (model === 'codex') args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
-  else args = ['-p'];   // claude / gemini / qwen 都是 -p + stdin
+  const bin = resolveBin(model) || m.bin;
+  const cwd = headlessCwd();
+  const { args, viaStdin, useShell, cleanup } = prepareCliInvocation(model, prompt, bin, { cwd, cfg });
   const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\x1b[@-Z\\-_]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
   return new Promise((resolve, reject) => {
     let out = '', err = '', done = false;
     let child;
     try {
-      child = spawn(m.bin, args, { cwd: os.tmpdir(), env, shell: true, windowsHide: true });
-    } catch (e) { return reject(new Error(m.name + ' 调用失败：' + (e.message || e))); }
+      child = spawn(bin, args, {
+        cwd, env, shell: useShell, windowsHide: true,
+        stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      });
+    } catch (e) { cleanup(); return reject(new Error(m.name + ' 调用失败：' + (e.message || e))); }
     const timer = setTimeout(() => {
-      if (done) return; done = true;
+      if (done) return; done = true; cleanup();
       try { child.kill('SIGKILL'); } catch {}
       reject(new Error(m.name + ` 超时（${Math.round(timeoutMs / 1000)}s）`));
     }, timeoutMs);
     child.stdout && child.stdout.on('data', d => { out += d; });
     child.stderr && child.stderr.on('data', d => { err += d; });
-    child.on('error', (e) => { if (done) return; done = true; clearTimeout(timer); reject(new Error(m.name + ' 调用失败：' + (e.message || e))); });
+    child.on('error', (e) => { if (done) return; done = true; clearTimeout(timer); cleanup(); reject(new Error(m.name + ' 调用失败：' + (e.message || e))); });
     // 【实测踩过的坑】codex 没装时，shell 只把"命令找不到"写进 stderr 就退出，stdout 是空的。
     // 原来这里无脑 resolve，空回复一路走到解析器，报的是"AI 未按格式产出本章"——
     // 让人以为是模型跑偏，实际上根本没调起来。所以退出码非 0 且没正文时，直说是哪一步没成。
     child.on('close', (code) => {
-      if (done) return; done = true; clearTimeout(timer);
+      if (done) return; done = true; clearTimeout(timer); cleanup();
       const o = stripAnsi(out), e = stripAnsi(err);
       if (code !== 0 && !o.trim()) {
         const miss = /not (?:be )?recognized|No such file|command not found|无法将.*识别/i.test(e);
@@ -133,7 +137,9 @@ export function runCowrite(model, prompt, cfg, timeoutMs = 300000) {
       }
       resolve(o + '\n' + e);
     });
-    try { child.stdin.write(prompt); child.stdin.end(); } catch (e) { /* 子进程若已退出，close/error 会处理 */ }
+    if (viaStdin) {
+      try { child.stdin.write(prompt); child.stdin.end(); } catch (e) { /* 子进程若已退出，close/error 会处理 */ }
+    }
   });
 }
 

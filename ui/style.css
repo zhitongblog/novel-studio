@@ -452,14 +452,37 @@ textarea { resize: vertical; line-height: 1.5; }
 .rd-dup-row b { color: #ffd0d0; }
 .rd-item.dup { color: #e0a0a0; padding: 3px 8px; }
 
-/* 书名实验生成器网格 */
-.ne-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; max-height: 58vh; overflow-y: auto; }
-.ne-card { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.09); border-radius: 8px; overflow: hidden; }
-.ne-card img, .ne-card canvas.ne-cover { width: 100%; aspect-ratio: 3/4; object-fit: cover; display: block; background: #111; }
-.ne-noimg { width: 100%; aspect-ratio: 3/4; display: flex; align-items: center; justify-content: center; color: #e57; font-size: 12px; background: rgba(255,80,80,.08); }
-.ne-title { padding: 6px 8px 2px; font-weight: 600; font-size: 13px; cursor: pointer; line-height: 1.3; }
-.ne-title:hover { color: #58c1a6; }
-.ne-hook { padding: 0 8px 8px; font-size: 11px; opacity: .6; }
+/* 书名实验生成器网格 & 多书名实验中心 */
+.ne-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(172px, 1fr)); gap: 12px; max-height: 56vh; overflow-y: auto; }
+.ne-card { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.09); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+.ne-card-cover-wrap { position: relative; width: 100%; aspect-ratio: 3/4; background: #111; }
+.ne-card img, .ne-card canvas.ne-cover { width: 100%; height: 100%; object-fit: cover; display: block; background: #111; }
+.ne-regen-btn { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,.68); color: #fff; border: 1px solid rgba(255,255,255,.22); border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer; opacity: 0; transition: opacity .15s; }
+.ne-card:hover .ne-regen-btn { opacity: 1; }
+.ne-noimg { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #e57; font-size: 12px; background: rgba(255,80,80,.08); }
+.ne-title-input { width: calc(100% - 12px); margin: 6px 6px 2px; padding: 5px 7px; font-weight: 600; font-size: 12.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,.12); background: rgba(0,0,0,.28); color: #fff; }
+.ne-title-input:focus { border-color: #34D6A6; outline: none; }
+.ne-meta-row { display: flex; align-items: center; justify-content: space-between; padding: 2px 8px 7px; gap: 4px; font-size: 11px; }
+.ne-hook { opacity: .65; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ne-dup-tag { padding: 1px 6px; border-radius: 4px; font-size: 10.5px; white-space: nowrap; }
+.ne-dup-tag.ok { background: rgba(52,214,166,.16); color: #34D6A6; }
+.ne-dup-tag.bad { background: rgba(255,95,95,.18); color: #ff7a7a; }
+.ne-fq-banner { margin: 8px 0 10px; padding: 10px 12px; border-radius: 8px; background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.09); font-size: 12.5px; line-height: 1.55; }
+.ne-fq-cond { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 4px; font-size: 11.5px; }
+.ne-fq-cond.done { background: rgba(52,214,166,.14); color: #5ce0b8; }
+.ne-fq-cond.todo { background: rgba(255,170,60,.15); color: #ffbe66; }
+.nec-list { display: flex; flex-direction: column; gap: 8px; }
+.nec-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.08); }
+.nec-row.eligible { border-color: rgba(52,214,166,.4); background: rgba(52,214,166,.05); }
+.nec-info { flex: 1; min-width: 0; }
+.nec-title { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.nec-sub { font-size: 12px; color: var(--muted, #9aa); margin-top: 3px; }
+.nec-groups { font-size: 11.5px; color: #b8c4d0; margin-top: 4px; }
+.nec-badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11.5px; font-weight: 600; }
+.nec-badge.st-2 { background: rgba(52,214,166,.2); color: #34D6A6; }
+.nec-badge.st-3, .nec-badge.st-5, .nec-badge.st-6 { background: rgba(106,168,255,.2); color: #7cb8ff; }
+.nec-badge.st-7 { background: rgba(168,130,255,.2); color: #c4a6ff; }
+.nec-badge.st-1, .nec-badge.st-8, .nec-badge.st-9 { background: rgba(255,255,255,.07); color: #999; }
 
 
 /* 重写弹窗：可多选的"侧重"标签。用 label 包 checkbox，点整块都能选，手机上好点。 */

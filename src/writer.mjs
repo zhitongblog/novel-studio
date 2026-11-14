@@ -415,10 +415,10 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
       const b = getBook(slug) || book;
       if (b.status === '已完本') return 'done';
       if (b.status === '收尾中') return 'finale';
-      if (finaleOn && cfg.finale?.autoEnterLastVolume !== false) {
-        // 自动入口：已写到"规划总章数 − 一卷"(即进入最后一卷的体量)就进收尾。
-        // 总章数从 目标章数/bible全书章数/卷数×每卷章数 推导——比数卷目录可靠(空/错位卷目录不会误判)。
-        const total = plannedTotalChapters(b);
+      // 仅当用户显式开启 autoEnterLastVolume === true 且设置了硬性 targetChapters 上限时才自动进收尾；
+      // 普通「连载中」的书绝不因 bible 粗略卷章估算而擅自触发完本收束令（防止未打算完本的书被强行写完结）。
+      if (finaleOn && cfg.finale?.autoEnterLastVolume === true) {
+        const total = parseInt(b?.targetChapters, 10) || 0;
         if (total > 0) {
           const lastVol = chaptersPerVol(b) || Math.ceil(total * 0.1);
           if (bookStats(b).chapters >= total - lastVol) return 'finale';

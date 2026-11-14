@@ -50,10 +50,11 @@ export async function runCli(argv) {
     case 'local': return localCmd(f, cfg);
     case 'stop': return stopCmd(f);
     case 'config': return configCmd(f, cfg);
+    case 'traffic': return trafficCmd(f, cfg);
     case 'reference': return reference();
     default:
       console.log('未知命令：' + cmd);
-      console.log('可用：doctor | models | local [import] | book new|list | write | stateless | ledger | sessions | send | watch | stop | config | reference | mcp | tui');
+      console.log('可用：doctor | models | local [import] | book new|list | write | stateless | ledger | sessions | send | watch | stop | config | traffic | reference | mcp | tui');
       process.exitCode = 1;
   }
 }
@@ -776,4 +777,59 @@ async function probeOralCmd(book, f) {
   const { path: gp } = writeGateOral(book.dir, probe, derived);
   console.log('\n  ' + c.green('已写入 ') + gp);
   console.log('  ' + c.gray('下次 novel gate 就会用这张表。想回默认表，把 gate.json 里的 oralMarkers 删掉。'));
+}
+
+async function trafficCmd(f, cfg) {
+  const {
+    fetchAllBooksTraffic,
+    fetchBookTrafficDetail,
+    readCachedTrafficOverview,
+    formatTrafficDiagnosisMarkdown,
+  } = await import('./traffic.mjs');
+
+  const bookArg = f.book || f._[0] || '';
+  if (bookArg) {
+    const localBook = getBook(bookArg);
+    const slug = localBook ? localBook.slug : '';
+    const bookId = /^\d{15,22}$/.test(String(bookArg)) ? String(bookArg) : (localBook?.publish?.bookId || '');
+    console.log(c.bold(`\n📈 番茄单书深度流量诊断 · ${localBook ? '《' + localBook.title + '》' : bookId}\n`) + hr());
+    const detail = await fetchBookTrafficDetail({
+      profilePath: f.profile || '',
+      bookId,
+      slug,
+      days: Number(f.days) || 14,
+      includeIncome: f['no-income'] ? false : true,
+      onLog: (e) => console.log(c.gray('  [' + (e.level || 'info') + '] ' + e.msg)),
+    });
+    console.log('\n' + formatTrafficDiagnosisMarkdown(detail));
+    return;
+  }
+
+  console.log(c.bold('\n📈 番茄全账号流量分析大盘\n') + hr());
+  const data = f.cached
+    ? (readCachedTrafficOverview() || await fetchAllBooksTraffic({ profilePath: f.profile || '', includeIncome: !f['no-income'], onLog: (e) => console.log(c.gray('  ' + e.msg)) }))
+    : await fetchAllBooksTraffic({ profilePath: f.profile || '', includeIncome: !f['no-income'], onLog: (e) => console.log(c.gray('  ' + e.msg)) });
+
+  const s = data.summary || {};
+  console.log(`\n  📊 采集时间：${data.fetchedAt}`);
+  console.log(`  📚 作品总数：${c.bold(s.totalBooks)} 本（连载 ${s.serializingBooks} / 完结 ${s.finishedBooks}）｜总字数 ${(s.totalWords / 10000).toFixed(1)} 万字`);
+  console.log(`  🔥 昨日总阅读UV：${c.bold(c.green(s.totalDailyReaders))}｜14日在读总人数：${c.bold(c.cyan(s.totalActiveReaders14d))}｜单日加书架：${c.bold(s.totalShelfDaily)}`);
+  if (s.totalYesterdayIncome || s.totalCumulativeIncome) {
+    console.log(`  💰 活跃书昨日收益：${c.bold('¥' + s.totalYesterdayIncome.toFixed(2))}｜活跃书累计稿费：${c.bold('¥' + s.totalCumulativeIncome.toFixed(2))}`);
+  }
+  console.log(hr());
+  console.log('  排名  书名                        状态    字数     昨日UV(环比)     14日在读  加架  读完率   昨日/累计收益       诊断分档与建议');
+  console.log(hr());
+  (data.books || []).forEach((b, idx) => {
+    const nm = b.title.slice(0, 14).padEnd(14, '　');
+    const st = b.status;
+    const ww = ((b.words / 10000).toFixed(1) + 'w').padStart(7);
+    const uv = `${b.dailyReaders}(${b.dailyReadersIncr}%)`.padStart(14);
+    const act = String(b.activeReaders14d).padStart(8);
+    const sh = String(b.shelfDaily).padStart(4);
+    const cr = (b.completionRate + '%').padStart(7);
+    const inc = b.totalIncome != null ? `¥${(b.yesterdayIncome || 0).toFixed(2)}/¥${b.totalIncome.toFixed(0)}`.padStart(16) : '              --';
+    console.log(`  #${String(idx + 1).padStart(2, '0')}  ${nm}  ${st}  ${ww}  ${uv}  ${act}  ${sh}  ${cr}  ${inc}  ${b.diagnosis?.tier || ''} ${b.diagnosis?.primaryAction || ''}`);
+  });
+  console.log('');
 }

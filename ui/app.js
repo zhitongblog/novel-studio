@@ -1045,6 +1045,7 @@ async function openPublish(book) {
   setSynopsisBox(b);
   if ($('#cbHero')) $('#cbHero').value = '';
   if ($('#cbHero2')) $('#cbHero2').value = '';
+  if ($('#cbSignMode')) $('#cbSignMode').value = b.status === '已完本' ? '完本模式' : '连载模式';
   // 频道+主分类：按这本书存的（立项时 AI 推断，或作者改过的）渲染并预选，别留上一本的
   if ($('#cbCategory')) delete $('#cbCategory').dataset.want;
   renderCategorySelect(b);
@@ -1229,27 +1230,92 @@ $('#pbSaveCfg').addEventListener('click', async () => {
   $('#pbErr').textContent = '';
   try { if (await pbSave()) toast('番茄发布配置已保存'); } catch (e) { $('#pbErr').textContent = e.message; }
 });
+// —— 番茄「短故事（短篇）」一键合成存草稿 / 直接发布 ——
+async function runShortStoryPublish(draftOnly) {
+  if (!CUR) return;
+  const hint = $('#pbShortHint');
+  const profilePath = $('#pbProfile').value;
+  if (!profilePath) {
+    if (hint) { hint.textContent = '⚠️ 请先在上方选择 Unzoo 账号'; hint.style.color = '#e57'; }
+    return;
+  }
+  if (!draftOnly && !confirm(`确定要将《${CUR.title}》全部章节一键合成并【直接提交番茄短故事审核】吗？\n（提示：建议先点左侧「存草稿」在浏览器核对无误后再提交）`)) {
+    return;
+  }
+  const trialRatio = parseFloat($('#pbShortTrial')?.value || '0.3') || 0.3;
+  const itemId = ($('#pbShortItemId')?.value || (CUR.publish || {}).shortItemId || '').trim();
+  const rawCats = ($('#pbShortCats')?.value || '').trim();
+  const categories = rawCats ? rawCats.split(/[,，、\s]+/).map(s => s.trim()).filter(Boolean) : [];
+  const useAI = $('#pbUseAI') ? $('#pbUseAI').checked : true;
+
+  // 先把 profilePath / useAI 保存进书的 publish 配置
+  await api('/api/book/publish-config', 'POST', {
+    book: CUR.slug,
+    publish: { ...(CUR.publish || {}), profilePath, useAI, trialRatio, ...(itemId ? { shortItemId: itemId } : {}) },
+  });
+  if (hint) {
+    hint.style.color = '';
+    hint.textContent = `⏳ 正在浏览器中打开番茄「短故事」编辑器并合成全书章节（${draftOnly ? '存草稿模式' : '直接提交模式'}），请查看实时日志…`;
+  }
+  try {
+    const r = await api('/api/book/publish-short', 'POST', {
+      book: CUR.slug,
+      draftOnly,
+      trialRatio,
+      categories,
+      itemId,
+    });
+    if (r.ok) {
+      toast(draftOnly ? '已启动番茄短故事合成存草稿' : '已启动番茄短故事合成发布');
+      if (hint) hint.textContent = `✅ 已启动（自动匹配分类：${(r.categories || []).join('、')}），请查看下方日志或浏览器窗口。`;
+    }
+  } catch (e) {
+    if (hint) { hint.textContent = '❌ 失败：' + e.message; hint.style.color = '#e57'; }
+  }
+}
+$('#pbShortDraftBtn')?.addEventListener('click', () => runShortStoryPublish(true));
+$('#pbShortPubBtn')?.addEventListener('click', () => runShortStoryPublish(false));
 // —— 在番茄创建新作品（全自动：填表→立即创建→回填 bookId）——
 let cbPoll = null;
 $('#cbCreate')?.addEventListener('click', async () => {
   if (!CUR) return;
   const hint = $('#cbHint'); hint.style.color = '';
   const profilePath = $('#pbProfile').value;
-  const synopsis = synopsisFor(CUR.slug);   // 只认属于这本书的简介，绝不拿框里可能残留的上一本
+  let synopsis = synopsisFor(CUR.slug);   // 只认属于这本书的简介，绝不拿框里可能残留的上一本
   const channel = $('#cbChannel').value;
   const mainCategory = $('#cbCategory').value;
+  const signMode = $('#cbSignMode') ? $('#cbSignMode').value : '连载模式';
   const hero = $('#cbHero').value.trim();
   const hero2 = $('#cbHero2').value.trim();
   if (!profilePath) { hint.textContent = '⚠️ 请先在上方选 Unzoo 账号'; hint.style.color = '#e57'; return; }
   // 换频道后原分类不属于新频道时，下拉会停在那条空的提示项——这里必须拦住。
   // 主分类签约后不可改，宁可让作者多点一下，也不能带着空/错的分类去建书。
   if (!mainCategory) { hint.textContent = '⚠️ 请先挑主分类（签约后不可改，挑之前想清楚）'; hint.style.color = '#e57'; return; }
-  if (synopsis.length < 50) { hint.textContent = `⚠️ 简介只有 ${synopsis.length} 字，番茄要求 50–500 字。请先在「作品简介」写好（可点生成）`; hint.style.color = '#e57'; return; }
-  if (!confirm(`将在你番茄账号真实创建一本新书：\n《${CUR.title}》· ${channel} · ${mainCategory}\n简介 ${synopsis.length} 字${hero ? ' · 主角 ' + hero : ''}\n\n创建不可逆，确定？`)) return;
-  const btn = $('#cbCreate'); btn.disabled = true; const old = btn.textContent; btn.textContent = '📕 创建中…';
+  const btn = $('#cbCreate'); const old = btn.textContent;
+  if (synopsis.length < 50) {
+    if (!confirm(`本书作品简介不足 50 字（当前 ${synopsis.length} 字，番茄要求 50–500 字）。\n\n要先据设定圣经【自动生成简介】再继续创建作品吗？`)) {
+      hint.textContent = `⚠️ 简介只有 ${synopsis.length} 字，番茄要求 50–500 字。请先在「作品简介」写好（可点生成）`; hint.style.color = '#e57'; return;
+    }
+    btn.disabled = true; btn.textContent = '✍️ 生成简介中…';
+    hint.textContent = '⏳ 正在自动生成作品简介…';
+    try {
+      const slug = CUR.slug;
+      const r = await api('/api/book/synopsis', 'POST', { book: slug });
+      synopsis = (r.synopsis || '').trim();
+      const b = STATE.books.find(x => x.slug === slug); if (b) b.synopsis = synopsis;
+      if (CUR.slug === slug) { CUR.synopsis = synopsis; setSynopsisBox({ slug, synopsis }); }
+    } catch (e) {
+      btn.disabled = false; btn.textContent = old;
+      hint.textContent = '❌ 自动生成简介失败：' + e.message; hint.style.color = '#e57'; return;
+    }
+    btn.disabled = false; btn.textContent = old;
+    if (synopsis.length < 50) { hint.textContent = `⚠️ 生成的简介仅 ${synopsis.length} 字，请先在写作台「作品简介」补充到 50 字以上`; hint.style.color = '#e57'; return; }
+  }
+  if (!confirm(`将在你番茄账号真实创建一本新书：\n《${CUR.title}》· ${channel} · ${mainCategory} · ${signMode}\n简介 ${synopsis.length} 字${hero ? ' · 主角 ' + hero : ''}\n\n创建不可逆，确定？`)) return;
+  btn.disabled = true; btn.textContent = '📕 创建中…';
   hint.style.color = ''; hint.textContent = '⏳ 正在番茄创建作品…（约 30 秒，勿动那个浏览器）';
   try {
-    await api('/api/fanqie/create-book', 'POST', { book: CUR.slug, profilePath, title: CUR.title, synopsis, channel, mainCategory, hero, hero2, autoSubmit: true });
+    await api('/api/fanqie/create-book', 'POST', { book: CUR.slug, profilePath, title: CUR.title, synopsis, channel, mainCategory, signMode, hero, hero2, autoSubmit: true });
     if (cbPoll) clearInterval(cbPoll);
     cbPoll = setInterval(async () => {
       try {
@@ -2688,57 +2754,212 @@ $('#cvDownload').addEventListener('click', async () => {
     }
   } catch (e) { $('#cvErr').textContent = e.message; }
 });
-// ===== 书名实验生成器：批量出候选书名 + 每个一张不同画面封面 =====
-let neCurBook = null, nePoll = null, neManifest = null;
+// ===== 书名实验工作台 & 全账号多书名实验中心 =====
+let neCurBook = null, nePoll = null, neManifest = null, neCurFqData = null;
+const NE_PALETTES = [
+  ['#FFF2CC', '#F2C14E'],
+  ['#FFFFFF', '#7FD8FF'],
+  ['#FFE8D6', '#FF6B4A'],
+  ['#E8FFF5', '#52E5A8'],
+  ['#F8E8FF', '#D4A373'],
+];
+function neSplitTitleCN(title) {
+  const s = String(title || '').trim();
+  const m = s.match(/^(.{3,9}?)[，：！？](.+)$/);
+  if (m && m[1].length <= 9 && m[2].length <= 9) return [m[1], m[2]];
+  if (s.length <= 7) return [s];
+  const mid = Math.ceil(s.length / 2);
+  return [s.slice(0, mid), s.slice(mid)];
+}
 function openNameExp(book) {
+  if (!book) return;
   neCurBook = book;
-  $('#neBookTitle').textContent = book.title;
+  neCurFqData = null;
+  const fqBookId = (book.publish && book.publish.bookId) || (book.fanqie && book.fanqie.bookId) || '';
+  $('#neBookTitle').textContent = book.title + (fqBookId ? ` (#${fqBookId})` : '');
   $('#neErr').textContent = ''; $('#neHint').textContent = ''; $('#neGrid').innerHTML = ''; $('#neGen').disabled = false;
+  if ($('#neFanqieBanner')) { $('#neFanqieBanner').classList.add('hidden'); $('#neFanqieBanner').innerHTML = ''; }
   $('#nameExpModal').classList.remove('hidden');
   api('/api/book/name-experiment-status', 'POST', { book: book.slug }).then(s => {
+    if (s.manifest && s.manifest.author && $('#neAuthor')) $('#neAuthor').value = s.manifest.author;
     if (s.manifest && s.manifest.items) neRender(s.manifest);
     if (s.status === 'running') { $('#neHint').textContent = '⏳ 生成中…'; $('#neGen').disabled = true; neStartPoll(); }
   }).catch(() => {});
+  if (fqBookId) neRefreshBookFanqieStatus(false);
 }
+$('#btnNameExpFromWrite')?.addEventListener('click', () => { if (CUR) openNameExp(CUR); else toast('请先选择一本书'); });
+
+async function neRefreshBookFanqieStatus(showToast = true) {
+  if (!neCurBook) return;
+  const banner = $('#neFanqieBanner');
+  if (!banner) return;
+  banner.classList.remove('hidden');
+  banner.innerHTML = `<span class="ne-fq-tag">📡 正在向番茄查询《${esc(neCurBook.title)}》的多书名实验状态与资格…</span>`;
+  try {
+    const r = await api('/api/fanqie/name-experiments-scan', 'POST', { book: neCurBook.slug });
+    const b = (r.books || [])[0];
+    if (!b) {
+      banner.innerHTML = `<span class="ne-fq-tag warn">⚠️ 未在当前番茄账号中找到该书（请确认书籍已绑定番茄 BookID）</span>`;
+      return;
+    }
+    neCurFqData = b;
+    const renderExpBadge = (label, exp) => {
+      if (!exp) return `<span class="ne-fq-tag">${esc(label)}：无数据</span>`;
+      const cls = exp.eligible ? 'eligible' : ((exp.isRunning || [3, 5, 6].includes(exp.status)) ? 'active' : ((exp.isDone || [7, 8].includes(exp.status)) ? 'done' : 'warn'));
+      const condHtml = (exp.conditions || []).map(c => `<span class="nec-cond ${c.ok ? 'ok' : 'fail'}">${c.ok ? '✓' : '✗'}${esc(c.desc)}</span>`).join(' ');
+      const names = (exp.detailList || []).map(d => `《${esc(d.book_name)}》`).join('、');
+      return `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;width:100%;">
+        <span class="ne-fq-tag ${cls}">${esc(label)}：${esc(exp.statusText)}</span>
+        ${condHtml}
+        ${names ? `<span style="font-size:11px;color:#b8c0e0;">已提方案：${names}</span>` : ''}
+      </div>`;
+    };
+    banner.innerHTML = renderExpBadge('20-50万字实验', b.exp1) + renderExpBadge('100万字实验', b.exp2);
+    if (showToast) toast('已更新番茄多书名实验资格与状态');
+  } catch (e) {
+    banner.innerHTML = `<span class="ne-fq-tag warn">⚠️ 查询失败：${esc(e.message)}</span>`;
+  }
+}
+$('#neRefreshFq')?.addEventListener('click', () => neRefreshBookFanqieStatus(true));
+
 function neRender(manifest) {
   neManifest = manifest;
   const items = (manifest && manifest.items) || [];
   if (!items.length) { $('#neGrid').innerHTML = ''; return; }
-  // 底图是【无字画面】(Imagen 被要求 no text，AI 出的字会糊)，所以每张封面的书名跟主封面一样【客户端 canvas 叠上去】
+  const author = ($('#neAuthor')?.value || manifest.author || '光头通').trim();
   $('#neGrid').innerHTML = items.map((it, i) => `
-    <div class="ne-card">
-      ${it.bg ? `<canvas class="ne-cover" width="600" height="800" data-i="${i}"></canvas>` : '<div class="ne-noimg">封面失败</div>'}
-      <div class="ne-title" title="点击复制">${esc(it.title)}</div>
-      <div class="ne-hook">${esc(it.hook || '')}</div>
+    <div class="ne-card" data-card-i="${i}">
+      <div class="ne-card-cover-wrap">
+        ${it.bg ? `<canvas class="ne-cover" width="600" height="800" data-i="${i}"></canvas>` : '<div class="ne-noimg">封面失败</div>'}
+        <button class="ne-regen-btn" data-regen="${it.i || (i + 1)}" title="重新生成这张封面底图">🔄 换底图</button>
+      </div>
+      <input class="ne-title-input" maxlength="15" data-i="${i}" value="${esc(it.title || '')}" placeholder="输入候选书名（≤15字）" title="直接修改书名，封面实时重绘"/>
+      <div class="ne-meta-row">
+        <span class="ne-hook" title="${esc(it.hook || '')}">${esc(it.hook || `方案 #${i + 1}`)} · <span class="ne-char-cnt" data-cnt-i="${i}">${(it.title || '').length}/15字</span></span>
+        <span class="ne-dup-tag" id="neDupTag_${i}">未查重</span>
+      </div>
     </div>`).join('');
   $('#neGrid').querySelectorAll('canvas.ne-cover').forEach(cv => {
-    const it = items[+cv.getAttribute('data-i')];
-    const url = `${API}/api/book/exp-image?book=${encodeURIComponent(neCurBook.slug)}&file=${encodeURIComponent(it.bg)}&t=${manifest.generatedAt || ''}`;
-    neDrawCover(cv, url, it.title).catch(() => {});
+    const idx = +cv.getAttribute('data-i');
+    const it = items[idx];
+    const url = `${API}/api/book/exp-image?book=${encodeURIComponent(neCurBook.slug)}&file=${encodeURIComponent(it.bg)}&t=${manifest.updatedAt || manifest.generatedAt || Date.now()}`;
+    neDrawCover(cv, url, it.title, idx, author).catch(() => {});
   });
-  $('#neGrid').querySelectorAll('.ne-title').forEach((el, i) => el.addEventListener('click', () => { try { navigator.clipboard.writeText(items[i].title); toast('已复制书名：' + items[i].title); } catch {} }));
+  $('#neGrid').querySelectorAll('input.ne-title-input').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const idx = +inp.getAttribute('data-i');
+      const val = inp.value.trim();
+      if (neManifest && neManifest.items && neManifest.items[idx]) neManifest.items[idx].title = val;
+      const cntEl = $('#neGrid').querySelector(`[data-cnt-i="${idx}"]`);
+      if (cntEl) cntEl.textContent = `${val.length}/15字`;
+      const dupEl = $(`#neDupTag_${idx}`);
+      if (dupEl) { dupEl.className = 'ne-dup-tag'; dupEl.textContent = '已改·待查重'; }
+      const cv = $('#neGrid').querySelector(`canvas.ne-cover[data-i="${idx}"]`);
+      const it = items[idx];
+      if (cv && it && it.bg) {
+        const url = `${API}/api/book/exp-image?book=${encodeURIComponent(neCurBook.slug)}&file=${encodeURIComponent(it.bg)}&t=${manifest.updatedAt || manifest.generatedAt || ''}`;
+        neDrawCover(cv, url, val, idx, ($('#neAuthor')?.value || '光头通').trim()).catch(() => {});
+      }
+    });
+  });
+  $('#neGrid').querySelectorAll('button.ne-regen-btn').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (!neCurBook) return;
+      const itemIdx = +btn.getAttribute('data-regen');
+      const oldTxt = btn.textContent;
+      btn.disabled = true; btn.textContent = '⏳ 生成中…';
+      try {
+        const r = await api('/api/book/name-experiment-regen-one', 'POST', { book: neCurBook.slug, index: itemIdx });
+        if (r.manifest) neRender(r.manifest);
+        toast(`第 ${itemIdx} 张封面底图已更新`);
+      } catch (e) {
+        toast('重绘底图失败：' + e.message);
+        btn.disabled = false; btn.textContent = oldTxt;
+      }
+    });
+  });
 }
-// 无字底图 + 书名 → 画布（同主封面 drawAiBg+drawCoverText：cover 填满 600×800 + 上下压暗 + 描边 + 居中标题）
-function neDrawCover(canvas, bgUrl, title) {
+$('#neAuthor')?.addEventListener('input', () => {
+  if (!neManifest || !neManifest.items || !neCurBook) return;
+  const author = ($('#neAuthor').value || '光头通').trim();
+  $('#neGrid').querySelectorAll('canvas.ne-cover').forEach(cv => {
+    const idx = +cv.getAttribute('data-i');
+    const it = neManifest.items[idx];
+    if (it && it.bg) {
+      const url = `${API}/api/book/exp-image?book=${encodeURIComponent(neCurBook.slug)}&file=${encodeURIComponent(it.bg)}&t=${neManifest.updatedAt || neManifest.generatedAt || ''}`;
+      neDrawCover(cv, url, it.title, idx, author).catch(() => {});
+    }
+  });
+});
+
+// 无字底图 + 书名 → 画布（600×800 黄金下三分之一双层金框 + 菱形分割线 + 双行均衡大字 + 作者署名，自动裁除底部水印）
+function neDrawCover(canvas, bgUrl, title, idx = 0, author = '光头通') {
   return new Promise((resolve, reject) => {
     const img = new Image(); img.crossOrigin = 'anonymous';
     img.onload = () => {
       const W = 600, H = 800, c = canvas.getContext('2d');
-      const iw = img.naturalWidth, ih = img.naturalHeight, s = Math.max(W / iw, H / ih), dw = iw * s, dh = ih * s;
-      c.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
-      const g = c.createLinearGradient(0, 0, 0, H);
-      g.addColorStop(0, 'rgba(0,0,0,.55)'); g.addColorStop(.32, 'rgba(0,0,0,.15)'); g.addColorStop(.7, 'rgba(0,0,0,.15)'); g.addColorStop(1, 'rgba(0,0,0,.6)');
-      c.fillStyle = g; c.fillRect(0, 0, W, H);
-      c.strokeStyle = 'rgba(255,255,255,.35)'; c.lineWidth = 2; c.strokeRect(20, 20, W - 40, H - 40);
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      // 优先取顶部 3:4 区域（规避 768x1344 底图右下角 AI 水印）
+      const targetH = Math.round(iw * 4 / 3);
+      if (ih >= targetH) {
+        c.drawImage(img, 0, 0, iw, targetH, 0, 0, W, H);
+      } else {
+        const s = Math.max(W / iw, H / ih), dw = iw * s, dh = ih * s;
+        c.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
+      }
+      // 顶部微暗 + 下三分之一重暗角渐变（y=410..800）
+      const gTop = c.createLinearGradient(0, 0, 0, 120);
+      gTop.addColorStop(0, 'rgba(6,8,14,0.45)'); gTop.addColorStop(1, 'rgba(6,8,14,0)');
+      c.fillStyle = gTop; c.fillRect(0, 0, W, 120);
+      const gBot = c.createLinearGradient(0, 410, 0, H);
+      gBot.addColorStop(0, 'rgba(8,10,16,0)');
+      gBot.addColorStop(0.35, 'rgba(8,10,16,0.68)');
+      gBot.addColorStop(1, 'rgba(8,10,16,0.95)');
+      c.fillStyle = gBot; c.fillRect(0, 410, W, H - 410);
+
+      const [mainColor, accentColor] = NE_PALETTES[idx % NE_PALETTES.length];
+      // 双层国风边框
+      c.strokeStyle = accentColor; c.globalAlpha = 0.72; c.lineWidth = 2;
+      c.strokeRect(18, 18, W - 36, H - 36);
+      c.strokeStyle = 'rgba(255,255,255,0.28)'; c.globalAlpha = 1; c.lineWidth = 1;
+      c.strokeRect(24, 24, W - 48, H - 48);
+
+      // 装饰分割线 + 中心菱形（y=532）
+      const divY = 532;
+      c.strokeStyle = accentColor; c.globalAlpha = 0.85; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(85, divY); c.lineTo(278, divY); c.moveTo(322, divY); c.lineTo(515, divY); c.stroke();
+      c.fillStyle = accentColor;
+      c.beginPath(); c.moveTo(300, divY - 7); c.lineTo(309, divY); c.lineTo(300, divY + 7); c.lineTo(291, divY); c.closePath(); c.fill();
+      c.globalAlpha = 1;
+
+      // 书名两行均衡排版
+      const lines = neSplitTitleCN(title || '未命名');
+      const maxLen = Math.max(...lines.map(l => l.length), 1);
+      const fsize = lines.length === 1
+        ? (maxLen <= 5 ? 68 : maxLen <= 6 ? 60 : 52)
+        : (maxLen <= 5 ? 60 : maxLen <= 6 ? 54 : maxLen <= 7 ? 48 : maxLen <= 8 ? 44 : 40);
+      c.font = `700 ${fsize}px "STZhongsong","Noto Serif SC","Songti SC","SimSun",serif`;
       c.textAlign = 'center'; c.textBaseline = 'middle';
-      c.shadowColor = 'rgba(0,0,0,.85)'; c.shadowBlur = 14; c.shadowOffsetY = 3;
-      c.fillStyle = '#fff';
-      const t = (title || '未命名').trim();
-      const size = t.length <= 4 ? 100 : t.length <= 6 ? 80 : t.length <= 9 ? 62 : 50;
-      c.font = `700 ${size}px "Noto Serif SC","Songti SC","SimSun",serif`;
-      const lines = wrapCN(c, t, W - 120);
-      let y = H * 0.30 - (lines.length - 1) * size * 0.6;
-      for (const ln of lines) { c.fillText(ln, W / 2, y); y += size * 1.2; }
+      let curY = lines.length === 1 ? 625 : 582;
+      lines.forEach((ln, li) => {
+        const col = (li === 0 || lines.length === 1) ? mainColor : accentColor;
+        c.lineJoin = 'round';
+        c.shadowColor = 'rgba(0,0,0,0.92)'; c.shadowBlur = 12; c.shadowOffsetY = 4;
+        c.strokeStyle = 'rgba(8,8,12,0.96)'; c.lineWidth = 9;
+        c.strokeText(ln, W / 2, curY);
+        c.fillStyle = col;
+        c.fillText(ln, W / 2, curY);
+        curY += fsize + 16;
+      });
+      // 作者署名
+      c.shadowBlur = 6; c.shadowOffsetY = 2;
+      c.font = `500 22px "Microsoft YaHei","PingFang SC",sans-serif`;
+      c.strokeStyle = 'rgba(0,0,0,0.85)'; c.lineWidth = 4;
+      const authorText = `${author || '光头通'} · 著`;
+      c.strokeText(authorText, W / 2, 742);
+      c.fillStyle = 'rgba(235,235,242,0.92)';
+      c.fillText(authorText, W / 2, 742);
       c.shadowColor = 'transparent'; c.shadowBlur = 0; c.shadowOffsetY = 0;
       resolve(canvas);
     };
@@ -2746,38 +2967,94 @@ function neDrawCover(canvas, bgUrl, title) {
     img.src = bgUrl;
   });
 }
+
+// 🔍 番茄实时书名查重
+$('#neCheckDup')?.addEventListener('click', async () => {
+  if (!neCurBook || !neManifest || !neManifest.items?.length) { toast('请先生成或填写候选书名'); return; }
+  const btn = $('#neCheckDup'); const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ 查重中…';
+  $('#neErr').textContent = '';
+  try {
+    const titles = neManifest.items.map(it => it.title);
+    const r = await api('/api/book/name-experiment-check', 'POST', { book: neCurBook.slug, titles });
+    const results = r.results || [];
+    let passCnt = 0;
+    results.forEach((res, i) => {
+      const el = $(`#neDupTag_${i}`);
+      if (!el) return;
+      if (res.ok) { el.className = 'ne-dup-tag ok'; el.textContent = '✓ 可用'; passCnt++; }
+      else { el.className = 'ne-dup-tag dup'; el.textContent = '✗ ' + (res.msg || '重复/不合规'); }
+    });
+    $('#neHint').textContent = `🔍 查重完成：${passCnt}/${results.length} 个书名可用`;
+    toast(`番茄书名查重完成：${passCnt}/${results.length} 通过`);
+  } catch (e) {
+    $('#neErr').textContent = '查重失败：' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+});
+
+// 💾 保存修改（更新 manifest + 压制服务端/客户端带字封面）
+$('#neSaveEdits')?.addEventListener('click', async () => {
+  if (!neCurBook || !neManifest || !neManifest.items?.length) return;
+  const btn = $('#neSaveEdits'); const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ 保存中…';
+  $('#neErr').textContent = '';
+  try {
+    const author = ($('#neAuthor')?.value || '光头通').trim();
+    const r = await api('/api/book/name-experiment-update', 'POST', {
+      book: neCurBook.slug,
+      items: neManifest.items,
+      author,
+    });
+    if (r.manifest) neManifest = r.manifest;
+    await neBakeTitledCovers();
+    $('#neHint').textContent = '✅ 已保存书名与全部 600×800 封面（NN.titled.png）';
+    toast('已保存书名修改并重新合成封面');
+  } catch (e) {
+    $('#neErr').textContent = '保存失败：' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+});
+
 function neStartPoll() {
   if (nePoll) clearInterval(nePoll);
   nePoll = setInterval(async () => {
     try {
       const s = await api('/api/book/name-experiment-status', 'POST', { book: neCurBook.slug });
       if (s.msg && s.status === 'running') $('#neHint').textContent = '⏳ ' + s.msg;
-      if (s.status === 'done') { clearInterval(nePoll); nePoll = null; $('#neHint').textContent = '✅ 生成完成，点书名可复制'; $('#neGen').disabled = false; if (s.manifest) neRender(s.manifest); }
+      if (s.status === 'done') { clearInterval(nePoll); nePoll = null; $('#neHint').textContent = '✅ 生成完成，可直接改书名、查重或推到番茄'; $('#neGen').disabled = false; if (s.manifest) neRender(s.manifest); }
       else if (s.status === 'error') { clearInterval(nePoll); nePoll = null; $('#neHint').textContent = ''; $('#neErr').textContent = '生成失败：' + (s.error || ''); $('#neGen').disabled = false; }
     } catch {}
   }, 3000);
 }
 $('#neGen')?.addEventListener('click', async () => {
   if (!neCurBook) return;
-  const count = Math.max(2, Math.min(10, Number($('#neCount').value) || 6));
+  const count = Math.max(2, Math.min(5, Number($('#neCount').value) || 5));
+  const author = ($('#neAuthor')?.value || '光头通').trim();
   $('#neErr').textContent = ''; $('#neGen').disabled = true;
-  $('#neHint').textContent = `⏳ 生成 ${count} 个书名+封面中（约 ${count * 15} 秒起，勿关弹窗）…`;
-  try { await api('/api/book/name-experiment', 'POST', { book: neCurBook.slug, count }); neStartPoll(); }
+  $('#neHint').textContent = `⏳ 生成 ${count} 个书名+封面中（自动适配 Gemini / 智谱 CogView，勿关弹窗）…`;
+  try { await api('/api/book/name-experiment', 'POST', { book: neCurBook.slug, count, author }); neStartPoll(); }
   catch (e) { $('#neErr').textContent = e.message; $('#neGen').disabled = false; }
 });
 $('#neClose')?.addEventListener('click', () => { if (nePoll) { clearInterval(nePoll); nePoll = null; } if (nePushPoll) { clearInterval(nePushPoll); nePushPoll = null; } $('#nameExpModal').classList.add('hidden'); });
-// 🚀 推到番茄：把候选书名+封面推到番茄「多书名实验·实验配置」（设置别名）
+
+// 🚀 推到番茄：把候选书名+封面推到番茄「多书名实验·实验配置」
 let nePushPoll = null;
 $('#nePush')?.addEventListener('click', async () => {
   if (!neCurBook) return;
   const autoSubmit = !!$('#nePushAuto')?.checked;
-  if (autoSubmit && !confirm('开启实验不可逆（会真的向番茄提交多书名实验）。确定自动开启？\n建议先不勾，填好后到浏览器核对再点「开启实验」。')) return;
+  if (autoSubmit && !confirm('开启实验不可逆（会直接向番茄提交 5 组多书名+封面进入审核）。确定自动提交？\n建议核对无误后确认。')) return;
   $('#neErr').textContent = ''; $('#nePush').disabled = true;
   try {
-    // 先把【叠好书名】的封面(画布)存成 titled 图，让推到番茄的封面带书名(不是无字底图)
-    $('#neHint').textContent = '⏳ 正在合成带书名的封面…';
+    const author = ($('#neAuthor')?.value || '光头通').trim();
+    if (neManifest && neManifest.items) {
+      await api('/api/book/name-experiment-update', 'POST', { book: neCurBook.slug, items: neManifest.items, author });
+    }
+    $('#neHint').textContent = '⏳ 正在合成带书名的 600×800 封面…';
     await neBakeTitledCovers();
-    $('#neHint').textContent = '⏳ 正在推到番茄（打开多书名实验页、切书、逐个填书名+传封面）…';
+    $('#neHint').textContent = '⏳ 正在推到番茄（直传 5 张封面 + 注入 5 组书名）…';
     const r = await api('/api/book/push-name-experiment', 'POST', { book: neCurBook.slug, autoSubmit });
     if (r.already) { $('#neHint').textContent = '⏳ 已在推送中…'; }
     nePushStartPoll();
@@ -2789,7 +3066,7 @@ async function neBakeTitledCovers() {
   const items = (neManifest && neManifest.items) || [];
   for (const cv of canvases) {
     const it = items[+cv.getAttribute('data-i')]; if (!it || !it.bg) continue;
-    let dataUrl; try { dataUrl = cv.toDataURL('image/png'); } catch { continue; }   // 画布被污染就跳过(退回无字底图)
+    let dataUrl; try { dataUrl = cv.toDataURL('image/png'); } catch { continue; }
     const file = it.bg.replace(/\.png$/i, '') + '.titled.png';
     try { await api('/api/book/exp-cover-save', 'POST', { book: neCurBook.slug, file, dataUrl }); } catch {}
   }
@@ -2800,11 +3077,517 @@ function nePushStartPoll() {
     try {
       const s = await api('/api/book/push-name-experiment-status', 'POST', { book: neCurBook.slug });
       if (s.msg && s.status === 'running') $('#neHint').textContent = '⏳ ' + s.msg;
-      if (s.status === 'done') { clearInterval(nePushPoll); nePushPoll = null; $('#nePush').disabled = false; $('#neHint').textContent = (s.submitted ? '✅ ' : '📝 ') + (s.msg || '完成'); if (s.msg) toast(s.msg.split('\n')[0]); }
+      if (s.status === 'done') {
+        clearInterval(nePushPoll); nePushPoll = null; $('#nePush').disabled = false;
+        $('#neHint').textContent = (s.submitted ? '✅ ' : '📝 ') + (s.msg || '完成');
+        if (s.msg) toast(s.msg.split('\n')[0]);
+        neRefreshBookFanqieStatus(false);
+      }
       else if (s.status === 'error') { clearInterval(nePushPoll); nePushPoll = null; $('#nePush').disabled = false; $('#neHint').textContent = ''; $('#neErr').textContent = '推到番茄失败：' + (s.error || ''); }
     } catch {}
   }, 2500);
 }
+
+// ===== 全账号多书名实验中心（#nameExpCenterModal）=====
+let necBooksData = [], necCurFilter = 'all';
+async function openNameExpCenter() {
+  $('#nameExpCenterModal').classList.remove('hidden');
+  $('#necErr').textContent = '';
+  const sel = $('#necProfile');
+  if (sel && !sel.options.length) {
+    sel.innerHTML = '<option value="">（加载 Unzoo 账号…）</option>';
+    try {
+      const r = await api('/api/unzoo/profiles', 'POST', {});
+      const profiles = r.profiles || [];
+      if (!profiles.length) {
+        sel.innerHTML = '<option value="">（默认已开番茄窗口）</option>';
+      } else {
+        const fqFirst = [...profiles].sort((a, b) => ((b.fanqie?.length || 0) - (a.fanqie?.length || 0)));
+        sel.innerHTML = fqFirst.map(p => {
+          const tag = p.fanqie && p.fanqie.length ? '✓已开番茄' : (p.running ? '○运行中' : '·未启动');
+          return `<option value="${esc(p.path)}">${esc(p.name)}（${tag}）</option>`;
+        }).join('');
+      }
+    } catch {
+      sel.innerHTML = '<option value="">（默认当前番茄窗口）</option>';
+    }
+  }
+  await necScanAllBooks();
+}
+async function necScanAllBooks() {
+  const btn = $('#necScanBtn'); const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 盘点中…'; }
+  $('#necErr').textContent = '';
+  $('#necSummary').textContent = '⏳ 正在实时扫描番茄后台全部作品的多书名实验资格与状态…';
+  try {
+    const profilePath = $('#necProfile')?.value || '';
+    const r = await api('/api/fanqie/name-experiments-scan', 'POST', { all: true, profilePath });
+    necBooksData = r.books || [];
+    necRenderList();
+  } catch (e) {
+    $('#necErr').textContent = '扫描失败：' + e.message;
+    $('#necSummary').textContent = '扫描失败';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old || '🔄 扫描全账号资格'; }
+  }
+}
+function necRenderList() {
+  const listEl = $('#necList'); if (!listEl) return;
+  const total = necBooksData.length;
+  const eligibleCnt = necBooksData.filter(b => b.canApplyNow).length;
+  const activeCnt = necBooksData.filter(b => b.hasRunningOrReview).length;
+  const doneCnt = necBooksData.filter(b => b.isDoneAny || [7, 8].includes(b.exp1?.status) || [7, 8].includes(b.exp2?.status)).length;
+  $('#necSummary').textContent = `共 ${total} 本作品 · 🟢 可开启 ${eligibleCnt} 本 · 🔵 校验/进行中 ${activeCnt} 本 · ⚪ 已结束 ${doneCnt} 本`;
+
+  const filtered = necBooksData.filter(b => {
+    if (necCurFilter === 'eligible') return b.canApplyNow;
+    if (necCurFilter === 'active') return b.hasRunningOrReview;
+    if (necCurFilter === 'done') return b.isDoneAny || [7, 8].includes(b.exp1?.status) || [7, 8].includes(b.exp2?.status);
+    return true;
+  });
+  if (!filtered.length) {
+    listEl.innerHTML = `<div style="padding:28px;text-align:center;color:var(--muted);">当前筛选下暂无书籍</div>`;
+    return;
+  }
+  const renderStage = (label, exp) => {
+    if (!exp) return '';
+    const cls = exp.eligible ? 'eligible' : ((exp.isRunning || [3, 5, 6].includes(exp.status)) ? 'active' : ((exp.isDone || [7, 8].includes(exp.status)) ? 'done' : 'warn'));
+    const conds = (exp.conditions || []).map(c => `<span class="nec-cond ${c.ok ? 'ok' : 'fail'}">${c.ok ? '✓' : '✗'}${esc(c.desc)}</span>`).join('');
+    const detailNames = (exp.detailList || []).map(d => `《${esc(d.book_name)}》`).join(' ');
+    return `<div class="nec-stage-box">
+      <div class="nec-stage-head">
+        <span class="nec-stage-name">${esc(label)}</span>
+        <span class="ne-fq-tag ${cls}">${esc(exp.statusText)}</span>
+      </div>
+      <div class="nec-cond-list">${conds}</div>
+      ${detailNames ? `<div class="nec-detail-names">方案：${detailNames}</div>` : ''}
+    </div>`;
+  };
+  listEl.innerHTML = filtered.map(b => {
+    const localBook = (STATE.books || []).find(lb => lb.slug === b.localSlug || (lb.publish && String(lb.publish.bookId) === String(b.bookId)) || (lb.fanqie && String(lb.fanqie.bookId) === String(b.bookId)) || lb.title === b.bookName);
+    return `<div class="nec-row">
+      <div>
+        <div class="nec-book-title">《${esc(b.bookName)}》</div>
+        <div class="nec-book-id">#${esc(b.bookId)} ${localBook ? `<span style="color:#52e5a8;">· 本地已关联 (${esc(localBook.slug)})</span>` : `<span style="color:#f59e0b;">· 未导入本地</span>`}</div>
+      </div>
+      <div class="nec-stages">
+        ${renderStage('阶段一：20-50万字实验', b.exp1)}
+        ${renderStage('阶段二：100万字实验', b.exp2)}
+      </div>
+      <div class="nec-actions">
+        ${localBook
+          ? `<button class="primary small" data-open-ne="${esc(localBook.slug)}">🧪 打开实验工作台</button>`
+          : `<button class="ghost small" disabled title="请先从番茄导入该书到本地书架">未在本地书架</button>`}
+      </div>
+    </div>`;
+  }).join('');
+  listEl.querySelectorAll('[data-open-ne]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const slug = btn.getAttribute('data-open-ne');
+      const lb = (STATE.books || []).find(x => x.slug === slug);
+      if (lb) {
+        $('#nameExpCenterModal').classList.add('hidden');
+        openNameExp(lb);
+      }
+    });
+  });
+}
+$('#btnNameExpCenter')?.addEventListener('click', openNameExpCenter);
+$('#necScanBtn')?.addEventListener('click', necScanAllBooks);
+$('#necClose')?.addEventListener('click', () => $('#nameExpCenterModal').classList.add('hidden'));
+$('#necFilter')?.querySelectorAll('.seg-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $('#necFilter').querySelectorAll('.seg-btn').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    necCurFilter = btn.getAttribute('data-filter') || btn.getAttribute('data-f') || 'all';
+    necRenderList();
+  });
+});
+
+// ===== 番茄全账号流量分析中心（#trafficCenterModal）与单书深度诊断（#trafficDetailModal）=====
+let tcData = null, tcCurFilter = 'all';
+let tdCurTarget = null; // { bookId, slug, title, profilePath }
+
+async function ensureTrafficProfileSelect(sel) {
+  if (!sel || sel.options.length > 1) return;
+  try {
+    const r = await api('/api/unzoo/profiles', 'POST', {});
+    const profiles = r.profiles || [];
+    if (profiles.length) {
+      const fqFirst = [...profiles].sort((a, b) => ((b.fanqie?.length || 0) - (a.fanqie?.length || 0)));
+      sel.innerHTML = '<option value="">自动选择已登录番茄账号</option>' + fqFirst.map(p => {
+        const tag = p.fanqie && p.fanqie.length ? '✓已开番茄' : (p.running ? '○运行中' : '·未启动');
+        return `<option value="${esc(p.path)}">${esc(p.name)}（${tag}）</option>`;
+      }).join('');
+    }
+  } catch {}
+}
+
+async function openTrafficCenter() {
+  $('#trafficCenterModal').classList.remove('hidden');
+  $('#tcErr').textContent = '';
+  await ensureTrafficProfileSelect($('#tcProfile'));
+  // 先读本地缓存秒开，再允许用户点刷新（若无缓存则自动采集）
+  try {
+    const cached = await api('/api/traffic');
+    if (cached && cached.cached && Array.isArray(cached.books) && cached.books.length) {
+      tcData = cached;
+      tcRender();
+      $('#tcStatus').textContent = `⚡ 已加载上次采集快照（${(cached.fetchedAt || '').replace('T', ' ').slice(0, 19)}）· 点「🔄 立即刷新全账号流量」可拉取最新实时数据`;
+      return;
+    }
+  } catch {}
+  await tcRefresh();
+}
+
+async function tcRefresh() {
+  const btn = $('#tcRefreshBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 正在拉取全账号流量…'; }
+  $('#tcErr').textContent = '';
+  $('#tcStatus').textContent = '⏳ 正在从番茄数据中心与收益页拉取全账号作品数据（约需 8~15 秒）…';
+  try {
+    const profilePath = $('#tcProfile')?.value || '';
+    const includeIncome = $('#tcIncludeIncome')?.checked !== false;
+    const r = await api('/api/traffic/overview', 'POST', { profilePath, includeIncome });
+    if (!r.ok) throw new Error(r.error || '采集失败');
+    tcData = r;
+    tcRender();
+    $('#tcStatus').textContent = `✅ 实时采集完成（${(r.fetchedAt || '').replace('T', ' ').slice(0, 19)}）`;
+  } catch (e) {
+    $('#tcErr').textContent = '流量采集失败：' + e.message;
+    $('#tcStatus').textContent = '采集失败';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔄 立即刷新全账号流量'; }
+  }
+}
+
+function tcRender() {
+  const sumEl = $('#tcSummary');
+  const listEl = $('#tcList');
+  if (!sumEl || !listEl || !tcData) return;
+  const s = tcData.summary || {};
+  const kpiStyle = 'background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 14px;flex:1;min-width:130px';
+  sumEl.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap">
+    <div style="${kpiStyle}"><div style="font-size:12px;opacity:.7">📚 账号作品总数</div><div style="font-size:20px;font-weight:700;margin-top:2px">${s.totalBooks || 0} <span style="font-size:12px;font-weight:400;opacity:.75">（连载${s.serializingBooks || 0}/完结${s.finishedBooks || 0}）</span></div></div>
+    <div style="${kpiStyle}"><div style="font-size:12px;opacity:.7">🔥 昨日总阅读 UV</div><div style="font-size:20px;font-weight:700;color:#34D6A6;margin-top:2px">${s.totalDailyReaders || 0}</div></div>
+    <div style="${kpiStyle}"><div style="font-size:12px;opacity:.7">👥 14日在读总人数</div><div style="font-size:20px;font-weight:700;color:#60a5fa;margin-top:2px">${s.totalActiveReaders14d || 0}</div></div>
+    <div style="${kpiStyle}"><div style="font-size:12px;opacity:.7">⭐ 单日新增书架</div><div style="font-size:20px;font-weight:700;color:#fbbf24;margin-top:2px">+${s.totalShelfDaily || 0}</div></div>
+    <div style="${kpiStyle}"><div style="font-size:12px;opacity:.7">💰 昨日番茄收益</div><div style="font-size:20px;font-weight:700;color:#f472b6;margin-top:2px">¥${Number(s.totalYesterdayIncome || 0).toFixed(2)}</div></div>
+    <div style="${kpiStyle}"><div style="font-size:12px;opacity:.7">🏦 活跃书累计稿费</div><div style="font-size:20px;font-weight:700;color:#a78bfa;margin-top:2px">¥${Number(s.totalCumulativeIncome || 0).toFixed(2)}</div></div>
+  </div>`;
+
+  const books = (tcData.books || []).filter(b => {
+    if (tcCurFilter === 'top') return b.diagnosis?.tierCode === 'top';
+    if (tcCurFilter === 'growing') return b.diagnosis?.tierCode === 'growing';
+    if (tcCurFilter === 'stalled') return b.diagnosis?.tierCode === 'stalled';
+    if (tcCurFilter === 'serial') return b.status === '连载中';
+    if (tcCurFilter === 'finished') return b.status === '已完结';
+    return true;
+  });
+
+  if (!books.length) {
+    listEl.innerHTML = `<div style="padding:28px;text-align:center;opacity:.6">当前筛选下暂无作品</div>`;
+    return;
+  }
+
+  const fmtIncr = (v) => {
+    const n = parseFloat(v || '0');
+    if (!n) return `<span style="opacity:.5;font-size:11px">--</span>`;
+    return n > 0
+      ? `<span style="color:#34D6A6;font-size:11px">↑${n}%</span>`
+      : `<span style="color:#f87171;font-size:11px">↓${Math.abs(n)}%</span>`;
+  };
+
+  listEl.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.12);text-align:left;opacity:.75">
+        <th style="padding:8px 6px">#</th>
+        <th style="padding:8px 6px">作品名称</th>
+        <th style="padding:8px 6px">状态 / 字数</th>
+        <th style="padding:8px 6px">昨日阅读UV</th>
+        <th style="padding:8px 6px">14日在读</th>
+        <th style="padding:8px 6px">昨日加架</th>
+        <th style="padding:8px 6px">读完率</th>
+        <th style="padding:8px 6px">评分</th>
+        <th style="padding:8px 6px">昨日/累计收益</th>
+        <th style="padding:8px 6px">流量诊断与建议</th>
+        <th style="padding:8px 6px;text-align:right">操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${books.map((b, i) => `
+        <tr style="border-bottom:1px solid rgba(255,255,255,0.06)">
+          <td style="padding:9px 6px;opacity:.6">${i + 1}</td>
+          <td style="padding:9px 6px">
+            <div style="font-weight:600">《${esc(b.title)}》</div>
+            <div style="font-size:11px;opacity:.55">#${esc(b.bookId)} ${b.localSlug ? `<span style="color:#34D6A6">· 本地:${esc(b.localSlug)}</span>` : ''}</div>
+          </td>
+          <td style="padding:9px 6px">
+            <span style="padding:2px 6px;border-radius:4px;font-size:11px;background:${b.status === '连载中' ? 'rgba(52,214,166,0.15);color:#34D6A6' : 'rgba(148,163,184,0.15);color:#cbd5e1'}">${esc(b.status)}</span>
+            <div style="font-size:12px;margin-top:2px">${(b.words / 10000).toFixed(1)} 万字</div>
+          </td>
+          <td style="padding:9px 6px">
+            <b style="font-size:15px;color:${b.dailyReaders >= 20 ? '#34D6A6' : (b.dailyReaders > 0 ? '#fff' : 'rgba(255,255,255,0.4)')}">${b.dailyReaders}</b>
+            <div>${fmtIncr(b.dailyReadersIncr)}</div>
+          </td>
+          <td style="padding:9px 6px">
+            <b style="font-size:14px;color:#60a5fa">${b.activeReaders14d}</b>
+            <div>${fmtIncr(b.activeReadersIncr)}</div>
+          </td>
+          <td style="padding:9px 6px">
+            <b style="color:${b.shelfDaily > 0 ? '#fbbf24' : 'rgba(255,255,255,0.4)'}">+${b.shelfDaily}</b>
+            ${b.diagnosis?.shelfRate != null ? `<div style="font-size:11px;opacity:.7">转化 ${b.diagnosis.shelfRate}%</div>` : ''}
+          </td>
+          <td style="padding:9px 6px">
+            <b style="color:${parseFloat(b.completionRate) >= 4 ? '#34D6A6' : '#e2e8f0'}">${esc(b.completionRate)}%</b>
+          </td>
+          <td style="padding:9px 6px">${b.score && b.score !== '0' ? `<b style="color:#fbbf24">${esc(b.score)}</b>` : '<span style="opacity:.4">--</span>'}</td>
+          <td style="padding:9px 6px">
+            ${b.totalIncome != null
+              ? `<div><b style="color:#f472b6">¥${Number(b.yesterdayIncome || 0).toFixed(2)}</b></div><div style="font-size:11px;opacity:.65">累 ¥${Number(b.totalIncome || 0).toFixed(2)}</div>`
+              : '<span style="opacity:.4">--</span>'}
+          </td>
+          <td style="padding:9px 6px;max-width:290px">
+            <div style="font-size:12px;font-weight:600">${esc(b.diagnosis?.tier || '')} ${(b.diagnosis?.tags || []).map(t => `<span style="font-size:11px;padding:1px 5px;border-radius:4px;background:rgba(255,255,255,0.08);margin-left:4px">${esc(t)}</span>`).join('')}</div>
+            <div style="font-size:11px;opacity:.75;margin-top:2px;line-height:1.35">${esc(b.diagnosis?.primaryAction || '')}</div>
+          </td>
+          <td style="padding:9px 6px;text-align:right;white-space:nowrap">
+            <button class="btn tiny primary" data-td-bookid="${esc(b.bookId)}" data-td-slug="${esc(b.localSlug || '')}" data-td-title="${esc(b.title)}">🔍 深度诊断</button>
+          </td>
+        </tr>
+      `).join('')}
+    </tbody>
+  </table>`;
+
+  listEl.querySelectorAll('[data-td-bookid]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openTrafficDetail({
+        bookId: btn.getAttribute('data-td-bookid'),
+        slug: btn.getAttribute('data-td-slug') || '',
+        title: btn.getAttribute('data-td-title') || '',
+        profilePath: $('#tcProfile')?.value || tcData?.profilePath || '',
+      });
+    });
+  });
+}
+
+async function openTrafficDetail({ bookId = '', slug = '', title = '', profilePath = '' } = {}) {
+  tdCurTarget = { bookId, slug, title, profilePath };
+  $('#tdBookTitle').textContent = title ? `《${title}》` : bookId;
+  $('#trafficDetailModal').classList.remove('hidden');
+  $('#tdErr').textContent = '';
+  $('#tdBody').innerHTML = '';
+
+  // 若本地已有缓存，先秒开展示
+  if (slug) {
+    try {
+      const cached = await api('/api/traffic/book?book=' + encodeURIComponent(slug));
+      if (cached && cached.cached && cached.overview) {
+        tdRender(cached);
+        $('#tdStatus').textContent = `⚡ 已加载本地缓存诊断（${(cached.fetchedAt || '').replace('T', ' ').slice(0, 19)}）· 点「🔄 重新采集最新数据」可拉取实时章节流失率与渠道数据`;
+        return;
+      }
+    } catch {}
+  }
+  await tdRefresh();
+}
+
+async function tdRefresh() {
+  if (!tdCurTarget) return;
+  const btn = $('#tdRefreshBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 正在深度采集…'; }
+  $('#tdErr').textContent = '';
+  $('#tdStatus').textContent = '⏳ 正在采集 14天趋势、6大流量渠道占比、500章留存流失率曲线与互动爆点…';
+  try {
+    const days = Number($('#tdDays')?.value) || 14;
+    const r = await api('/api/traffic/book', 'POST', {
+      bookId: tdCurTarget.bookId,
+      book: tdCurTarget.slug,
+      profilePath: tdCurTarget.profilePath,
+      days,
+      includeIncome: true,
+    });
+    if (!r.ok) throw new Error(r.error || '深度流量采集失败');
+    tdRender(r);
+    $('#tdStatus').textContent = `✅ 深度诊断完成（${(r.fetchedAt || '').replace('T', ' ').slice(0, 19)}）${r.slug ? ' · 已同步写入 reviews/流量诊断报告.md' : ''}`;
+  } catch (e) {
+    $('#tdErr').textContent = '深度诊断失败：' + e.message;
+    $('#tdStatus').textContent = '采集失败';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔄 重新采集最新数据'; }
+  }
+}
+
+function tdRender(d) {
+  const box = $('#tdBody');
+  if (!box || !d || !d.overview) return;
+  const ov = d.overview;
+  const inc = d.income;
+  const diag = d.diagnosis || {};
+  const chs = d.channelBreakdown || [];
+  const drops = d.chapterRetention?.topDropoffChapters || [];
+  const engages = d.chapterEngagement?.topEngageChapters || [];
+  const tr = d.trendSeries || { dates: [], dailyReaders: [], activeReaders: [], shelfAdds: [], comments: [] };
+
+  $('#tdBookTitle').textContent = `《${ov.title || tdCurTarget?.title || d.bookId}》`;
+  const cardCss = 'background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 14px;flex:1;min-width:130px';
+
+  const findingsHtml = (diag.findings || []).map(f => {
+    const badge = f.level === 'good' ? '🟢' : (f.level === 'warn' ? '🟡' : '🔴');
+    return `<div style="margin-bottom:6px;line-height:1.45">${badge} <b>【${esc(f.category)}】${esc(f.title)}</b>：<span style="opacity:.85">${esc(f.detail)}</span></div>`;
+  }).join('');
+
+  const actionsHtml = (diag.actions || []).length
+    ? `<div style="margin-top:8px;padding-top:8px;border-top:1px dashed rgba(255,255,255,0.12)">
+        <div style="font-weight:700;color:#34D6A6;margin-bottom:4px">🛠️ 建议立即执行的优化动作：</div>
+        ${diag.actions.map((a, i) => `<div style="margin-bottom:4px;line-height:1.4">${i + 1}. ${esc(a)}</div>`).join('')}
+      </div>`
+    : '';
+
+  const channelsHtml = chs.map(c => `
+    <div style="margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+        <span><b>${esc(c.name)}</b>（周期累计 ${c.sum} 人 · 最新单日 ${c.latest} 人）</span>
+        <b>${c.sharePct}%</b>
+      </div>
+      <div style="height:8px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden">
+        <div style="height:100%;width:${Math.min(100, c.sharePct)}%;background:linear-gradient(90deg,#34D6A6,#60a5fa)"></div>
+      </div>
+    </div>
+  `).join('');
+
+  const dropBanner = ov.officialDiagTitle
+    ? `<div style="background:rgba(248,113,113,0.15);border:1px solid rgba(248,113,113,0.4);color:#fca5a5;padding:8px 12px;border-radius:8px;margin-bottom:8px;font-size:12px">
+        ⚠️ <b>番茄官方掉点预警：${esc(ov.officialDiagTitle)}</b> —— ${esc(ov.officialDiagDetail)}
+      </div>`
+    : '';
+
+  const dropsHtml = drops.length
+    ? `<table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="border-bottom:1px solid rgba(255,255,255,0.12);text-align:left;opacity:.75">
+          <th style="padding:6px">排名</th><th style="padding:6px">章节</th><th style="padding:6px">字数</th><th style="padding:6px">单章净流失</th><th style="padding:6px">相对流失率</th><th style="padding:6px">剩余留存</th>
+        </tr></thead>
+        <tbody>
+          ${drops.map((c, i) => `<tr style="border-bottom:1px solid rgba(255,255,255,0.05)">
+            <td style="padding:6px">#${i + 1}</td>
+            <td style="padding:6px"><b>${esc(c.title)}</b> ${c.num <= 30 ? '<span style="color:#fbbf24;font-size:11px">[前30章关键期]</span>' : ''}</td>
+            <td style="padding:6px">${c.words}</td>
+            <td style="padding:6px;color:#f87171;font-weight:700">🔴 -${c.dropPoints ?? c.lossRate}%</td>
+            <td style="padding:6px;color:#fca5a5">${c.relDropRate ?? '--'}%</td>
+            <td style="padding:6px">${c.completionRate}%</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`
+    : `<div style="opacity:.6;font-size:12px;padding:10px 0">暂无章节流失率明细数据（样本量不足或新书统计中）</div>`;
+
+  const engageHtml = engages.length
+    ? `<table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="border-bottom:1px solid rgba(255,255,255,0.12);text-align:left;opacity:.75">
+          <th style="padding:6px">排名</th><th style="padding:6px">章节</th><th style="padding:6px">段评</th><th style="padding:6px">章评</th><th style="padding:6px">催更</th><th style="padding:6px">总互动</th>
+        </tr></thead>
+        <tbody>
+          ${engages.map((c, i) => `<tr style="border-bottom:1px solid rgba(255,255,255,0.05)">
+            <td style="padding:6px">#${i + 1}</td>
+            <td style="padding:6px"><b>${esc(c.title)}</b></td>
+            <td style="padding:6px">${c.paraComments}</td>
+            <td style="padding:6px">${c.chapComments}</td>
+            <td style="padding:6px">${c.urgeCnt}</td>
+            <td style="padding:6px;color:#34D6A6;font-weight:700">🔥 ${c.totalEngage}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`
+    : `<div style="opacity:.6;font-size:12px;padding:10px 0">最近100章暂无明显评论/催更爆点记录</div>`;
+
+  const trendRows = (tr.dates || []).map((dt, idx) => ({
+    date: dt,
+    uv: tr.dailyReaders?.[idx] ?? 0,
+    act: tr.activeReaders?.[idx] ?? 0,
+    shelf: tr.shelfAdds?.[idx] ?? 0,
+    cmt: tr.comments?.[idx] ?? 0,
+  })).reverse();
+
+  box.innerHTML = `
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+      <div style="${cardCss}"><div style="font-size:12px;opacity:.7">昨日阅读 UV</div><div style="font-size:20px;font-weight:700;color:#34D6A6">${ov.dailyReaders} <span style="font-size:12px;font-weight:400">(${esc(ov.dailyReadersIncr)}%)</span></div></div>
+      <div style="${cardCss}"><div style="font-size:12px;opacity:.7">14日在读人数</div><div style="font-size:20px;font-weight:700;color:#60a5fa">${ov.activeReaders14d}</div></div>
+      <div style="${cardCss}"><div style="font-size:12px;opacity:.7">单日加书架 / 转化率</div><div style="font-size:20px;font-weight:700;color:#fbbf24">+${ov.shelfDaily} <span style="font-size:12px;font-weight:400">(${diag.shelfConvPct ?? '--'}%)</span></div></div>
+      <div style="${cardCss}"><div style="font-size:12px;opacity:.7">整体读完率 / 第3章留存</div><div style="font-size:20px;font-weight:700">${esc(ov.completionRate)}% <span style="font-size:12px;font-weight:400;opacity:.75">/ ${ov.golden3Retention ?? '--'}%</span></div></div>
+      <div style="${cardCss}"><div style="font-size:12px;opacity:.7">昨日收益 / 累计稿费</div><div style="font-size:20px;font-weight:700;color:#f472b6">${inc ? `¥${inc.yesterdayIncome.toFixed(2)}` : '--'} <span style="font-size:12px;font-weight:400;opacity:.8">${inc ? `/ ¥${inc.totalIncome.toFixed(0)}` : ''}</span></div></div>
+    </div>
+
+    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.09);border-radius:10px;padding:12px 14px;margin-bottom:12px;font-size:13px">
+      <div style="font-weight:700;margin-bottom:8px;font-size:14px">🩺 智能流量与留存诊断结论</div>
+      ${findingsHtml}
+      ${actionsHtml}
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px">
+        <div style="font-weight:700;margin-bottom:10px">🧭 6大流量渠道构成（近 ${tr.dates.length} 天）</div>
+        ${channelsHtml}
+      </div>
+      <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;max-height:240px;overflow-y:auto">
+        <div style="font-weight:700;margin-bottom:8px">📅 每日流量趋势明细</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="border-bottom:1px solid rgba(255,255,255,0.12);text-align:left;opacity:.75">
+            <th style="padding:4px">日期</th><th style="padding:4px">阅读UV</th><th style="padding:4px">14日在读</th><th style="padding:4px">加书架</th><th style="padding:4px">评论</th>
+          </tr></thead>
+          <tbody>
+            ${trendRows.map(r => `<tr style="border-bottom:1px solid rgba(255,255,255,0.05)">
+              <td style="padding:4px">${esc(r.date)}</td>
+              <td style="padding:4px;font-weight:600;color:#34D6A6">${r.uv}</td>
+              <td style="padding:4px;color:#60a5fa">${r.act}</td>
+              <td style="padding:4px;color:#fbbf24">+${r.shelf}</td>
+              <td style="padding:4px">${r.cmt}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px">
+        <div style="font-weight:700;margin-bottom:8px">🔴 章节流失率 Top 毒点定位（优先修文列表）</div>
+        ${dropBanner}
+        ${dropsHtml}
+      </div>
+      <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px">
+        <div style="font-weight:700;margin-bottom:8px">🔥 读者互动最高 Top 爆点章节（爽点范本）</div>
+        ${engageHtml}
+      </div>
+    </div>
+  `;
+}
+
+$('#btnTrafficCenter')?.addEventListener('click', openTrafficCenter);
+$('#tcRefreshBtn')?.addEventListener('click', tcRefresh);
+$('#tcClose')?.addEventListener('click', () => $('#trafficCenterModal').classList.add('hidden'));
+$('#tcFilter')?.querySelectorAll('.seg-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $('#tcFilter').querySelectorAll('.seg-btn').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    tcCurFilter = btn.getAttribute('data-filter') || 'all';
+    tcRender();
+  });
+});
+
+$('#btnBookTraffic')?.addEventListener('click', () => {
+  if (!CUR) return;
+  const bookId = CUR.publish?.bookId || CUR.fanqie?.bookId || '';
+  const profilePath = CUR.publish?.profilePath || '';
+  openTrafficDetail({ bookId, slug: CUR.slug, title: CUR.title, profilePath });
+});
+$('#tdRefreshBtn')?.addEventListener('click', tdRefresh);
+$('#tdDays')?.addEventListener('change', tdRefresh);
+$('#tdClose')?.addEventListener('click', () => $('#trafficDetailModal').classList.add('hidden'));
+$('#tdOpenNameExp')?.addEventListener('click', () => {
+  const slug = tdCurTarget?.slug || CUR?.slug;
+  const lb = slug ? (STATE.books || []).find(x => x.slug === slug) : CUR;
+  if (!lb) { toast('该作品尚未导入本地书架，请先导入后再开多书名实验'); return; }
+  $('#trafficDetailModal').classList.add('hidden');
+  $('#trafficCenterModal').classList.add('hidden');
+  openNameExp(lb);
+});
 $('#cvSave').addEventListener('click', async () => {
   if (!CUR) return; $('#cvSave').disabled = true; $('#cvErr').textContent = '保存中…';
   try { await api('/api/book/save-cover', 'POST', { book: CUR.slug, dataUrl: $('#cvCanvas').toDataURL('image/png') }); $('#coverModal').classList.add('hidden'); toast('封面已保存到书目录 cover.png'); }
@@ -3098,6 +3881,31 @@ $('#rdRenumber').addEventListener('click', async () => {
   } catch (e) { toast('重编号失败：' + e.message); }
   finally { $('#rdRenumber').disabled = false; }
 });
+async function runCleanAiTraces(book, btn, onDone) {
+  if (!book) return;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '🧹 清理中…'; }
+  try {
+    const r = await api('/api/book/clean-ai-traces', 'POST', { book: book.slug });
+    const st = r.stats || {};
+    const parts = [];
+    if (st.stars) parts.push(`* 号 ${st.stars} 处`);
+    if (st.endTags) parts.push(`尾注 ${st.endTags} 处`);
+    if (st.headings) parts.push(`# 标题 ${st.headings} 处`);
+    if (st.dividers) parts.push(`分割线 ${st.dividers} 处`);
+    if (st.fillers) parts.push(`套话前缀 ${st.fillers} 处`);
+    if (st.ellipses) parts.push(`省略号 ${st.ellipses} 处`);
+    if (st.dupTitles) parts.push(`重复章名 ${st.dupTitles} 处`);
+    const summary = r.touched
+      ? `✅ 已清除 ${r.touched}/${r.files} 章 AI 痕迹（${parts.join('、') || '标点与格式归一化'}｜存档 ${r.snapshot || '-'}）`
+      : `✅ 全书 ${r.files} 章已检查，无残留 * 号或 AI 格式痕迹`;
+    toast(summary);
+    if (onDone) onDone(r);
+  } catch (e) { toast('清理失败：' + e.message); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = old; } }
+}
+$('#btnCleanAiTraces')?.addEventListener('click', () => runCleanAiTraces(CUR, $('#btnCleanAiTraces'), () => { if (CUR) renderBoard(CUR.slug); }));
+$('#rdCleanAiTraces')?.addEventListener('click', () => runCleanAiTraces(RD_BOOK, $('#rdCleanAiTraces'), (r) => { if (r.touched && RD_REL) loadReaderFile(RD_REL); }));
 $('#btnReadFromWrite').addEventListener('click', () => { if (CUR) openReader(CUR); });
 $('#btnRead').addEventListener('click', () => { if (CUR) openReader(CUR); });
 // 打开阅读器并直接跳到某一章（rel）——共创/写作后"直接读刚写的这一章"用。
@@ -3474,10 +4282,19 @@ let NB_ROMANCE = 'warm';   // 感情线档位：none|light|warm|bold（建书表
   });
 })();
 // 目标字数：框里只填数字，单位固定"万字" → 拼成 "200万字"
+// 填短篇/中短篇字数（≤30万字）时，若用户还没手改过规划卷数，自动联动缩减 #nbVolCount（防 5 万字短篇顶着 30 卷立项成"一卷一章"）
 function getWords() {
   const v = ($('#nbWords').value || '').replace(/[^0-9.]/g, '');
   return v ? v + '万字' : '';
 }
+$('#nbVolCount')?.addEventListener('input', () => { $('#nbVolCount').dataset.userTouched = '1'; });
+$('#nbWords')?.addEventListener('input', () => {
+  const vc = $('#nbVolCount');
+  if (!vc || vc.dataset.userTouched === '1') return;
+  const wan = parseFloat(($('#nbWords').value || '').replace(/[^0-9.]/g, ''));
+  if (!Number.isFinite(wan) || wan <= 0) { vc.value = '30'; return; }
+  vc.value = String(wan <= 2 ? 1 : wan <= 5.5 ? 2 : wan <= 9 ? 4 : wan <= 15 ? 6 : wan <= 30 ? 10 : 30);
+});
 function openModal() {
   $('#modal').classList.remove('hidden');
   $('#nbStep1').classList.remove('hidden'); $('#nbStep2').classList.add('hidden');
@@ -3493,7 +4310,7 @@ function openModal() {
   const rseg = $('#nbRomance');
   if (rseg) rseg.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('on', b.dataset.rom === 'warm'));
   NB_ROMANCE = 'warm';
-  const pvc = document.getElementById('nbVolCount'); if (pvc) { pvc.disabled = false; pvc.style.opacity = ''; }
+  const pvc = document.getElementById('nbVolCount'); if (pvc) { pvc.disabled = false; pvc.style.opacity = ''; delete pvc.dataset.userTouched; }
   if ($('#nbRefPanel')) $('#nbRefPanel').classList.add('hidden');
   if ($('#nbrsUrl')) $('#nbrsUrl').value = '';
   if ($('#nbrsSample')) $('#nbrsSample').value = '';

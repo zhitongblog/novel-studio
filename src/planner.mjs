@@ -3,23 +3,17 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { getModel, detectAll, resolveBin } from './models.mjs';
+import { getModel, detectAll, resolveBin, trustAgyWorkspace } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { STYLES, getStyle } from './styles.mjs';
 import { FANQIE_CATEGORIES, categoriesOf, isValidCategory, normalizeChannel } from './categories.mjs';
 import { READ_TAGS, CONTENT_TAGS, TAG_LIMITS } from './fanqietags.mjs';
+import { suggestVolumesForWords } from './books.mjs';
 
-// runModelOnce 能非交互驱动的本地 CLI（一次性喂 prompt 走 stdin 取文本）。trae 用法不同(run 子命令)，不在此列。
-//
-// ⚠️【agy 不在这张表里，是有原因的，别再加回来】2026-09-13 实测：
-// agy 的交互模式(-i)能自动登录（窗口里显示 lixd220@gmail.com / Google AI Pro，直接开跑），
-// 但那份凭据【不落盘】——~/.gemini 下没有任何新文件，只有 trustedWorkspaces 被更新。
-// 于是非交互的 -p 每次都从零要 OAuth：打印一条 accounts.google.com 链接、等人贴授权码（60 秒超时），
-// 而授权码和发起那次登录的进程用 PKCE 绑定，进程一死就作废——在后台任务里根本无解。
-// 结果就是作者点「AI 起书名」看到的那句「AI 返回未能解析为书名候选」。
-// 所以：agy 只做【窗口里的写作模型】（那条路是好的，立项实测通过），
-// 书名/简介/文风这些一次性元任务一律交给 codex/gemini/qwen/claude。
-const CLI_GEN_PREF = ['codex', 'gemini', 'qwen', 'claude'];
+// runModelOnce 能非交互驱动的本地 CLI。trae 用法不同(run 子命令)，不在此列。
+// agy 1.3+ 的 print 模式(-p)已支持静默复用登录态（Print mode: silent auth succeeded）及非 TTY 管道输出，
+// 可直接参与立项/书名/简介/文风等一次性元任务。
+const CLI_GEN_PREF = ['agy', 'codex', 'gemini', 'qwen', 'claude'];
 
 // 把「用于文本生成的模型」解析成一个真正能本地 spawn 的 CLI：
 // 网页版模型(kind:'web')/无 bin 的模型不能 spawn（会 "file argument must be string, received undefined"）——
@@ -31,15 +25,15 @@ export function resolveGenModel(model) {
   return CLI_GEN_PREF.find(id => avail.includes(id)) || null;
 }
 
-// 选"附带文本生成"(简介/封面提示词兜底)用的模型：写作模型是 claude 时自动换 codex/gemini，
+// 选"附带文本生成"(简介/封面提示词兜底)用的模型：写作模型是 claude 时自动换 agy/codex/gemini，
 // 既满足"claude 不跑这些杂活"的要求，也把 claude 额度留给正文写作。网页版模型不能跑本地生成 → 也换 CLI。
 export function pickAuxModel(bookModel, cfg) {
   const bm = getModel(bookModel);
-  if (bm && bm.kind === 'web') return resolveGenModel(bookModel) || 'codex';
+  if (bm && bm.kind === 'web') return resolveGenModel(bookModel) || 'agy';
   const avail = detectAll().filter(m => m.available && m.kind !== 'web' && m.bin).map(m => m.id);
   if (bookModel && bookModel !== 'claude' && avail.includes(bookModel)) return bookModel;
-  const alt = ['codex', 'gemini'].find(id => avail.includes(id));
-  return alt || bookModel || 'codex';
+  const alt = ['agy', 'codex', 'gemini'].find(id => avail.includes(id));
+  return alt || bookModel || 'agy';
 }
 
 // 把模型输出清洗成"一段约150字的纯中文简介"：先砍掉被回显的 prompt，再去引导语/引号/空白。
@@ -99,9 +93,9 @@ export function generateSynopsis(book, cfg) {
 // "ReadingpromptfromstdinOpenAICodexv0.141.0workdir..." 当简介存进书里（231字、0个中文），
 // 番茄发布直接拿它当作品简介。必须在源头识别失败并抛错。
 const CLI_FAIL_PATTERNS = [
-  [/hit your usage limit|usage limit (reached|exceeded)|out of credits|quota exceeded|额度.{0,4}(用尽|不足|耗尽)/i, '额度已用尽'],
+  [/hit your usage limit|usage limit (reached|exceeded)|out of credits|credits balance is too low|individual quota reached|quota exceeded|额度.{0,4}(用尽|不足|耗尽)/i, '额度已用尽'],
   [/rate ?limit|too many requests|\b429\b/i, '被限流'],
-  [/not logged ?in|please log ?in|login required|unauthorized|\b401\b|authentication (failed|required)|accounts[.]google[.]com|visit the URL to log in/i, '未登录或鉴权失败'],
+  [/not logged ?in|please log ?in|please log back in|login required|unauthorized|\b401\b|authentication (failed|required|expired)|verify your account to continue|accounts[.]google[.]com|visit the URL to log in/i, '未登录或鉴权失败'],
   [/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)/i, '网络/代理不通'],
   // 命令根本不在 PATH（agy 就是这样：装了但没跑 `agy install`）。这句报错绝不能被当成模型的回答。
   [/is not recognized as an internal|command not found|不是内部或外部命令|No such file or directory/i, '命令找不到（没装或不在 PATH）'],
@@ -159,6 +153,17 @@ function applyProxy(env, on) {
 const NET_FAIL_RE = /User location is not supported|FAILED_PRECONDITION|ENOTFOUND|ECONNREFUSED|ConnectionRefused|Unable to connect|Connection (refused|reset|timed out)|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)|eligibility check failed|userinfo": EOF|Request not allowed|403/i;
 export function looksNetworkFailure(out) { return NET_FAIL_RE.test(String(out || '')); }
 
+// 无头调用的专用空工作目录：避免直接拿 os.tmpdir()（Windows 的 %TEMP% 常有数千个临时文件/锁文件，
+// agy 等 CLI 启动时会扫描 cwd 建立工作区索引，拖慢启动甚至踩到锁文件）。
+let _headlessCwd = null;
+export function headlessCwd() {
+  if (_headlessCwd) return _headlessCwd;
+  const dir = path.join(os.tmpdir(), 'novel-studio-headless');
+  try { fs.mkdirSync(dir, { recursive: true }); trustAgyWorkspace(dir); } catch { return os.tmpdir(); }
+  _headlessCwd = dir;
+  return dir;
+}
+
 // 一次性调用某个 CLI 时，参数怎么摆、prompt 从哪进、要不要过 shell。抽成纯函数只为可测——
 // 这三件事各踩过一次坑，全都表现为"AI 返回解析不了"，从报错完全看不出真因。
 //
@@ -166,14 +171,17 @@ export function looksNetworkFailure(out) { return NET_FAIL_RE.test(String(out ||
 // 不做任何转义，整段中文提示词会被空格切碎——agy 于是回一句 `unexpected argument "3".` 就退出。
 // shell 的唯一用途是让 Windows 解析 npm 的 .cmd shim（codex/gemini/qwen 那种没扩展名的壳），
 // 所以只有【prompt 走 stdin】且【bin 不是真 .exe】时才需要它。
-export function planCliInvocation(useId, prompt, bin) {
+export function planCliInvocation(useId, prompt, bin, cfg) {
   let args;
   let viaStdin = true;
   if (useId === 'codex') args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox'];
   else if (useId === 'agy') {
     // agy 的 -p/--print 是【带参数】的（不带就报 flag needs an argument: -p），不像 claude/gemini 从 stdin 读。
     // 照 stdin 那套喂它，只会拿回一屏 usage 帮助——而那玩意会被当成"模型的回答"洗进简介里。
-    args = ['--dangerously-skip-permissions', '-p', prompt];
+    args = ['--dangerously-skip-permissions'];
+    if (cfg?.agyModel) args.push('--model', String(cfg.agyModel));
+    if (cfg?.agyEffort) args.push('--effort', String(cfg.agyEffort));
+    args.push('-p', prompt);
     viaStdin = false;
   } else if (useId === 'claude') {
     // ⚠️【无头模式必须自带免审批】claude -p 在无头下【没法弹审批框】，一旦模型要用工具就被自动拒绝，
@@ -186,6 +194,27 @@ export function planCliInvocation(useId, prompt, bin) {
   return { args, viaStdin, useShell };
 }
 
+// Windows 下 CreateProcessW 的命令行上限为 32767 个 UTF-16 字符。
+// agy 的 prompt 走 argv（-p <prompt>），当大纲审稿或无状态写作的上下文包超过 ~28000 字时，
+// 直接放 argv 会触发 spawn ENAMETOOLONG。此时把完整 prompt 落盘到临时文件，让 agy 读取执行并在结束后清理。
+const WIN_ARGV_SAFE_CHARS = 28000;
+export function prepareCliInvocation(useId, prompt, bin, { cwd, cfg } = {}) {
+  const s = String(prompt || '');
+  if (useId === 'agy' && process.platform === 'win32' && s.length > WIN_ARGV_SAFE_CHARS) {
+    const baseDir = cwd || headlessCwd();
+    const tmpDir = path.join(baseDir, '.studio');
+    try {
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const fp = path.join(tmpDir, `agy-prompt-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.md`);
+      fs.writeFileSync(fp, s, 'utf8');
+      const shortPrompt = `请先完整读取文件 ${fp} 中的全部内容，严格按照其中的全部指令、上下文与格式要求执行任务（直接按要求完成任务或输出最终内容，不要提及该临时提示词文件）。`;
+      const plan = planCliInvocation(useId, shortPrompt, bin, cfg);
+      return { ...plan, cleanup: () => { try { fs.unlinkSync(fp); } catch {} } };
+    } catch {}
+  }
+  return { ...planCliInvocation(useId, prompt, bin, cfg), cleanup: () => {} };
+}
+
 // 只为测试导出：判定一次 CLI 输出是不是"跑失败了"（见 test/cli-invocation.test.mjs）。
 export const detectCliFailureForTest = detectCliFailure;
 
@@ -195,46 +224,52 @@ export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
   const useId = resolveGenModel(model);
   if (!useId) {
     throw new Error('没有可用于「立项 / 书名 / 简介」等生成的本地 CLI 模型。网页版模型只能写正文、不能跑这些元任务——'
-      + '请先装一个 CLI（如 qwen / gemini / codex），或在上一步用「✍️ 我自己起名（跳过 AI 建议）」直接立项。');
+      + '请先装一个 CLI（如 qwen / gemini / codex / agy），或在上一步用「✍️ 我自己起名（跳过 AI 建议）」直接立项。');
   }
   const m = getModel(useId);
   const bin = resolveBin(useId);
-  const { args, viaStdin, useShell } = planCliInvocation(useId, prompt, bin);
+  const cwd = headlessCwd();
+  const { args, viaStdin, useShell, cleanup } = prepareCliInvocation(useId, prompt, bin, { cwd, cfg });
 
   // 跑一次（proxyOn 决定挂不挂代理）
   const once = (proxyOn) => {
     const env = applyProxy({ ...process.env }, proxyOn);
     const r = spawnSync(bin, args, {
-      encoding: 'utf8', timeout: timeoutMs, ...(viaStdin ? { input: prompt } : {}), cwd: os.tmpdir(),
-      env, maxBuffer: 8 * 1024 * 1024, shell: useShell, windowsHide: true,
+      encoding: 'utf8', timeout: timeoutMs,
+      ...(viaStdin ? { input: prompt } : { stdio: ['ignore', 'pipe', 'pipe'] }),
+      cwd, env, maxBuffer: 8 * 1024 * 1024, shell: useShell, windowsHide: true,
     });
     if (r.error) throw new Error(m.name + ' 调用失败：' + r.error.message);
     return (r.stdout || '') + String.fromCharCode(10) + (r.stderr || '');
   };
 
-  // 显式配了"这个模型走直连"就照办，不做协商
-  const forcedDirect = Array.isArray(cfg?.noProxyModels) && cfg.noProxyModels.includes(useId);
-  let proxyOn = forcedDirect ? false : wantProxy(useId, cfg);
-  let out = once(proxyOn);
-  let fail = detectCliFailure(out, prompt);
+  try {
+    // 显式配了"这个模型走直连"就照办，不做协商
+    const forcedDirect = Array.isArray(cfg?.noProxyModels) && cfg.noProxyModels.includes(useId);
+    let proxyOn = forcedDirect ? false : wantProxy(useId, cfg);
+    let out = once(proxyOn);
+    let fail = detectCliFailure(out, prompt);
 
-  // 【失败像网络/地区问题 → 把代理翻过来再试一次】别再让我靠猜：
-  // 同一台机器两天里 agy 的可用配置正好反了个个儿（见本文件 netmode 那段注释）。
-  if (fail && !forcedDirect && looksNetworkFailure(out)) {
-    const flipped = !proxyOn;
-    const out2 = once(flipped);
-    const fail2 = detectCliFailure(out2, prompt);
-    if (!fail2) {
-      rememberNetMode(useId, flipped ? 'proxy' : 'direct');   // 记住这次成功的模式，下次先用它
-      return out2;
+    // 【失败像网络/地区问题 → 把代理翻过来再试一次】别再让我靠猜：
+    // 同一台机器两天里 agy 的可用配置正好反了个个儿（见本文件 netmode 那段注释）。
+    if (fail && !forcedDirect && looksNetworkFailure(out)) {
+      const flipped = !proxyOn;
+      const out2 = once(flipped);
+      const fail2 = detectCliFailure(out2, prompt);
+      if (!fail2) {
+        rememberNetMode(useId, flipped ? 'proxy' : 'direct');   // 记住这次成功的模式，下次先用它
+        return out2;
+      }
+      out = out2; fail = fail2;   // 两种都不行 → 报后一次的错（更接近当前网络真相）
+    } else if (!fail) {
+      rememberNetMode(useId, proxyOn ? 'proxy' : 'direct');
     }
-    out = out2; fail = fail2;   // 两种都不行 → 报后一次的错（更接近当前网络真相）
-  } else if (!fail) {
-    rememberNetMode(useId, proxyOn ? 'proxy' : 'direct');
-  }
 
-  if (fail) { const e = new Error(`${m.name} 跑不动：${fail.why}${fail.detail ? '（' + fail.detail + '）' : ''}`); e.cliFailed = useId; throw e; }
-  return out;
+    if (fail) { const e = new Error(`${m.name} 跑不动：${fail.why}${fail.detail ? '（' + fail.detail + '）' : ''}`); e.cliFailed = useId; throw e; }
+    return out;
+  } finally {
+    cleanup();
+  }
 }
 
 // 从模型输出里抽取候选数组。先试严格 JSON，失败则用容错正则
@@ -506,7 +541,11 @@ export function buildRebuildOutlineInstruction(book) {
 
 // 【共创版·轻量立项】只搭设定 + 全书罗盘(每卷一行走向)，绝不细化章节、绝不写正文。逐卷共创的起点。单行。
 export function buildCompassKickoffInstruction(book, theme, words, volumes, characters) {
-  const nv = Math.max(3, parseInt(volumes, 10) || 30);
+  const sug = suggestVolumesForWords(words || book?.standards?.totalWords, volumes || book?.standards?.volumes, book?.standards?.chaptersPerVolume);
+  const nv = Math.max(1, sug.volumes || 30);
+  const cpvHint = sug.isShortStory
+    ? `（中短篇体量：全书约 ${sug.totalChapters} 章，每卷约 ${sug.chaptersPerVolume} 章，【绝不是一卷一章】；请在 novel_bible.md 的「全书规模」里明确写清：总字数 ${words || book?.standards?.totalWords}、卷数 ${nv}、每卷约章数 ${sug.chaptersPerVolume}）`
+    : '';
   const chars = String(characters || '').replace(/[\r\n]+/g, '；').trim();
   const charLine = chars
     ? `【作者已指定角色，务必原样采用、不得改名或替换】：${chars}。请把这些角色（姓名、身份/性格）写进 bible 的主角/配角，并作为全书命名与人物基线；未指定的次要角色再由你补齐、风格与之统一。`
@@ -515,7 +554,7 @@ export function buildCompassKickoffInstruction(book, theme, words, volumes, char
     `题材：${theme || '（见题材说明）'}；目标总字数：${words || '长篇'}。` +
     charLine +
     `第一步：撰写 novel_bible.md（一句话卖点、目标读者、时代世界观、力量/设定体系、主角、关键配角、对抗势力、主题、禁区、命名与文风基线）。` +
-    `第二步：建【全书罗盘】文件 outlines/全书罗盘.md —— 规划约 ${nv} 卷（可据故事体量适当增减）；【每卷只写一行】：卷号 + 4–6字卷名 + 一句话走向（这一卷大概发生什么、主角格局从什么状态升到什么状态、卷末交给下一卷什么局面），一直覆盖到全书结局方向。这是"指南针"——只定方向、不定细节，宁可粗不要满。` +
+    `第二步：建【全书罗盘】文件 outlines/全书罗盘.md —— 规划约 ${nv} 卷${cpvHint}（可据故事体量适当增减）；【每卷只写一行】：卷号 + 4–6字卷名 + 一句话走向（这一卷大概发生什么、主角格局从什么状态升到什么状态、卷末交给下一卷什么局面），一直覆盖到全书结局方向。这是"指南针"——只定方向、不定细节，宁可粗不要满。` +
     `第三步：建立并初始化 continuity_ledger.md（先放主角起点与已定设定）。` +
     `【硬性】绝不细化任何一卷的分章大纲、绝不写任何正文章节。这本书采用【逐卷共创】：每一卷的章级大纲会在写到那一卷时，由作者和你一起定。完成后单独输出一行「【全书罗盘就绪：待逐卷共创】」然后停下。全程遵守本目录 AGENTS.md 规范。`;
   return s.replace(/[\r\n]+/g, ' ');
@@ -571,7 +610,9 @@ export function buildFreehandKickoffInstruction(book, theme, words, characters) 
 // authorDirection：作者给的本卷走向（探索式必给；罗盘式可留空→依罗盘那一行）。给了就以它为准、AI 不得自行改主线方向。
 export function buildVolumePlanPrompt(book, volNum, { bibleBrief = '', compass = '', prevEnding = '', cpv = 0, authorDirection = '' } = {}) {
   const n = parseInt(volNum, 10) || 1;
-  const approx = cpv > 0 ? `约 ${cpv} 章` : '20–40 章（据本卷体量自定）';
+  const sug = suggestVolumesForWords(book?.standards?.totalWords, book?.standards?.volumes, cpv || book?.standards?.chaptersPerVolume);
+  const effCpv = cpv > 0 ? cpv : (sug.chaptersPerVolume > 0 ? sug.chaptersPerVolume : 0);
+  const approx = effCpv > 0 ? `约 ${effCpv} 章` : '20–40 章（据本卷体量自定）';
   const dir = String(authorDirection || '').trim();
   const basis = dir
     ? `依据：【作者给定的本卷走向（以此为准，不得擅自改主线方向，只把它拆成可执行的章级 beat）】 + 设定圣经 + 上一卷卷末局面。只拟这一卷，${approx}。`

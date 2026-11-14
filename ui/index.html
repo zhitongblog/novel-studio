@@ -49,6 +49,8 @@
       <section class="view" id="view-shelf">
         <header class="view-head">
           <h1>书架</h1>
+          <button class="btn primary" id="btnTrafficCenter" title="一键拉取番茄全账号作品的阅读UV、14日在读、加书架、读完率、收益与章节流失毒点分析">📈 流量分析中心</button>
+          <button class="btn" id="btnNameExpCenter" title="扫描番茄全账号作品的多书名实验资格、查看实验状态并一键配置">🧪 多书名实验中心</button>
           <button class="btn" id="btnImport">📂 导入文件夹</button>
           <button class="btn" id="btnImportFanqie">📥 从番茄导入</button>
           <button class="btn primary" id="btnNewBook">＋ 新建书</button>
@@ -134,8 +136,10 @@
                 <div class="btn-row">
                   <button class="btn" id="btnRead" title="阅读全书已写章节：左边选章、右边舒适阅读。共创/写作后可随时在这里读当前创作的章节。">📖 阅读</button>
                   <button class="btn" id="btnReview" title="让 AI 复核并修正已写内容：逻辑/设定矛盾就地改、文风就地润色、节奏给提速方案。">🔍 复检已写的内容</button>
+                  <button class="btn span2" id="btnCleanAiTraces" title="一键清除全书正文中的 * 号（Markdown加粗/斜体）、# 标题号、分割线、（本章完）尾注、解释腔套话与叠标点等 AI 痕迹（自动 git 存档）">🧹 一键清除AI痕迹</button>
                   <button class="btn span2" id="btnOutline" title="换一个模型当主编，审这一卷的大纲，逐条挑要不要改。">📋 让主编看这卷大纲</button>
                   <button class="btn span2" id="btnRebuildOutline" title="据已写正文逆向重建 设定圣经 + 各卷分章大纲（不写新正文）。导入的番茄书/半成品书第一次用它补齐规划。">🧭 从正文补回设定和大纲</button>
+                  <button class="btn span2" id="btnBookTraffic" title="一键采集本书在番茄后台的14天流量趋势、6大渠道占比、章节流失率Top毒点与收益诊断报告">📈 番茄流量与留存深度诊断</button>
                   <button class="btn" id="btnSignDiag" title="签约被拒/准备申请签约时用：读番茄签约进度、查定时发布有没有乱序、按签约编辑的标准评估已发布章节，给出带章号的修改清单。只读，不改番茄上任何东西。">📋 签约诊断</button>
                   <button class="btn" id="btnDiagnose" title="不用连番茄也能查：换一个模型当责编读黄金三章+抽样章，加上量出来的指标，给出带章号的必办清单（reviews/改造诊断.md）。只读，不改正文。">🩺 诊断这本书</button>
                   <button class="btn" id="btnReadReview" title="换一个模型【只读不量】，专挑指标查不出的问题：章末是不是空钩子、逻辑接不接得上、人物有没有失格、该爽的地方爽没爽到。结果写进 reviews/阅读复核.md。只读，不改正文。">👓 让它读一遍挑毛病</button>
@@ -151,7 +155,8 @@
                   <button class="btn" id="btnVoice" title="本书文风的唯一来源：挂范本、看手法卡">🖋️ 文风范本</button>
                   <button class="btn" id="btnStyle">🎨 文风</button>
                   <button class="btn" id="btnRefStyle" title="对标书风格学习：贴一段对标作品正文，AI 分析出文风指南，保存后写作自动照这个腔写。只学腔、不抄内容。">📚 对标别人的书</button>
-                  <button class="btn span2" id="btnCover">🖼️ 封面</button>
+                  <button class="btn" id="btnCover">🖼️ 封面</button>
+                  <button class="btn" id="btnNameExpFromWrite" title="为本书生成 5 组候选书名+专属书封，查重并一键推送到番茄「多书名实验」">🧪 多书名实验</button>
                 </div>
                 <div class="synopsis-box">
                   <div class="syn-head">
@@ -261,6 +266,7 @@
           <h1 id="rdTitle">阅读</h1>
           <button class="btn ghost icon" id="rdToWrite" title="去写作台">✍️</button>
           <button class="btn ghost" id="rdRenumber" title="把每卷独立编号统一成全书连续编号">🔢 全局重编号</button>
+          <button class="btn ghost" id="rdCleanAiTraces" title="一键清除全书正文的 * 号、Markdown标记、（本章完）尾注与分割线等 AI 痕迹">🧹 一键清除AI痕迹</button>
           <div class="grow"></div>
           <span class="badge" id="rdProgress"></span>
         </header>
@@ -324,7 +330,7 @@
         </div>
         <div class="grid2">
           <label class="field"><span>文风（兜底用；下一步可以直接看样章挑）</span><select id="nbStyle"></select></label>
-          <label class="field"><span>规划卷数（只出粗罗盘）</span><input id="nbVolCount" type="number" min="3" max="200" value="30" title="立项只出这么多卷的一句话走向（罗盘），不细化章节。之后每卷开写前跟你共创该卷大纲。" /></label>
+          <label class="field"><span>规划卷数（只出粗罗盘）</span><input id="nbVolCount" type="number" min="1" max="200" value="30" title="立项只出这么多卷的一句话走向（罗盘），不细化章节。短篇自动按字数缩减卷数。" /></label>
         </div>
         <label class="field"><span>开局架构 · 谁来定故事骨架</span>
           <div class="seg" id="nbPlanMode">
@@ -638,6 +644,20 @@
         <button class="btn" id="pbSaveCfg">💾 保存配置</button>
         <button class="btn" id="pbPreview">🔍 预览将发</button>
       </div>
+      <details class="pb-volmgr" style="margin-top:10px" open>
+        <summary style="cursor:pointer;font-weight:500">⚡ 番茄「短故事（短篇）」一键合成发布（1–8万字短篇专用通道）</summary>
+        <p class="modal-hint" style="margin-top:6px">番茄<b>「作品管理 → 短故事」</b>与长篇小说是两套独立后台：短故事不是逐章连载，而是<b>把全书所有章节合并进同一篇文档（自动生成 <code>&lt;h1&gt;第X章：标题&lt;/h1&gt;</code> 目录节点）+ 30%试读比例分割线 + 短故事专属5维分类（最多8项）+ 自动勾选发布事项协议</b>，一次性投递签约（超6000字即走短故事签约评估）。</p>
+        <div class="pb-grid" style="margin-top:6px">
+          <label class="field"><span>试读比例（0.1–0.8，默认 0.3 即30%）</span><input id="pbShortTrial" type="number" min="0.1" max="0.8" step="0.05" value="0.3"></label>
+          <label class="field"><span>短故事草稿 itemId（留空=自动新建或复用）</span><input id="pbShortItemId" type="text" placeholder="如 7699511281874633241"></label>
+          <label class="field" style="grid-column:1/-1"><span>短故事分类（最多8个，第1个须为主分类；留空则按本书题材自动匹配）</span><input id="pbShortCats" type="text" placeholder="如：悬疑惊悚,推理,女性互助,医生,惊悚,救赎,现代,职场"></label>
+        </div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn primary" id="pbShortDraftBtn" type="button">💾 一键合成至短故事草稿箱（推荐·人工核对后提交）</button>
+          <button class="btn" id="pbShortPubBtn" type="button">🚀 一键合成并直接提交审核</button>
+        </div>
+        <div id="pbShortHint" class="modal-hint" style="margin-top:6px"></div>
+      </details>
       <details class="pb-volmgr" style="margin-top:10px">
         <summary style="cursor:pointer;font-weight:500">📕 在番茄创建新作品（本地书还没上番茄时用）</summary>
         <p class="modal-hint" style="margin-top:6px">本地书还没在番茄建过时用。自动带入：<b>书名</b>=本书名、<b>简介</b>=下方「作品简介」（需 50–500 字）。你选频道+主分类、可填主角名，点创建——<b>会在你番茄账号真实建一本新书（不可逆）</b>，成功后自动回填上方「番茄书籍」的 bookId。主分类<b>签约后不可改</b>，男/女频分类不同。</p>
@@ -645,6 +665,7 @@
           <label class="field"><span>频道</span><select id="cbChannel"><option value="男频">男频</option><option value="女频">女频</option></select></label>
           <label class="field"><span>主分类（签约后不可改）</span><select id="cbCategory"><option value="">（加载中…）</option></select></label>
           <div id="cbCatHint" class="modal-hint" style="grid-column:1/-1"></div>
+          <label class="field"><span>签约模式（短篇一次发完可选完本）</span><select id="cbSignMode"><option value="连载模式">连载模式（默认·边写边发）</option><option value="完本模式">完本模式（短篇写完一次发）</option></select></label>
           <label class="field"><span>主角名1（≤5字，可空）</span><input id="cbHero" type="text" maxlength="5" placeholder="如 朱由检"></label>
           <label class="field"><span>主角名2（≤5字，可空）</span><input id="cbHero2" type="text" maxlength="5" placeholder="可空"></label>
         </div>
@@ -981,21 +1002,96 @@
     </div>
   </div>
 
-  <!-- 书名实验生成器 -->
+  <!-- 书名实验生成器（单书工作台） -->
   <div class="modal hidden" id="nameExpModal">
-    <div class="modal-card" style="width: 860px; max-width: 92vw;">
+    <div class="modal-card" style="width: 980px; max-width: 95vw;">
       <button class="modal-close" id="neClose" title="关闭 (Esc)">✕</button>
-      <h2>🧪 书名实验生成器</h2>
-      <p class="modal-hint">为 <b id="neBookTitle"></b> 批量生成【多个候选书名】+ 每个配一张<b>不同画面</b>的封面底图，供番茄「多书名实验 / 多封面推荐」配实验用。<br>书名由 AI 按设定出（各打不同读者钩子），封面由 Imagen 逐张出（约 15 秒/张）。生成后可<b>「🚀 推到番茄」</b>：自动切到该书、逐个填书名(别名)+上传封面（<b>封面上传已全自动</b>）。<br><span style="color:#a06a00">⚠️ 番茄多书名实验门槛：20万字+ / 已签约 / 未完结，且该里程碑实验未跑过。不满足时会把页面打开、候选列出来，让你手动配。</span></p>
-      <div class="btn-row" style="align-items:center;gap:10px">
-        <label class="field" style="max-width:150px"><span>候选数量</span><input id="neCount" type="number" min="2" max="10" value="6"></label>
+      <h2>🧪 番茄多书名实验工作台 · <span id="neBookTitle"></span></h2>
+      <p class="modal-hint">为本书批量生成 <b>5 组候选书名（≤15字）+ 5 张不同画面专属带字封面（600×800）</b>，支持<b>在线番茄书名查重</b>、<b>实时改名重绘封面</b>与<b>一键极速推送提交番茄「多书名实验」</b>。</p>
+      <div id="neFanqieBanner" class="ne-fq-banner hidden"></div>
+      <div class="btn-row" style="align-items:flex-end;gap:10px;flex-wrap:wrap">
+        <label class="field" style="max-width:110px;margin:0"><span>候选组数</span><input id="neCount" type="number" min="2" max="10" value="5"></label>
+        <label class="field" style="max-width:150px;margin:0"><span>封面作者笔名</span><input id="neAuthor" type="text" value="光头通" placeholder="光头通"></label>
         <button class="btn primary" id="neGen">✨ 生成候选书名+封面</button>
-        <button class="btn" id="nePush" title="把候选书名+封面推到番茄多书名实验">🚀 推到番茄</button>
-        <label class="chk" title="填好后自动点「开启实验」(不可逆)；关=停在实验配置让你核对"><input type="checkbox" id="nePushAuto"> 开启实验(不可逆)</label>
-        <span id="neHint" class="modal-hint" style="margin:0"></span>
+        <button class="btn" id="neCheckDup" title="调用番茄后台接口校验下方书名是否重名或违规">🔍 番茄书名查重</button>
+        <button class="btn" id="neSaveEdits" title="保存手动修改的书名/笔名并重绘封面">💾 保存修改</button>
+        <button class="btn" id="neRefreshFq" title="查询本书在番茄后台的多书名实验资格与状态">📡 查番茄资格</button>
+        <button class="btn primary" id="nePush" title="把前 5 组候选书名+带字封面极速上传并填入番茄多书名实验">🚀 推到番茄</button>
+        <label class="chk" title="填好后自动点击「提交 → 确认」正式开启实验（不可逆）；不勾则停在配置抽屉供核对"><input type="checkbox" id="nePushAuto" checked> 自动提交开启</label>
       </div>
-      <div id="neGrid" class="ne-grid" style="margin-top:12px"></div>
+      <div id="neHint" class="modal-hint" style="margin-top:8px"></div>
+      <div id="neGrid" class="ne-grid" style="margin-top:10px"></div>
       <div class="modal-err" id="neErr"></div>
+    </div>
+  </div>
+
+  <!-- 番茄多书名实验中心（全账号总览与批量管理） -->
+  <div class="modal hidden" id="nameExpCenterModal">
+    <div class="modal-card" style="width: 1060px; max-width: 96vw;">
+      <button class="modal-close" id="necClose" title="关闭 (Esc)">✕</button>
+      <h2>🧪 番茄多书名实验中心（全账号资格盘点与管理）</h2>
+      <p class="modal-hint">自动扫描番茄作家后台全部签约作品的<b>「20-50万字实验」</b>与<b>「100万字实验」</b>资格、当前状态及已提交实验书名。符合开启条件的作品可直接一键进入配置。</p>
+      <div class="btn-row" style="align-items:center;gap:10px;flex-wrap:wrap">
+        <label class="field" style="max-width:220px;margin:0"><span>番茄浏览器账号</span><select id="necProfile"><option value="">默认已登录窗口</option></select></label>
+        <button class="btn primary" id="necScanBtn">🔍 扫描全部番茄作品</button>
+        <div class="seg" id="necFilter" style="margin-left:auto">
+          <button type="button" class="seg-btn on" data-filter="all">全部作品</button>
+          <button type="button" class="seg-btn" data-filter="eligible">🟢 可开启实验</button>
+          <button type="button" class="seg-btn" data-filter="active">🔵 校验中 / 实验中</button>
+          <button type="button" class="seg-btn" data-filter="done">🟣 已结束生效</button>
+        </div>
+      </div>
+      <div id="necStatus" class="modal-hint" style="margin-top:8px"></div>
+      <div id="necList" class="nec-list" style="margin-top:10px;max-height:62vh;overflow-y:auto"></div>
+      <div class="modal-err" id="necErr"></div>
+    </div>
+  </div>
+
+  <!-- 番茄全账号流量分析中心（大盘总览） -->
+  <div class="modal hidden" id="trafficCenterModal">
+    <div class="modal-card" style="width: 1180px; max-width: 96vw;">
+      <button class="modal-close" id="tcClose" title="关闭 (Esc)">✕</button>
+      <h2>📈 番茄全账号流量与收益分析中心</h2>
+      <p class="modal-hint">一键拉取番茄作家后台全部作品的<b>昨日阅读UV、14日在读人数、单日加书架、整体读完率、作品评分、昨日/累计稿费</b>及自动分档诊断。点击任意作品右侧「🔍 深度诊断」可下钻查看<b>6大渠道构成</b>与<b>章节流失率 Top 毒点定位</b>。</p>
+      <div class="btn-row" style="align-items:center;gap:10px;flex-wrap:wrap">
+        <label class="field" style="max-width:220px;margin:0"><span>番茄浏览器账号</span><select id="tcProfile"><option value="">默认已登录窗口</option></select></label>
+        <label class="chk" style="margin:0"><input type="checkbox" id="tcIncludeIncome" checked> 同步采集活跃作品稿费收益</label>
+        <button class="btn primary" id="tcRefreshBtn">🔄 立即刷新全账号流量</button>
+        <div class="seg" id="tcFilter" style="margin-left:auto">
+          <button type="button" class="seg-btn on" data-filter="all">全部作品</button>
+          <button type="button" class="seg-btn" data-filter="top">🔥 头部主力</button>
+          <button type="button" class="seg-btn" data-filter="growing">📈 爬坡推荐</button>
+          <button type="button" class="seg-btn" data-filter="stalled">⚠️ 流量停滞</button>
+          <button type="button" class="seg-btn" data-filter="serial">连载中</button>
+          <button type="button" class="seg-btn" data-filter="finished">已完结</button>
+        </div>
+      </div>
+      <div id="tcSummary" style="margin-top:10px"></div>
+      <div id="tcStatus" class="modal-hint" style="margin-top:6px"></div>
+      <div id="tcList" style="margin-top:8px;max-height:58vh;overflow-y:auto"></div>
+      <div class="modal-err" id="tcErr"></div>
+    </div>
+  </div>
+
+  <!-- 单书深度流量、渠道构成与章节留存毒点诊断弹窗 -->
+  <div class="modal hidden" id="trafficDetailModal">
+    <div class="modal-card" style="width: 1120px; max-width: 96vw;">
+      <button class="modal-close" id="tdClose" title="关闭 (Esc)">✕</button>
+      <h2>📊 作品深度流量与章节留存诊断 · <span id="tdBookTitle"></span></h2>
+      <div class="btn-row" style="align-items:center;gap:10px;flex-wrap:wrap">
+        <label class="field" style="max-width:130px;margin:0"><span>趋势周期</span>
+          <select id="tdDays">
+            <option value="7">近 7 天</option>
+            <option value="14" selected>近 14 天</option>
+            <option value="30">近 30 天</option>
+          </select>
+        </label>
+        <button class="btn primary" id="tdRefreshBtn">🔄 重新采集最新数据</button>
+        <button class="btn" id="tdOpenNameExp" title="打开本书的多书名实验工作台">🧪 去开多书名实验</button>
+      </div>
+      <div id="tdStatus" class="modal-hint" style="margin-top:6px"></div>
+      <div id="tdBody" style="margin-top:10px;max-height:68vh;overflow-y:auto"></div>
+      <div class="modal-err" id="tdErr"></div>
     </div>
   </div>
 

@@ -34,7 +34,7 @@ ${bible}
 
 === 最近章节正文(节选) ===
 ${chapText}`;
-    const model = book.model || cfg?.defaultModel || 'codex';
+    const model = book.model || cfg?.defaultModel || 'agy';
     onLog({ level: 'act', source: 'fanqie', msg: `自动发布前质检中（节奏+逻辑，${model} 无头）…` });
     const raw = stripCtrl(runCliPrompt(model, prompt, cfg, 150000) || '');
     // 找 PASS / FAIL（取最后一个明确判定，避免回显里的指令文字干扰）

@@ -20,6 +20,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { cleanBookAiTraces } from './deslop.mjs';
 
 // ── 一、套话黑名单（与书内 CLAUDE.md 的「套句黑名单」同源） ──────────────
 // 不是绝对禁用，是【高频出现即 AI 味】。命中就该换成具体动作/物件/后果。
@@ -200,10 +201,10 @@ const cvOf = (arr) => {
 //   **给下限，它就冲天花板。** 所以 minLongSent 必须配一个 maxVeryLong。
 //   基线：001–007 里 >80 字的句子共 0–1 个／章，>120 字的【一个都没有】；
 //   008 一章就有 8 个 >80、5 个 >120（最长 136 字）——手机上读一句 130 字是窒息的。
-export function scanRhythm(text, { minParaCV = 0.5, minSentCV = 0.55, minLongSent = 0.2, dialogueHeavy = 0.4, sentCVRelaxed = 0.5, maxVeryLong = 2, veryLongAt = 80 } = {}) {
+export function scanRhythm(text, { minParaCV = 0.5, minSentCV = 0.55, minLongSent = 0.2, dialogueHeavy = 0.4, sentCVRelaxed = 0.5, maxVeryLong = 2, veryLongAt = 80, maxStaccato = 4, maxConsecStaccato = 1 } = {}) {
   const t = String(text || '');
   const paras = t.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  if (paras.length < 10) return { problems: [], ok: true, paraCV: 0, sentCV: 0, longSentRatio: 0, dlgRatio: 0 };
+  if (paras.length < 10) return { problems: [], ok: true, paraCV: 0, sentCV: 0, longSentRatio: 0, dlgRatio: 0, staccatoCount: 0, consecStaccato: 0 };
   const paraCV = cvOf(paras.map(hzCount).filter(n => n > 0));
   const sents = t.split(/[。！？”]/).map(hzCount).filter(n => n > 1);
   const sentCV = cvOf(sents);
@@ -216,13 +217,43 @@ export function scanRhythm(text, { minParaCV = 0.5, minSentCV = 0.55, minLongSen
   // 该书对白段占 56.5%，把台词掺进来，等于拿"人说话短"去判叙述"长句不够"。
   // 台词天生十到二十五字，它压低的是【对白的】长句比例，不是叙述的节奏问题。
   // 叙述句不足 10 句时（对白极密的对峙章）退回混算，免得样本太小反而抖。
-  const narrSents = paras.filter(p => !/[「」『』“”]/.test(p)).join('\n')
+  const narrParas = paras.filter(p => !/[「」『』“”]/.test(p));
+  const narrSents = narrParas.join('\n')
     .split(/[。！？…]/).map(hzCount).filter(n => n > 1);
   const longPool = narrSents.length >= 10 ? narrSents : sents;
   const longOnNarr = narrSents.length >= 10;
   const longSentRatio = longPool.length ? longPool.filter(n => n > 25).length / longPool.length : 0;
   const heavy = dlgRatio >= dialogueHeavy;
   const sentFloor = heavy ? sentCVRelaxed : minSentCV;
+
+  // ⚠️【防二字蹦词碎句（电报腔）】2026-10-21 补。
+  // 给模型规定「均句长 ≤ 22」之后，它会走另一条捷径：把好端端的一句连贯动作硬剁成
+  // 「她冷笑。拔塞。轻嗅。」「心虚。」「毒如蛇蝎。」这种两字一逗、两字一句的碎词。
+  // 均句长是降下来了，但读起来像发电报，是典型的新型 AI 破绽。
+  // 判据：只看叙述段（对白里喊一声「慢着。」「胡说。」是正常说话），统计恰好 2 个汉字的独立短句总数，
+  // 以及同一段里连续两个二字短句（如「拔塞。轻嗅。」）的次数。
+  let staccatoCount = 0;
+  let consecStaccato = 0;
+  const staccatoSamples = [];
+  for (const p of narrParas) {
+    const rawSents = p.split(/[。！？…]+/).map(x => x.trim()).filter(Boolean);
+    let prevIsTwo = false;
+    for (let i = 0; i < rawSents.length; i++) {
+      const s = rawSents[i];
+      // 只算整句就是两个汉字（不含逗号分号子句）的独立碎句
+      const isTwo = !/[，、；：]/.test(s) && hzCount(s) === 2;
+      if (isTwo) {
+        staccatoCount++;
+        if (prevIsTwo) {
+          consecStaccato++;
+          if (staccatoSamples.length < 3) staccatoSamples.unshift(`${rawSents[i - 1]}。${s}。`);
+        } else if (staccatoSamples.length < 3) {
+          staccatoSamples.push(`${s}。`);
+        }
+      }
+      prevIsTwo = isTwo;
+    }
+  }
 
   const problems = [];
   const pct = (x) => Math.round(x * 100) + '%';
@@ -231,7 +262,11 @@ export function scanRhythm(text, { minParaCV = 0.5, minSentCV = 0.55, minLongSen
   if (longSentRatio < minLongSent) problems.push(`长句太少（${longOnNarr ? '叙述句里' : ''}>25字的句子只占 ${pct(longSentRatio)}，下限 ${pct(minLongSent)}）——缺少把节奏拉开的长句`);
   const veryLong = sents.filter(n => n > veryLongAt).length;
   if (veryLong > maxVeryLong) problems.push(`句子拉得过头：${veryLong} 句超过 ${veryLongAt} 字（上限 ${maxVeryLong} 句，最长 ${Math.max(...sents)} 字）——手机上读一句上百字是窒息的`);
-  return { veryLong, paraCV: +paraCV.toFixed(2), sentCV: +sentCV.toFixed(2), longSentRatio: +longSentRatio.toFixed(2), longOnNarr, dlgRatio: +dlgRatio.toFixed(2), problems, ok: problems.length === 0 };
+  if (consecStaccato >= maxConsecStaccato || staccatoCount > maxStaccato) {
+    const sampleStr = staccatoSamples.slice(0, 3).map(x => `「${x}」`).join('、');
+    problems.push(`句子切得太碎：叙述段出现 ${staccatoCount} 处二字短句${consecStaccato ? `（含连续二字蹦词 ${consecStaccato} 处：${sampleStr}）` : `（上限 ${maxStaccato} 处：${sampleStr}）`}——别为压均句长把连贯动作剁成电报腔，用逗号并回流水句`);
+  }
+  return { veryLong, staccatoCount, consecStaccato, paraCV: +paraCV.toFixed(2), sentCV: +sentCV.toFixed(2), longSentRatio: +longSentRatio.toFixed(2), longOnNarr, dlgRatio: +dlgRatio.toFixed(2), problems, ok: problems.length === 0 };
 }
 
 // ── 五、从台账里取【已登记专名】────────────────────────────────────
@@ -488,7 +523,19 @@ export function scanRegister(text, { minPerK, maxMeanSent = 22, hardFloor, marke
   };
 }
 
-export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false, oralSet, oralMarkers, minPerK, hardFloor, maxShare } = {}) {
+export function scanAiFormatTraces(text) {
+  const t = String(text || '');
+  const stars = (t.match(/[*＊]+/g) || []).length;
+  const endTags = (t.match(/^\s*[（(【［\-—]*\s*(本章完|全章完|本集完|未完待续)\s*[）)】］\-—。！!]*\s*$/gm) || []).length;
+  const mdHeadings = (t.match(/^\s*#{1,6}\s+/gm) || []).length;
+  const problems = [];
+  if (stars) problems.push(`正文残留 * 号 ${stars} 处（Markdown 加粗/斜体痕迹，小说纯文本严禁出现 * 号）`);
+  if (endTags) problems.push(`正文残留「（本章完）」等章尾套壳 ${endTags} 处`);
+  if (mdHeadings) problems.push(`正文残留 Markdown # 标题符 ${mdHeadings} 处`);
+  return { stars, endTags, mdHeadings, problems, ok: problems.length === 0 };
+}
+
+export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false, oralSet, oralMarkers, minPerK, hardFloor, maxShare, minChars = 0, forbidFinale = false } = {}) {
   const slop = scanSlop(text, slopOff);
   const stereo = stereoOff ? { problems: [], ok: true, said: 0, mood: 0, dialogues: 0, ratio: 0 } : scanStereotype(text);
   const rhythm = rhythmOff ? { problems: [], ok: true, paraCV: 0, longSentRatio: 0, oneSentRatio: 0 } : scanRhythm(text);
@@ -498,8 +545,22 @@ export function gateChapter({ text, prevText = '', history = '', names = [], ban
   const ban = scanBanned(text, banned);
   const expo = expoOff ? { hits: [], count: 0 } : scanExposition(text);
   const hook = (prevText && !hookOff) ? checkHookContinuity(prevText, text, names, { history }) : { raised: [], dropped: [], late: [], ok: true };
+  const aiFormat = scanAiFormatTraces(text);
   // problems = 必须改的；notes = 看一眼就行的（单处套话属于此类，见 scanSlop 顶部判据一）
   const problems = [], notes = [];
+  if (minChars > 0) {
+    const charLen = String(text || '').replace(/\s/g, '').length;
+    if (charLen < minChars) {
+      problems.push(`正文字数不足（${charLen} 字，下限 ${minChars} 字）——请扩充实质剧情与细节，严禁缩水`);
+    }
+  }
+  if (forbidFinale) {
+    const tail = String(text || '').slice(-300);
+    if (/全书完|全本完|大结局完|完本感言/.test(tail)) {
+      problems.push(`本书当前处于连载状态，严禁擅自写「全书完 / 大结局 / 完本感言」收尾`);
+    }
+  }
+  for (const p of aiFormat.problems) problems.push(p);
   if (ban.count) problems.push(`禁用词 ${ban.count} 处`);
   if (slop.severity === 'bad') problems.push(`套话 ${slop.count} 处`);
   else if (slop.count) notes.push(`套话 ${slop.count} 处`);
@@ -508,7 +569,7 @@ export function gateChapter({ text, prevText = '', history = '', names = [], ban
   for (const p of stereo.problems) problems.push(p);
   for (const p of rhythm.problems) problems.push(p);
   for (const p of register.problems) problems.push(p);
-  return { slop, banned: ban, exposition: expo, hook, stereo, rhythm, register, ok: problems.length === 0, problems, notes };
+  return { slop, banned: ban, exposition: expo, hook, stereo, rhythm, register, aiFormat, ok: problems.length === 0, problems, notes };
 }
 
 // ── 跨章专名一致性：同一个角色有没有被写成两个名字 ──────────────────────
@@ -537,4 +598,173 @@ export function loadVolumeChapters(bookDir, vol) {
     num: parseInt(f, 10),
     text: (() => { try { return fs.readFileSync(path.join(dir, f), 'utf8'); } catch { return ''; } })(),
   }));
+}
+
+// ── 读全书所有卷目录下的章节（按全局章号排序）────────────────────────
+export function loadAllChapters(bookDir) {
+  const root = path.join(bookDir, 'chapters');
+  const out = [];
+  const walk = (d) => {
+    let ents = [];
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      if (!/^\d+.*\.txt$/i.test(e.name)) continue;
+      let text = '';
+      try { text = fs.readFileSync(p, 'utf8'); } catch { text = ''; }
+      out.push({
+        file: e.name,
+        relFile: path.relative(bookDir, p).replace(/\\/g, '/'),
+        num: parseInt(e.name, 10),
+        text,
+      });
+    }
+  };
+  walk(root);
+  return out.sort((a, b) => a.num - b.num || a.relFile.localeCompare(b.relFile));
+}
+
+// ── 批次审校闸（写完一批后自动跑 gateChapter + checkAliases）──────────
+// 仅在书目录存在 gate.json（或显式传 force:true）时启用，以免误伤未配 gate.json 的旧书/测试夹具。
+export function chapGateBatch(bookDir, from = 1, to = 0, onLog = () => {}, { force = false } = {}) {
+  const gatePath = path.join(bookDir || '', 'gate.json');
+  const hasGateFile = Boolean(bookDir && fs.existsSync(gatePath));
+  if (!hasGateFile && !force) {
+    return { skipped: true, ok: true, failed: [], conflicts: [], instruction: null };
+  }
+  let conf = {};
+  if (hasGateFile) {
+    try { conf = JSON.parse(fs.readFileSync(gatePath, 'utf8')); } catch { conf = {}; }
+  }
+  let ledgerText = '';
+  try { ledgerText = fs.readFileSync(path.join(bookDir, 'continuity_ledger.md'), 'utf8'); } catch { ledgerText = ''; }
+  const names = namesFromLedger(ledgerText);
+
+  // 审校前先对目标区间执行确定性 AI 格式痕迹净化（自动剥除 * 号、章尾套壳、机械分割线等）
+  try {
+    cleanBookAiTraces(bookDir, { from: from > 0 ? from : 1, to: to > 0 ? to : 0, onLog });
+  } catch {}
+
+  const all = loadAllChapters(bookDir);
+  const hi = to > 0 ? to : (all.length ? all[all.length - 1].num : 0);
+  const lo = from > 0 ? from : 1;
+  const targets = all.filter(c => c.num >= lo && c.num <= hi);
+  if (!targets.length) {
+    return { skipped: false, ok: true, failed: [], conflicts: [], instruction: null };
+  }
+
+  const results = [];
+  const failed = [];
+  for (const ch of targets) {
+    const idx = all.findIndex(x => x.num === ch.num && x.relFile === ch.relFile);
+    const prevCh = idx > 0 ? all[idx - 1] : null;
+    const history = idx > 1 ? all.slice(0, idx - 1).map(x => x.text).join('\n') : '';
+    const th = conf.oralThresholds || {};
+    const isAfterwordFile = /完本感言|作者的话|尾声|后记/.test(ch.file);
+    const batchMinChars = isAfterwordFile ? 0 : (conf.minChars || 0);
+    const res = gateChapter({
+      text: ch.text,
+      prevText: prevCh ? prevCh.text : '',
+      history,
+      names,
+      banned: conf.banned || [],
+      slopOff: conf.slopOff || {},
+      expoOff: Boolean(conf.expoOff),
+      hookOff: Boolean(conf.hookOff),
+      stereoOff: Boolean(conf.stereoOff),
+      rhythmOff: Boolean(conf.rhythmOff),
+      registerOff: Boolean(conf.registerOff),
+      oralSet: conf.oralSet,
+      oralMarkers: conf.oralMarkers,
+      minPerK: th.minPerK ?? conf.minPerK,
+      hardFloor: th.hardFloor ?? conf.hardFloor,
+      maxShare: th.maxShare ?? conf.maxShare,
+      minChars: batchMinChars,
+      forbidFinale: conf.forbidFinale !== false && !isAfterwordFile,
+    });
+    const detailLines = [...res.problems];
+    if (res.banned.count) {
+      const hits = res.banned.hits.slice(0, 5).map(h => `L${h.line}「${h.word}」${h.why ? `(${h.why})` : ''}`).join('、');
+      detailLines.push(`  · 禁用词命中：${hits}`);
+    }
+    if (res.slop.severity === 'bad') {
+      const hits = res.slop.hits.slice(0, 5).map(h => `L${h.line}[${h.kind}]「${h.word}」`).join('、');
+      detailLines.push(`  · 套话命中：${hits}`);
+    }
+    if (res.exposition.count) {
+      const hits = res.exposition.hits.slice(0, 3).map(h => `L${h.line}「${h.text}…」`).join('、');
+      detailLines.push(`  · 旁白干讲：${hits}`);
+    }
+    const item = { num: ch.num, file: ch.file, relFile: ch.relFile, ok: res.ok, problems: res.problems, details: detailLines, notes: res.notes, res };
+    results.push(item);
+    if (!res.ok) failed.push(item);
+  }
+
+  // 跨章专名/物种/数目/年龄一致性（aliasPairs）
+  const upToHi = all.filter(c => c.num <= hi);
+  const aliasRes = Array.isArray(conf.aliasPairs) && conf.aliasPairs.length
+    ? checkAliases(upToHi.map(c => c.text), conf.aliasPairs)
+    : { conflicts: [], ok: true };
+  // 只拦在本批（或含本批）触发的别名冲突，或者全书任何已触发的冲突
+  const conflicts = aliasRes.conflicts;
+
+  const ok = failed.length === 0 && conflicts.length === 0;
+  const pad = (n) => String(n).padStart(3, '0');
+  const reportRel = `reviews/文风与逻辑闸-${pad(lo)}-${pad(hi)}.md`;
+  try {
+    const revDir = path.join(bookDir, 'reviews');
+    fs.mkdirSync(revDir, { recursive: true });
+    const lines = [
+      `# 文风与逻辑闸报告（第 ${pad(lo)}–${pad(hi)} 章）`,
+      '',
+      `- 结论：**${ok ? '✅ 全部通过' : `❌ 未通过（${failed.length} 章异常${conflicts.length ? `，${conflicts.length} 处跨章别名冲突` : ''}）`}**`,
+      '',
+      '## 逐章指标与判定',
+      '',
+      '| 章 | 文件 | 口语/千字 | 均句长 | 段CV | 句CV | 长句% | 二字碎句 | 套话 | 禁用词 | 结论 |',
+      '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|',
+      ...results.map(r => {
+        const reg = r.res.register || {};
+        const rhy = r.res.rhythm || {};
+        return `| ${pad(r.num)} | \`${r.file}\` | ${reg.perK ?? '-'} | ${reg.meanSent ?? '-'} | ${rhy.paraCV ?? '-'} | ${rhy.sentCV ?? '-'} | ${rhy.longSentRatio != null ? Math.round(rhy.longSentRatio * 100) + '%' : '-'} | ${rhy.staccatoCount ?? 0}${rhy.consecStaccato ? `(连${rhy.consecStaccato})` : ''} | ${r.res.slop.count} | ${r.res.banned.count} | ${r.ok ? '✅' : '❌ ' + r.problems.join('；')} |`;
+      }),
+      '',
+    ];
+    if (conflicts.length) {
+      lines.push('## 跨章专名/设定冲突（checkAliases）', '');
+      for (const c of conflicts) {
+        lines.push(`- ❌ **「${c.a}」vs「${c.b}」**${c.why ? `（${c.why}）` : ''}：「${c.a}」见于第 ${c.aAt.join('、')} 章，「${c.b}」见于第 ${c.bAt.join('、')} 章`);
+      }
+      lines.push('');
+    }
+    fs.writeFileSync(path.join(bookDir, reportRel), lines.join('\n'), 'utf8');
+  } catch {}
+
+  onLog({
+    level: ok ? 'info' : 'warn',
+    msg: ok
+      ? `文风与逻辑闸（${pad(lo)}–${pad(hi)}）：全部通过`
+      : `⚠️ 文风与逻辑闸（${pad(lo)}–${pad(hi)}）：${failed.length} 章未过${conflicts.length ? `、${conflicts.length} 处跨章冲突` : ''}（见 ${reportRel}）`,
+  });
+
+  if (ok) return { skipped: false, ok: true, failed: [], conflicts: [], reportRel, instruction: null };
+
+  const instrLines = [
+    `【文风与逻辑闸未通过——请先就地修好第 ${pad(lo)}–${pad(hi)} 章再继续写新章】`,
+    `（完整报告已写入 \`${reportRel}\`，请只改报告指出的句子/段落，不要整章重写）`,
+    '',
+  ];
+  for (const f of failed) {
+    instrLines.push(`- **第 ${pad(f.num)} 章（\`${f.relFile}\`）**：`);
+    for (const d of f.details) instrLines.push(`  · ${d}`);
+  }
+  if (conflicts.length) {
+    instrLines.push('- **跨章专名/数目/物种冲突（必须全书统一）**：');
+    for (const c of conflicts) {
+      instrLines.push(`  · 「${c.a}」（第 ${c.aAt.join('、')} 章）与「${c.b}」（第 ${c.bAt.join('、')} 章）同时出现${c.why ? ` —— ${c.why}` : ''}，请统一为正确写法。`);
+    }
+  }
+  instrLines.push('', '修好后请重跑自检确认全部归零，再继续后续章节。');
+  return { skipped: false, ok: false, failed, conflicts, reportRel, instruction: instrLines.join('\n') };
 }

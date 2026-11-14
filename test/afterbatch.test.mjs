@@ -87,4 +87,26 @@ assert.deepStrictEqual(afterBatch({ dir: path.join(os.tmpdir(), '不存在的书
 assert.deepStrictEqual(afterBatch({}, {}), { deslopped: 0, dupes: [] });
 console.log('✓ 目录缺失 / 没有 book 都安全返回');
 
-console.log('\n全部通过 ✅  写完一批就矫正排版、顺手查重号，不再攒到发布前');
+console.log('— 索引漏登自动补齐 —');
+{
+  const dir = mkBook();
+  fs.writeFileSync(path.join(dir, 'chapter_index.md'), [
+    '# 章节索引',
+    '',
+    '| 全局章号 | 章名 | 卷 | 路径 | 状态 |',
+    '|---|---|---|---|---|',
+    '| 001 | 第一章 | 卷01 | chapters/卷01/001第一章.txt | 已写 |',
+  ].join('\n'), 'utf8');
+  wr(dir, '001第一章.txt', '正文一');
+  wr(dir, '002第二章.txt', '正文二');
+  wr(dir, '003第三章.txt', '正文三');
+  const r = afterBatch({ dir }, { from: 0, to: 0 });
+  assert.strictEqual(r.indexed, 2, '应自动补齐漏登的 002、003 两章');
+  const idx = fs.readFileSync(path.join(dir, 'chapter_index.md'), 'utf8');
+  assert.ok(idx.includes('| 002 | 第二章 | 卷01 | chapters/卷01/002第二章.txt | 已写 |'));
+  assert.ok(idx.includes('| 003 | 第三章 | 卷01 | chapters/卷01/003第三章.txt | 已写 |'));
+  console.log('✓ 磁盘有新章但模型漏更 chapter_index.md → 自动补齐');
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('\n全部通过 ✅  写完一批就矫正排版、补齐索引、顺手查重号，不再攒到发布前');

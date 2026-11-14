@@ -8,7 +8,7 @@
 //  - buildCompletionNote：给番茄编辑的"完结说明"文本(D 辅助)
 import fs from 'node:fs';
 import path from 'node:path';
-import { getBook, bookStats } from './books.mjs';
+import { getBook, bookStats, parseTotalWords } from './books.mjs';
 import { loadConfig } from './config.mjs';
 import { loadPublishChapters, publishToFanqie } from './publish.mjs';
 import { getFanqieBookStatus, locateFanqieCompletionEntry } from './fanqie.mjs';
@@ -43,7 +43,11 @@ export function computeLocalFinaleStats(book) {
 export async function getCompletionReport(book, { cfg, onLog = () => {}, includeFanqie = true } = {}) {
   cfg = cfg || loadConfig();
   const local = computeLocalFinaleStats(book);
-  const minWords = cfg?.finale?.minWords ?? 200000;
+  const targetWords = parseTotalWords(book?.standards?.totalWords);
+  // 若本书自身规划是短篇/中短篇（如 4.5 万字），优先按规划字数的 85% 作为完结字数门槛；否则用全局配置或默认 20 万字
+  const minWords = (targetWords > 0 && targetWords < 200000)
+    ? Math.max(10000, Math.round(targetWords * 0.85))
+    : (cfg?.finale?.minWords ?? 200000);
   const internalStatus = book.status || '连载中';
 
   let fanqie = null;
