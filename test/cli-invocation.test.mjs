@@ -68,10 +68,9 @@ test('正常的中文回答不许被误判成失败', () => {
   assert.equal(detectCliFailureForTest(ok, PROMPT), null);
 });
 
-test('元任务绝不能落到 agy 头上：它的凭据不落盘，-p 每次都要人贴授权码', () => {
+test('agy 1.3+ 已支持静默复用登录态，可直接参与元任务生成', () => {
   const picked = resolveGenModel('agy');
-  assert.notEqual(picked, 'agy', '选了 agy 也要换成别的 CLI 去跑书名/简介');
-  if (picked) assert.ok(['codex', 'gemini', 'qwen', 'claude'].includes(picked), `换成了意外的模型：${picked}`);
+  assert.equal(picked, 'agy', '选了 agy 时直接用 agy 跑书名/简介');
 });
 
 test('trustAgyWorkspace：写进去、且不重复写', () => {

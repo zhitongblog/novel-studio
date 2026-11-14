@@ -62,9 +62,10 @@ export const MODELS = {
     // 并没有放宽实际权限；而"认弹窗"是这套编排里最脆的一环，能绕开就绕开。
     // 要恢复弹窗设 config.agySkipPermissions=false。
     seedArgs: (instruction, cfg) => {
+      try { ensureAgySettings(); } catch {}
       const args = [];
       if (!cfg || cfg.agySkipPermissions !== false) args.push('--dangerously-skip-permissions');
-      if (cfg?.agyModel) args.push('--model', String(cfg.agyModel));
+      if (cfg?.agyModel) args.push('--model', normalizeAgyModelId(cfg.agyModel));
       if (cfg?.agyEffort) args.push('--effort', String(cfg.agyEffort));
       args.push('-i', instruction);
       return args;
@@ -237,14 +238,42 @@ function fallbackBins(id) {
     } catch {}
   }
   const map = {
-    // 实测：agy 可能装在 %LOCALAPPDATA%\agy\bin\agy.exe、WinGet Packages 目录或 ~/.gemini/antigravity-cli/bin
+    // 实测：agy 可能装在 %LOCALAPPDATA%\agy\bin\agy.exe、WinGet Packages 目录、/opt/homebrew/bin/agy 或 ~/.gemini/antigravity-cli/bin
     agy: [
       local && path.join(local, 'agy', 'bin', 'agy.exe'),
       ...wingetAgy,
       home && path.join(home, '.gemini', 'antigravity-cli', 'bin', 'agy.exe'),
       home && path.join(home, '.agy', 'bin', 'agy'),
+      '/opt/homebrew/bin/agy',
+      '/usr/local/bin/agy',
+      home && path.join(home, '.local', 'bin', 'agy'),
+      home && path.join(home, '.npm-global', 'bin', 'agy'),
     ],
-    claude: [home && path.join(home, '.local', 'bin', 'claude.exe'), home && path.join(home, '.local', 'bin', 'claude')],
+    claude: [
+      home && path.join(home, '.local', 'bin', 'claude.exe'),
+      home && path.join(home, '.local', 'bin', 'claude'),
+      home && path.join(home, '.npm-global', 'bin', 'claude'),
+      '/opt/homebrew/bin/claude',
+      '/usr/local/bin/claude',
+    ],
+    codex: [
+      home && path.join(home, '.npm-global', 'bin', 'codex'),
+      home && path.join(home, '.local', 'bin', 'codex'),
+      '/opt/homebrew/bin/codex',
+      '/usr/local/bin/codex',
+    ],
+    gemini: [
+      home && path.join(home, '.npm-global', 'bin', 'gemini'),
+      home && path.join(home, '.local', 'bin', 'gemini'),
+      '/opt/homebrew/bin/gemini',
+      '/usr/local/bin/gemini',
+    ],
+    qwen: [
+      home && path.join(home, '.npm-global', 'bin', 'qwen'),
+      home && path.join(home, '.local', 'bin', 'qwen'),
+      '/opt/homebrew/bin/qwen',
+      '/usr/local/bin/qwen',
+    ],
   };
   return (map[id] || []).filter(Boolean);
 }
@@ -297,24 +326,92 @@ export function detectAll() {
   return Object.keys(MODELS).map(detectModel);
 }
 
-// 把一个目录写进 agy 的 trustedWorkspaces，免得窗口起来先弹一个"是否信任此项目"。
-// agy 把这份名单存在 ~/.gemini/antigravity-cli/settings.json（实测 1.2.2），只有这一个键。
-// 认弹窗是这套编排里最脆的一环（claude 那个默认停在 "No, exit" 的信任框害我们关过 agent），
-// 能从源头绕开就绕开。写失败不算错——最多是弹窗照旧，autopilot 那条路也已经能应答了。
-export function trustAgyWorkspace(dir) {
-  if (!dir) return false;
+// agy 交互界面把 settings.json 里的 model 存成 Display Name（如 "Gemini 4 Argon (Medium)"），
+// 但 agy 1.5+ 的 -p / -i 启动执行器时只认模型 slug（如 "gemini-4-argon-medium"），
+// 直接读 Display Name 会报错：failed to construct executor: plan model not specified; you must specify a valid model。
+const AGY_MODEL_MAP = {
+  'gemini 4 carbon (medium)': 'gemini-4-carbon-medium',
+  'gemini 4 carbon (high)': 'gemini-4-carbon-high',
+  'gemini 4 carbon (low)': 'gemini-4-carbon-low',
+  'gemini 4 argon (medium)': 'gemini-4-argon-medium',
+  'gemini 4 argon (high)': 'gemini-4-argon-high',
+  'gemini 4 argon (low)': 'gemini-4-argon-low',
+  'gemini 4 hydrogen (high)': 'gemini-4-hydrogen-high',
+  'gemini 4 hydrogen (xhigh)': 'gemini-4-hydrogen-xhigh',
+  'gemini 4 hydrogen (medium)': 'gemini-4-hydrogen-medium',
+  'gemini 4 hydrogen (low)': 'gemini-4-hydrogen-low',
+  'orchestrator (carbon)': 'gemini-pro-orchestrator',
+  'orchestrator (argon)': 'gemini-pro-orchestrator-argon',
+  'gemini 3.8 flash (high)': 'gemini-3.8-flash-high',
+  'gemini 3.8 flash (medium)': 'gemini-3.8-flash-medium',
+  'gemini 3.8 flash (low)': 'gemini-3.8-flash-low',
+  'claude opus 5.5 (low)': 'claude-opus-5-5-low',
+  'claude opus 5.5 (medium)': 'claude-opus-5-5-medium',
+  'claude opus 5.5 (high)': 'claude-opus-5-5-high',
+  'claude sonnet 5.5 (low)': 'claude-sonnet-5-5-low',
+  'claude sonnet 5.5 (medium)': 'claude-sonnet-5-5-medium',
+  'claude sonnet 5.5 (high)': 'claude-sonnet-5-5-high',
+  'gpt-oss 120b (medium)': 'gpt-oss-120b-medium',
+};
+
+export function normalizeAgyModelId(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const low = s.toLowerCase();
+  if (AGY_MODEL_MAP[low]) return AGY_MODEL_MAP[low];
+  if (/^[a-z0-9._-]+$/.test(s)) return s;
+  return low
+    .replace(/[()]/g, ' ')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/^claude-(opus|sonnet)-(\d+)\.(\d+)/, 'claude-$1-$2-$3');
+}
+
+// 确保 ~/.gemini/antigravity-cli/settings.json 里的 model 是合法 slug，并可选将 dir 加入 trustedWorkspaces
+export function ensureAgySettings(dir) {
   const home = process.env.USERPROFILE || process.env.HOME || '';
   if (!home) return false;
   const f = path.join(home, '.gemini', 'antigravity-cli', 'settings.json');
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(f, 'utf8')) || {}; } catch {}
-  const list = Array.isArray(cfg.trustedWorkspaces) ? cfg.trustedWorkspaces : [];
-  const want = path.resolve(dir);
-  if (list.some(x => path.resolve(String(x)) === want)) return false;
-  cfg.trustedWorkspaces = [...list, want];
-  fs.mkdirSync(path.dirname(f), { recursive: true });
-  fs.writeFileSync(f, JSON.stringify(cfg, null, 2), 'utf8');
-  return true;
+  let dirty = false;
+  let addedWorkspace = false;
+
+  if (cfg.model && typeof cfg.model === 'string') {
+    const norm = normalizeAgyModelId(cfg.model);
+    if (norm && norm !== cfg.model) {
+      cfg.model = norm;
+      dirty = true;
+    }
+  } else if (!cfg.model && !dir) {
+    cfg.model = 'gemini-4-argon-medium';
+    dirty = true;
+  }
+
+  if (dir) {
+    const list = Array.isArray(cfg.trustedWorkspaces) ? cfg.trustedWorkspaces : [];
+    const want = path.resolve(dir);
+    if (!list.some(x => path.resolve(String(x)) === want)) {
+      cfg.trustedWorkspaces = [...list, want];
+      dirty = true;
+      addedWorkspace = true;
+    }
+  }
+
+  if (dirty) {
+    try {
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, JSON.stringify(cfg, null, 2), 'utf8');
+    } catch {}
+  }
+  return addedWorkspace;
+}
+
+// 把一个目录写进 agy 的 trustedWorkspaces，免得窗口起来先弹一个"是否信任此项目"。
+// 同时顺手修正 settings.json 中被交互式 TUI 写成 Display Name 的 model 字段。
+export function trustAgyWorkspace(dir) {
+  if (!dir) return false;
+  return ensureAgySettings(dir);
 }
 
 // 这个模型能不能【无头跑】（一次性 spawn、没有窗口、没人能点同意）。

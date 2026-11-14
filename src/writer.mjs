@@ -11,7 +11,7 @@ import { connectInstance } from './mcpclient.mjs';
 import { Autopilot } from './autopilot.mjs';
 import { refreshContext } from './scaffold.mjs';
 import { reviewOutline, buildReviseInstruction, buildProceedInstruction, buildRenudgeInstruction, buildRecheckRenudgeInstruction, recheckRevision, snapshotOutline, verifyRevision, reviewEnding, buildEndingRenudgeInstruction } from './editor.mjs';
-import { buildFinaleInstruction, buildAfterwordInstruction } from './planner.mjs';
+import { buildFinaleInstruction, buildAfterwordInstruction, wantProxy } from './planner.mjs';
 import { setPending, hasPending, getReviewEvery, setReviewEvery, setReviewDefault, takeResume } from './pending.mjs';
 import { saveSession, removeSession, listSessions } from './sessions.mjs';
 import { recordUsage, currentContextSize } from './usage.mjs';
@@ -174,7 +174,7 @@ export function writeLaunchScript(book, model, instruction, cfg) {
   // 换回来又好了。所以"agy 永远不要代理"这条是对着某一刻的网络状态过拟合，
   // 我 09-13 写死它，结果 09-15 这本书的窗口每一轮都失败、白跑了几个小时。
   // 现在跟其它模型一样【听 cfg.enableProxy 的】；地区被拒那种失败由 CLI_FAIL_PATTERNS 认出来报给作者。
-  const proxy = cfg.enableProxy ? proxyUrl() : '';
+  const proxy = wantProxy(m.id, cfg) ? proxyUrl() : '';
   // 顺手把本书目录写进 agy 的 trustedWorkspaces：这样窗口起来就不会弹"是否信任此项目"，
   // 少一个要 autopilot 去认的弹窗（认弹窗是这套编排里最脆的一环，能绕开就绕开）。
   if (m.id === 'agy') { try { trustAgyWorkspace(book.dir); } catch {} }
@@ -193,6 +193,10 @@ export function writeLaunchScript(book, model, instruction, cfg) {
         `$env:HTTP_PROXY = '${proxy}'`, `$env:HTTPS_PROXY = '${proxy}'`, `$env:ALL_PROXY = '${proxy}'`,
         `$env:http_proxy = '${proxy}'`, `$env:https_proxy = '${proxy}'`, `$env:all_proxy = '${proxy}'`,
         `Write-Host "[proxy] 本会话已启用 ${proxy}" -ForegroundColor DarkGray`,
+      );
+    } else {
+      lines.push(
+        `Remove-Item Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:ALL_PROXY,Env:http_proxy,Env:https_proxy,Env:all_proxy -ErrorAction SilentlyContinue`,
       );
     }
     // 用 resolveBin 而不是 m.bin：agy 这类"装了但不在 PATH"的 CLI，直接写命令名开出来的窗口
@@ -220,6 +224,8 @@ export function writeLaunchScript(book, model, instruction, cfg) {
       lines.push(`export ${v}=${q(proxy)}`);
     }
     lines.push(`echo "[proxy] 本会话已启用 ${proxy}"`);
+  } else {
+    lines.push('unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy');
   }
   lines.push(`echo "[agent] 启动 ${m.bin} ，初始指令已注入…"`,
     `${q(resolveBin(model))} ${seed.map(q).join(' ')}`);

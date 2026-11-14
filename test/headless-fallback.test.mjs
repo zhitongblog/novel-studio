@@ -8,10 +8,10 @@ import assert from 'node:assert';
 import test from 'node:test';
 import { canRunHeadless, getModel } from '../src/models.mjs';
 
-test('agy 跑不了无头——这是换模式的依据，不是 bug', () => {
-  assert.equal(canRunHeadless('agy'), false, 'agy 的凭据不落盘，-p 每次都要人贴授权码');
+test('agy 1.3+ 支持无头 print 模式与窗口模式', () => {
+  assert.equal(canRunHeadless('agy'), true, 'agy 1.3+ 的 -p 已支持静默复用登录态，可无头运行');
   const m = getModel('agy');
-  assert.ok(m && typeof m.seedArgs === 'function', 'agy 仍然是可以开窗口跑的 CLI —— 换的是模式，不是把它禁掉');
+  assert.ok(m && typeof m.seedArgs === 'function', 'agy 仍然是可以开窗口跑的 CLI');
 });
 
 test('本地 CLI（claude/codex/gemini）照旧走无头', () => {

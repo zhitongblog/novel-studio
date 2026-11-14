@@ -135,6 +135,23 @@ fn start_engine(resource_dir: Option<PathBuf>) -> Option<Child> {
     eprintln!("[novel-studio] starting engine: {} {} serve --port {}", node, engine, ENGINE_PORT);
     let mut cmd = Command::new(&node);
     cmd.arg(&engine).arg("serve").arg("--port").arg(ENGINE_PORT);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let cur_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".to_string());
+        let mut extra = vec![
+            "/opt/homebrew/bin".to_string(),
+            "/opt/homebrew/sbin".to_string(),
+            "/usr/local/bin".to_string(),
+        ];
+        if !home.is_empty() {
+            for rel in [".npm-global/bin", ".local/bin", ".agy/bin", ".volta/bin", ".bun/bin"] {
+                extra.push(format!("{}/{}", home, rel));
+            }
+        }
+        extra.push(cur_path);
+        cmd.env("PATH", extra.join(":"));
+    }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);   // 引擎在后台跑，不弹黑色终端
     match cmd.spawn()

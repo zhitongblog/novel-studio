@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { getModel, detectModel, resolveBin } from './models.mjs';
-import { prepareCliInvocation, headlessCwd } from './planner.mjs';
+import { prepareCliInvocation, headlessCwd, wantProxy } from './planner.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { lastChapterTail, recentChapterNames } from './contextpack.mjs';
 import { currentVolume, getBook, bookStats, volumeDirName } from './books.mjs';
@@ -98,9 +98,11 @@ export function runCowrite(model, prompt, cfg, timeoutMs = 300000) {
       `没找到 ${m.bin} 命令——「${m.name}」本机没装或不在 PATH 里。装好后确保终端里能直接跑 ${m.bin}，或改用 API 类模型。`));
   }
   const env = { ...process.env };
-  if (cfg?.enableProxy) {
+  if (wantProxy(model, cfg)) {
     const px = proxyUrl();
-    if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = px; }
+    if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = env.all_proxy = px; }
+  } else {
+    for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) delete env[k];
   }
   const bin = resolveBin(model) || m.bin;
   const cwd = headlessCwd();

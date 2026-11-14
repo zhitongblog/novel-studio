@@ -3,7 +3,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { getModel, detectAll, resolveBin, trustAgyWorkspace } from './models.mjs';
+import { getModel, detectAll, resolveBin, trustAgyWorkspace, ensureAgySettings, normalizeAgyModelId } from './models.mjs';
 import { proxyUrl } from './unterm.mjs';
 import { STYLES, getStyle } from './styles.mjs';
 import { FANQIE_CATEGORIES, categoriesOf, isValidCategory, normalizeChannel } from './categories.mjs';
@@ -103,6 +103,7 @@ const CLI_FAIL_PATTERNS = [
   [/User location is not supported|FAILED_PRECONDITION.*location/i, '该地区不支持（多半是代理出口地区被 Google 拒绝，试试关代理）'],
   // 参数被 shell 拼碎时 agy 的原话，绝不能当成模型的回答洗进书名/简介里
   [/unexpected argument|flag needs an argument|Prompts are read only from/i, '命令行参数没传对'],
+  [/AGY_ERROR|failed to construct executor|plan model not specified/i, 'Antigravity 模型未指定或格式无效'],
 ];
 
 // 判断一次 CLI 输出是不是"跑失败了"。返回 {why, detail} 或 null。
@@ -135,7 +136,8 @@ export function rememberNetMode(id, mode) {
   } catch {}
 }
 // 这次要不要挂代理：优先用记住的模式，其次跟随配置。
-function wantProxy(id, cfg) {
+export function wantProxy(id, cfg) {
+  if (Array.isArray(cfg?.noProxyModels) && cfg.noProxyModels.includes(id)) return false;
   const remembered = getNetMode(id);
   if (remembered) return remembered === 'proxy';
   return !!cfg?.enableProxy;
@@ -150,14 +152,17 @@ function applyProxy(env, on) {
 // ⚠️ 各家 CLI 报同一件事的写法都不一样，别只写一种：
 //   claude 报 `API Error: Unable to connect to API (ConnectionRefused)`——【没有下划线】，
 //   2026-09-20 就因为正则里只有 ECONNREFUSED，这条漏了、翻转重试没被触发，整批零产出。
-const NET_FAIL_RE = /User location is not supported|FAILED_PRECONDITION|ENOTFOUND|ECONNREFUSED|ConnectionRefused|Unable to connect|Connection (refused|reset|timed out)|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)|eligibility check failed|userinfo": EOF|Request not allowed|403/i;
+const NET_FAIL_RE = /User location is not supported|FAILED_PRECONDITION|ENOTFOUND|ECONNREFUSED|ConnectionRefused|Unable to connect|Connection (refused|reset|timed out)|ETIMEDOUT|EAI_AGAIN|network error|proxy .*(failed|error)|eligibility check failed|userinfo": EOF|Request not allowed|403|failed to construct executor|plan model not specified|AGY_ERROR/i;
 export function looksNetworkFailure(out) { return NET_FAIL_RE.test(String(out || '')); }
 
 // 无头调用的专用空工作目录：避免直接拿 os.tmpdir()（Windows 的 %TEMP% 常有数千个临时文件/锁文件，
 // agy 等 CLI 启动时会扫描 cwd 建立工作区索引，拖慢启动甚至踩到锁文件）。
 let _headlessCwd = null;
 export function headlessCwd() {
-  if (_headlessCwd) return _headlessCwd;
+  if (_headlessCwd) {
+    try { ensureAgySettings(_headlessCwd); } catch {}
+    return _headlessCwd;
+  }
   const dir = path.join(os.tmpdir(), 'novel-studio-headless');
   try { fs.mkdirSync(dir, { recursive: true }); trustAgyWorkspace(dir); } catch { return os.tmpdir(); }
   _headlessCwd = dir;
@@ -179,7 +184,7 @@ export function planCliInvocation(useId, prompt, bin, cfg) {
     // agy 的 -p/--print 是【带参数】的（不带就报 flag needs an argument: -p），不像 claude/gemini 从 stdin 读。
     // 照 stdin 那套喂它，只会拿回一屏 usage 帮助——而那玩意会被当成"模型的回答"洗进简介里。
     args = ['--dangerously-skip-permissions'];
-    if (cfg?.agyModel) args.push('--model', String(cfg.agyModel));
+    if (cfg?.agyModel) args.push('--model', normalizeAgyModelId(cfg.agyModel));
     if (cfg?.agyEffort) args.push('--effort', String(cfg.agyEffort));
     args.push('-p', prompt);
     viaStdin = false;
