@@ -1,9 +1,10 @@
 {
   "name": "novel-studio",
-  "version": "1.11.43",
+  "version": "2.0.0",
   "description": "网文工作室 — 自动编排 Unterm + Codex/Claude/Gemini CLI 进行多本长篇网文写作，含自动监控应答（autopilot）。",
   "type": "module",
   "bin": {
+    "storyalter": "bin/novel.mjs",
     "novel": "bin/novel.mjs"
   },
   "scripts": {

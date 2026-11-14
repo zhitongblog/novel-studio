@@ -25,7 +25,7 @@ if (!cmd || cmd === 'tui') {
 } else if (cmd === 'mcp' || cmd === 'mcp-stdio') {
   runMcpServer();
 } else if (cmd === '--version' || cmd === '-v') {
-  console.log('novel-studio 1.1.2');
+  console.log('storyalter 2.0.0');
 } else if (cmd === '--help' || cmd === '-h' || cmd === 'help') {
   printHelp();
 } else {
@@ -34,9 +34,9 @@ if (!cmd || cmd === 'tui') {
 
 function printHelp() {
   console.log(`
-Novel Studio · 网文工作室  (Unterm × Codex/Claude/Gemini)
+StoryAlter · AI 网文工作室 2.0  (Unterm × Codex/Claude/Gemini/Ollama)
 
-用法:
+用法 (storyalter 或 novel 命令均可):
   novel                       启动交互式 TUI（默认）
   novel doctor                环境自检（Unterm / 模型 / 实例 / 代理）
   novel models                查看 codex/claude/gemini 可用性
