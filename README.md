@@ -165,11 +165,39 @@ novel mcp             # 作为 MCP server 运行（见 mcp.json）
 <workspace>/<书名>/
   novel_bible.md            设定圣经
   chapter_index.md          全局章节索引
+  continuity_ledger.md      连贯性台账（含顶部「📌 当前态快照」与下方历史区）
   outlines/卷01分章大纲.md
   chapters/卷01/001章名.txt  仅正文
   reviews/001-005内容自检.md
   AGENTS.md / CLAUDE.md / GEMINI.md   写作规范（codex skill 落地，三模型通用）
-  .studio/launch.ps1        自动生成的启动脚本
+  .studio/
+    alter_persona.json      专属写作分身（Soul 灵魂 / Brain 大脑 / Body 躯体 / Experience 经验）
+    canonical_state.json    五层事实库（book_contract / world / character_runtime / narrative / timeline）
+    state_commits.json      事实库版本化变更记录（高风险变更自动进入待审批队列，支持一键回滚）
+    payoff_ledger.json      结构化伏笔账本（setup → pending_payoff → paid_off + 逾期扫描）
+    repair_tasks.json       局部 Patch 修复任务表（patch_first，带快照与模糊匹配回退）
+    snapshots/              项目/卷/章节三级快照
+```
+
+## 🎭 StoryAlter × Novel Studio 融合能力
+
+Novel Studio 已完整并入 **StoryAlter** 的四大核心系统，并支持从 StoryAlter 官网一键导出「Novel Studio 专属书包（`.novel-studio.zip`）」解压即写：
+
+```powershell
+# 1. 专属写作分身（Soul / Brain / Body）
+novel alter presets                                      # 查看内置分身（热血爽文快刀手 / 诡秘悬疑布局师 / 权谋历史老辣笔 / 烟火年代质感流）
+novel alter set --book "书名" --preset shuangwen_blade   # 绑定分身（写前自动注入上下文包）
+
+# 2. 长篇质量保障 Quality v2（五层事实库 + 伏笔账本 + 局部 Patch 修复 + 健康度）
+novel health --book "书名"                               # 查看项目健康度综合评分（0-100）
+novel state set --book "书名" --layer character_runtime --scope "主角" --json '{"realm":"筑基期"}'
+novel payoffs add --book "书名" --title "黑袍人符纸" --chapter 1 --importance 5
+novel payoffs scan --book "书名" --chapter 35            # 扫描临期/逾期未回收伏笔
+novel patch apply --book "书名" --file "chapters/卷01/001开局.txt" --from "旧句子" --to "新句子"
+
+# 3. 拆书仿写与剧情多分支推演
+novel clone --file sample.txt --title "新书名"           # 拆解样书提炼分身与脱胎换骨新书大纲
+novel simulate --book "书名" --chapters 5                # 基于当前台账与结尾推演 3 条后续剧情分支
 ```
 
 ## 配置（`~/.novel-studio/config.json`）

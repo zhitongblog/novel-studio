@@ -62,6 +62,8 @@ import { generateNameExperiment, readNameExperiment, updateNameExperimentManifes
 import { generateCoverViaChatGPT, grabCoverFromChatGPT, buildChatGptCoverPrompt } from './covergen_web.mjs';
 import { generateCoverViaGemini, grabCoverFromGemini } from './covergen_gemini.mjs';
 import { fetchAllBooksTraffic, fetchBookTrafficDetail, readCachedTrafficOverview, readCachedBookTraffic } from './traffic.mjs';
+import { PRESET_ALTERS, loadBookAlter, saveBookAlter, recordAlterGrowth, buildBookClonePrompt, buildPlotSimulationPrompt, applySimulatedBranchToOutline } from './alter.mjs';
+import { loadCanonicalState, loadStateCommits, commitStateChange, reviewStateCommit, rollbackStateCommit, loadPayoffLedger, addPayoffItem, updatePayoffItem, scanPayoffRisks, syncQualityV2ToLedger, createSnapshot, listSnapshots, restoreSnapshot, loadRepairTasks, createRepairTask, applyRepairTask, rollbackRepairTask, getBookHealthReport } from './quality_v2.mjs';
 
 const UI_DIR = path.resolve(fileURLToPath(import.meta.url), '..', '..', 'ui');
 
@@ -609,6 +611,29 @@ async function api(p, req, res, u) {
       const bookKey = u.searchParams.get('book') || '';
       const cached = bookKey ? readCachedBookTraffic(bookKey) : null;
       return json(res, 200, cached ? { ok: true, cached: true, ...cached } : { ok: true, cached: false });
+    }
+    // —— StoryAlter × Novel Studio 融合 GET 接口 ——
+    if (p === '/api/alter/presets') {
+      return json(res, 200, { ok: true, presets: PRESET_ALTERS });
+    }
+    if (p === '/api/book/alter') {
+      const book = getBook(u.searchParams.get('book') || '');
+      if (!book) return json(res, 404, { error: '找不到书' });
+      return json(res, 200, { ok: true, alter: loadBookAlter(book.dir), presets: PRESET_ALTERS });
+    }
+    if (p === '/api/book/quality-v2') {
+      const book = getBook(u.searchParams.get('book') || '');
+      if (!book) return json(res, 404, { error: '找不到书' });
+      const st = bookStats(book);
+      return json(res, 200, {
+        ok: true,
+        health: getBookHealthReport(book.dir, st.maxChapter || 0),
+        canonicalState: loadCanonicalState(book.dir),
+        commits: loadStateCommits(book.dir).slice(0, 50),
+        payoffs: loadPayoffLedger(book.dir),
+        repairTasks: loadRepairTasks(book.dir).slice(0, 50),
+        snapshots: listSnapshots(book.dir).slice(0, 30),
+      });
     }
     return json(res, 404, { error: 'not found' });
   }
@@ -2474,6 +2499,86 @@ async function api(p, req, res, u) {
     // ⚠️ 保存后回传的也必须遮蔽。以前这里直接返回 updateConfig 的结果，
     // 于是【每次在设置页点保存，所有 API key 都明文回到前端】——GET 那条早就遮了，POST 这条漏了。
     if (p === '/api/config') { const out = updateConfig(body.patch || body); return json(res, 200, maskConfig(out)); }
+    // —— StoryAlter × Novel Studio 融合 POST 接口 ——
+    if (p === '/api/book/alter') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 404, { error: '找不到书' });
+        const alter = saveBookAlter(book.dir, body.alter || body.presetId);
+        return json(res, 200, { ok: true, alter });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/canonical-state') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 404, { error: '找不到书' });
+        const action = body.action || 'commit';
+        let out;
+        if (action === 'review') out = reviewStateCommit(book.dir, body.commitId, body.decision);
+        else if (action === 'rollback') out = rollbackStateCommit(book.dir, body.commitId);
+        else out = commitStateChange(book.dir, body);
+        const st = bookStats(book);
+        syncQualityV2ToLedger(book.dir, st.maxChapter || 0);
+        return json(res, 200, { ok: true, ...out });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/payoffs') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 404, { error: '找不到书' });
+        const action = body.action || 'add';
+        const st = bookStats(book);
+        let out;
+        if (action === 'update') out = { item: updatePayoffItem(book.dir, body.id, body.patch || {}) };
+        else if (action === 'scan') out = scanPayoffRisks(book.dir, st.maxChapter || 0);
+        else out = { item: addPayoffItem(book.dir, body) };
+        syncQualityV2ToLedger(book.dir, st.maxChapter || 0);
+        return json(res, 200, { ok: true, ...out });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/patch-repair') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 404, { error: '找不到书' });
+        const action = body.action || 'create_and_apply';
+        if (action === 'rollback') {
+          const task = rollbackRepairTask(book.dir, body.taskId);
+          return json(res, 200, { ok: true, task });
+        }
+        if (action === 'apply') {
+          const r = applyRepairTask(book.dir, body.taskId);
+          return json(res, r.ok ? 200 : 400, r);
+        }
+        const task = createRepairTask(book.dir, body);
+        if (action === 'create_only') return json(res, 200, { ok: true, task });
+        const r = applyRepairTask(book.dir, task.id);
+        return json(res, r.ok ? 200 : 400, r);
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/snapshot') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 404, { error: '找不到书' });
+        if (body.action === 'restore') {
+          const r = restoreSnapshot(book.dir, body.snapshotId);
+          return json(res, 200, { ok: true, ...r });
+        }
+        const snap = createSnapshot(book.dir, body);
+        return json(res, 200, { ok: true, snapshot: snap });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/book/simulate-plot') {
+      try {
+        const book = getBook(body.book); if (!book) return json(res, 404, { error: '找不到书' });
+        if (body.action === 'apply_branch' && body.branch) {
+          const r = applySimulatedBranchToOutline(book, body.branch, body.volume || currentVolume(book) || 1);
+          return json(res, 200, { ok: true, ...r });
+        }
+        const prompt = buildPlotSimulationPrompt(book, body);
+        return json(res, 200, { ok: true, prompt });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/clone-book') {
+      try {
+        const prompt = buildBookClonePrompt(body);
+        return json(res, 200, { ok: true, prompt });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
     return json(res, 404, { error: 'not found' });
   }
   json(res, 405, { error: 'method not allowed' });

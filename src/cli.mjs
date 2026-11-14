@@ -51,10 +51,17 @@ export async function runCli(argv) {
     case 'stop': return stopCmd(f);
     case 'config': return configCmd(f, cfg);
     case 'traffic': return trafficCmd(f, cfg);
+    case 'alter': return alterCmd(f, cfg);
+    case 'state': return stateCmd(f, cfg);
+    case 'payoffs': return payoffsCmd(f, cfg);
+    case 'patch': return patchCmd(f, cfg);
+    case 'health': return healthCmd(f, cfg);
+    case 'simulate': return simulateCmd(f, cfg);
+    case 'clone': return cloneCmd(f, cfg);
     case 'reference': return reference();
     default:
       console.log('未知命令：' + cmd);
-      console.log('可用：doctor | models | local [import] | book new|list | write | stateless | ledger | sessions | send | watch | stop | config | traffic | reference | mcp | tui');
+      console.log('可用：doctor | models | local [import] | book new|list | write | stateless | ledger | alter | state | payoffs | patch | health | simulate | clone | sessions | send | watch | stop | config | traffic | reference | mcp | tui');
       process.exitCode = 1;
   }
 }
@@ -832,4 +839,170 @@ async function trafficCmd(f, cfg) {
     console.log(`  #${String(idx + 1).padStart(2, '0')}  ${nm}  ${st}  ${ww}  ${uv}  ${act}  ${sh}  ${cr}  ${inc}  ${b.diagnosis?.tier || ''} ${b.diagnosis?.primaryAction || ''}`);
   });
   console.log('');
+}
+
+// ============================================================================
+// StoryAlter × Novel Studio 融合 CLI 子命令
+// ============================================================================
+
+async function alterCmd(f) {
+  const { PRESET_ALTERS, loadBookAlter, saveBookAlter } = await import('./alter.mjs');
+  const sub = f._[0] || 'show';
+  if (sub === 'presets') {
+    console.log(c.bold('\n🎭 内置写作分身预设（Soul / Brain / Body）\n') + hr());
+    for (const [id, p] of Object.entries(PRESET_ALTERS)) {
+      console.log(`  ${c.bold(c.cyan(id))}  — ${p.name}`);
+      console.log(`    灵魂(Soul): ${p.soul.coreValues}｜${p.soul.emotionalTone}`);
+      console.log(`    大脑(Brain): ${p.brain.conflictPattern}`);
+      console.log(`    躯体(Body): ${p.body.proseStyle}`);
+    }
+    console.log('');
+    return;
+  }
+  const b = getBook(f.book || f._[1]);
+  if (!b) { console.log(c.red('请通过 --book <书名/slug> 指定书籍（或运行 novel alter presets 查看预设）')); process.exitCode = 1; return; }
+  if (sub === 'set' || f.preset) {
+    const presetId = f.preset || f._[2];
+    const saved = saveBookAlter(b.dir, presetId);
+    console.log(c.green(`✔ 已为《${b.title}》绑定写作分身：${saved.name} (${saved.id})`));
+    return;
+  }
+  const cur = loadBookAlter(b.dir);
+  if (!cur) {
+    console.log(`《${b.title}》尚未绑定写作分身。可用 \`novel alter set --book "${b.title}" --preset shuangwen_blade\` 绑定。`);
+    return;
+  }
+  console.log(c.bold(`\n🎭 《${b.title}》当前写作分身：${cur.name}\n`) + hr());
+  console.log(JSON.stringify(cur, null, 2));
+}
+
+async function stateCmd(f) {
+  const { loadCanonicalState, commitStateChange, loadStateCommits, reviewStateCommit, rollbackStateCommit, syncQualityV2ToLedger } = await import('./quality_v2.mjs');
+  const b = getBook(f.book || f._[1]);
+  if (!b) { console.log(c.red('请通过 --book <书名/slug> 指定书籍')); process.exitCode = 1; return; }
+  const sub = f._[0] || 'show';
+  if (sub === 'commits') {
+    console.log(JSON.stringify(loadStateCommits(b.dir).slice(0, 20), null, 2));
+    return;
+  }
+  if (sub === 'set' && f.layer && f.json) {
+    const res = commitStateChange(b.dir, {
+      layer: String(f.layer),
+      scopeKey: f.scope ? String(f.scope) : '',
+      patch: JSON.parse(String(f.json)),
+      source: 'user_edit',
+      reason: f.reason ? String(f.reason) : 'CLI update',
+    });
+    syncQualityV2ToLedger(b.dir);
+    console.log(c.green(`✔ 已提交五层事实库更新 (${res.commit.status})`));
+    return;
+  }
+  if (sub === 'approve' && f.id) {
+    const res = reviewStateCommit(b.dir, String(f.id), 'approve');
+    syncQualityV2ToLedger(b.dir);
+    console.log(c.green(`✔ 已批准 commit ${res.commit.id}`));
+    return;
+  }
+  if (sub === 'rollback' && f.id) {
+    const res = rollbackStateCommit(b.dir, String(f.id));
+    syncQualityV2ToLedger(b.dir);
+    console.log(c.yellow(`↩ 已回滚 commit ${res.commit.id}`));
+    return;
+  }
+  console.log(JSON.stringify(loadCanonicalState(b.dir), null, 2));
+}
+
+async function payoffsCmd(f) {
+  const { loadPayoffLedger, addPayoffItem, updatePayoffItem, scanPayoffRisks, syncQualityV2ToLedger } = await import('./quality_v2.mjs');
+  const b = getBook(f.book || f._[1]);
+  if (!b) { console.log(c.red('请通过 --book <书名/slug> 指定书籍')); process.exitCode = 1; return; }
+  const sub = f._[0] || 'list';
+  if (sub === 'add' && f.title) {
+    const item = addPayoffItem(b.dir, {
+      title: f.title,
+      description: f.desc || '',
+      setupChapter: f.chapter ? Number(f.chapter) : null,
+      importance: f.importance ? Number(f.importance) : 3,
+    });
+    syncQualityV2ToLedger(b.dir);
+    console.log(c.green(`✔ 已登记伏笔：${item.title} (${item.id})`));
+    return;
+  }
+  if (sub === 'resolve' && f.id) {
+    const item = updatePayoffItem(b.dir, String(f.id), { state: 'paid_off', payoffChapter: f.chapter ? Number(f.chapter) : null });
+    syncQualityV2ToLedger(b.dir);
+    console.log(c.green(`✔ 已标记伏笔回收：${item.title}`));
+    return;
+  }
+  if (sub === 'scan') {
+    const res = scanPayoffRisks(b.dir, Number(f.chapter || 0));
+    console.log(`扫描完成：共 ${res.total} 条伏笔，临期 ${res.flaggedLate} 条，逾期 ${res.flaggedOverdue} 条。`);
+    return;
+  }
+  console.log(JSON.stringify(loadPayoffLedger(b.dir), null, 2));
+}
+
+async function patchCmd(f) {
+  const { createRepairTask, applyRepairTask, rollbackRepairTask, loadRepairTasks } = await import('./quality_v2.mjs');
+  const b = getBook(f.book || f._[1]);
+  if (!b) { console.log(c.red('请通过 --book <书名/slug> 指定书籍')); process.exitCode = 1; return; }
+  const sub = f._[0] || 'list';
+  if (sub === 'apply' && f.file && f.from !== undefined && f.to !== undefined) {
+    const task = createRepairTask(b.dir, {
+      chapterRelPath: String(f.file),
+      issueSummary: String(f.reason || 'CLI 局部修复'),
+      originalExcerpt: String(f.from),
+      newExcerpt: String(f.to),
+    });
+    const out = applyRepairTask(b.dir, task.id);
+    if (out.ok) console.log(c.green(`✔ 局部 Patch 已应用（模式=${out.matchMode}，快照=${out.snapshotId}）`));
+    else console.log(c.red(`✖ Patch 应用失败：${out.error}`));
+    return;
+  }
+  if (sub === 'rollback' && f.id) {
+    const t = rollbackRepairTask(b.dir, String(f.id));
+    console.log(c.yellow(`↩ 已回滚修复任务 ${t.id}`));
+    return;
+  }
+  console.log(JSON.stringify(loadRepairTasks(b.dir), null, 2));
+}
+
+async function healthCmd(f) {
+  const { getBookHealthReport } = await import('./quality_v2.mjs');
+  const { bookStats } = await import('./books.mjs');
+  const b = getBook(f.book || f._[0]);
+  if (!b) { console.log(c.red('请通过 --book <书名/slug> 指定书籍')); process.exitCode = 1; return; }
+  const st = bookStats(b);
+  const rep = getBookHealthReport(b.dir, st.maxChapter || 0);
+  console.log(c.bold(`\n🩺 《${b.title}》项目健康度（Quality v2）\n`) + hr());
+  console.log(`  综合评分：${c.bold(rep.overallScore + ' / 100')}`);
+  console.log(`  事实库覆盖：${rep.contextLayersFilled} / 5 层｜提交数：${rep.totalCommits}（待审 ${rep.pendingReviewCommits}）`);
+  console.log(`  伏笔账本：共 ${rep.totalPayoffs} 条（待回收 ${rep.pendingPayoffs}｜逾期告警 ${rep.overduePayoffs}｜回收率 ${Math.round(rep.paidOffRate * 100)}%）`);
+  console.log(`  待修复任务：${rep.pendingRepairs}｜最近快照：${rep.lastSnapshotAt || '无'}\n`);
+}
+
+async function simulateCmd(f) {
+  const { buildPlotSimulationPrompt } = await import('./alter.mjs');
+  const b = getBook(f.book || f._[0]);
+  if (!b) { console.log(c.red('请通过 --book <书名/slug> 指定书籍')); process.exitCode = 1; return; }
+  const prompt = buildPlotSimulationPrompt(b, {
+    focusQuestion: f.question ? String(f.question) : '',
+    chapterCount: f.chapters ? Number(f.chapters) : 5,
+  });
+  console.log(prompt);
+}
+
+async function cloneCmd(f) {
+  const { buildBookClonePrompt } = await import('./alter.mjs');
+  const sampleFile = f.file || f._[0];
+  if (!sampleFile || !fs.existsSync(sampleFile)) {
+    console.log(c.red('用法：novel clone --file <样书文本.txt> [--title 新书名] [--genre 题材]'));
+    process.exitCode = 1; return;
+  }
+  const sampleText = fs.readFileSync(sampleFile, 'utf8');
+  console.log(buildBookClonePrompt({
+    sampleText,
+    targetTitle: f.title ? String(f.title) : '',
+    targetGenre: f.genre ? String(f.genre) : '',
+  }));
 }

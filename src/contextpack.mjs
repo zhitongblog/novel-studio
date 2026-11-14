@@ -12,6 +12,8 @@ import { bookStats, currentVolume, chaptersPerVol, plannedTotalChapters } from '
 import { voicePrint } from './voiceprint.mjs';
 import { oralPromptSection } from './oralgate.mjs';
 import { hasStructure, splitLedger } from './ledgersnap.mjs';
+import { buildAlterPromptSection } from './alter.mjs';
+import { assembleQualityV2Context } from './quality_v2.mjs';
 
 function readOr(p, fallback = '') { try { return fs.readFileSync(p, 'utf8'); } catch { return fallback; } }
 function clip(s, max) { s = String(s || ''); return s.length > max ? s.slice(0, max) + `\n…（已截断，完整内容见文件，必要时自行读取）` : s; }
@@ -202,11 +204,19 @@ export function buildBatchPack(book, { count = 3, mode = 'continue' } = {}) {
 
   if (foreshadow) sections.push(`## 全书主线伏笔表\n${clip(foreshadow, 3000)}`);
 
+  // StoryAlter × Novel Studio 融合：注入五层事实库 + 结构化伏笔账本硬约束
+  const qv2 = assembleQualityV2Context(book.dir, { currentChapter: last.num });
+  if (qv2.promptBlock) sections.push(qv2.promptBlock);
+
   sections.push(
     ledgerPack.stale
       ? `## 连贯性台账（continuity_ledger.md ——⚠️ 本书尚未建立当前态快照，下面只是台账尾部节选，不保证覆盖全部当前状态）\n${ledger}`
       : `## 连贯性台账（continuity_ledger.md，这是当前剧情状态的权威快照）\n${ledger}`
   );
+
+  // StoryAlter × Novel Studio 融合：注入专属写作分身（Soul/Brain/Body）
+  const alterSection = buildAlterPromptSection(book.dir);
+  if (alterSection) sections.push(alterSection);
 
   if (review) sections.push(`## 最近一份自检里的未决项（顺手带着，别漏）\n${review}`);
 
