@@ -269,7 +269,88 @@ function renderShelf() {
   const add = el('div', 'book-card new', '＋ 新建书');
   add.addEventListener('click', openModal);
   shelf.appendChild(add);
+  renderCompanionBanner();
   paintShelfStatus();   // 卡片先出来，状态随后补——别让开屏等最慢的那本书
+}
+
+let _companionBannerDismissed = false;
+function renderCompanionBanner() {
+  const box = $('#companionBanner');
+  if (!box) return;
+  const comp = STATE.companions;
+  if (!comp || _companionBannerDismissed) { box.classList.add('hidden'); return; }
+  const ut = comp.unterm || {};
+  const uz = comp.unzoo || {};
+  const needUntermGui = !ut.guiInstalled;
+  const needUnzooInstall = !uz.installed;
+  const needUnzooLaunch = uz.installed && !uz.running;
+  if (!needUntermGui && !needUnzooInstall && !needUnzooLaunch) {
+    box.classList.add('hidden');
+    return;
+  }
+  const items = [];
+  if (needUntermGui) {
+    items.push(`
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 12px;background:rgba(52,214,166,0.07);border:1px solid rgba(52,214,166,0.22);border-radius:8px;">
+        <div style="font-size:12.5px;line-height:1.5;">
+          <b style="color:#34D6A6;">⚡ Unterm Core 无头终端引擎已内置集成</b>
+          <span style="opacity:.85;"> — 无需额外安装即可直接用 CLI 模型立项与后台写作。如需查看实时终端画面或手动接管窗口，可下载可视化客户端：</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <a class="btn tiny primary" href="${esc(ut.downloadUrl || 'https://github.com/zhitongblog/unterm/releases/latest')}" target="_blank" rel="noopener" style="text-decoration:none;">⬇️ 下载 Unterm 客户端</a>
+        </div>
+      </div>
+    `);
+  }
+  if (needUnzooInstall) {
+    items.push(`
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 12px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.28);border-radius:8px;">
+        <div style="font-size:12.5px;line-height:1.5;">
+          <b style="color:#fbbf24;">🌐 未检测到 Unzoo AI 浏览器</b>
+          <span style="opacity:.85;"> — 番茄自动发布、全账号流量留存诊断、多书名实验、拆书对标及免费网页版模型需配合 Unzoo 浏览器使用：</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <a class="btn tiny primary" href="${esc(uz.downloadUrl || 'https://unzoo.ai/download')}" target="_blank" rel="noopener" style="text-decoration:none;">⬇️ 下载 Unzoo 浏览器</a>
+          <a class="btn tiny ghost" href="${esc(uz.githubUrl || 'https://github.com/zhitongblog/unzooai-skills/releases')}" target="_blank" rel="noopener" style="text-decoration:none;">GitHub Releases</a>
+        </div>
+      </div>
+    `);
+  } else if (needUnzooLaunch) {
+    items.push(`
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 12px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.25);border-radius:8px;">
+        <div style="font-size:12.5px;line-height:1.5;">
+          <b style="color:#60a5fa;">🌐 Unzoo 浏览器未运行</b>
+          <span style="opacity:.85;"> — 检测到本机已安装 Unzoo，启动后即可使用番茄自动发布、流量分析与多书名实验：</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn tiny primary" id="btnBannerLaunchUnzoo">🚀 一键启动 Unzoo 浏览器</button>
+        </div>
+      </div>
+    `);
+  }
+  box.className = '';
+  box.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:8px;position:relative;padding-right:28px;">
+      ${items.join('')}
+      <button id="btnDismissCompanion" title="本次隐藏提示" style="position:absolute;right:4px;top:6px;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:4px;">✕</button>
+    </div>
+  `;
+  $('#btnDismissCompanion')?.addEventListener('click', () => {
+    _companionBannerDismissed = true;
+    box.classList.add('hidden');
+  });
+  $('#btnBannerLaunchUnzoo')?.addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true; btn.textContent = '⏳ 正在启动…';
+    try {
+      await api('/api/companion/launch', 'POST', { target: 'unzoo' });
+      toast('已启动 Unzoo 浏览器，等待服务端口就绪…');
+      setTimeout(refresh, 3000);
+    } catch (e) {
+      toast('启动失败：' + e.message);
+      btn.disabled = false; btn.textContent = '🚀 一键启动 Unzoo 浏览器';
+    }
+  });
 }
 
 // 把「在等你做什么」和异常计数补到已经画好的卡片上。
@@ -4715,18 +4796,37 @@ async function renderEnv() {
     <button class="btn ghost" id="envToSettings">⚙️ 去设置</button>`;
   box.appendChild(bar);
   const ok = (b) => b ? '✔ ' : '✖ ';
+  const uz = e.unzoo || {};
   const rows = [
-    ['平台', e.platform],
-    ['Unterm 程序', e.untermExe ? (e.untermExe + (e.untermVersion ? '  [' + e.untermVersion + ']' : '')) : '✖ 未找到（写作功能需要 Unterm）'],
-    ['Unterm CLI', e.untermCli || '✖ 未找到'],
+    ['平台', esc(e.platform)],
+    ['内置终端引擎 (Unterm Core)', e.untermCore
+      ? `✔ 已就绪 (${esc(e.untermCore)})${e.untermEmbedded ? ' · 客户端内置免安装' : ''}`
+      : '✖ 未找到'],
+    ['Unterm 可视化客户端', e.untermExe
+      ? `✔ ${esc(e.untermExe)}${e.untermVersion ? '  [' + esc(e.untermVersion) + ']' : ''} <button class="btn tiny" id="envLaunchUnterm" style="margin-left:8px">🚀 启动窗口</button>`
+      : `⚪ 未安装（不影响后台写作，内置 Core 已接管） <a class="btn tiny primary" href="${esc(e.untermDownloadUrl || 'https://github.com/zhitongblog/unterm/releases/latest')}" target="_blank" rel="noopener" style="margin-left:8px;text-decoration:none;">⬇️ 下载 Unterm</a>`],
+    ['Unterm CLI', esc(e.untermCli || '✖ 未找到')],
+    ['Unzoo AI 浏览器', uz.running
+      ? `✔ 运行中 (${esc(uz.baseUrl || 'http://127.0.0.1:9399')})${uz.appPath ? ' · ' + esc(uz.appPath) : ''}`
+      : (uz.installed
+        ? `⚪ 已安装但未启动 (${esc(uz.appPath)}) <button class="btn tiny primary" id="envLaunchUnzoo" style="margin-left:8px">🚀 一键启动 Unzoo</button>`
+        : `✖ 未安装（番茄发布/流量分析/拆书/网页模型需要） <a class="btn tiny primary" href="${esc(uz.downloadUrl || 'https://unzoo.ai/download')}" target="_blank" rel="noopener" style="margin-left:8px;text-decoration:none;">⬇️ 下载 Unzoo</a> <a class="btn tiny ghost" href="${esc(uz.githubUrl || 'https://github.com/zhitongblog/unzooai-skills/releases')}" target="_blank" rel="noopener" style="margin-left:4px;text-decoration:none;">GitHub</a>`)],
   ];
-  for (const m of e.models) rows.push([m.name, ok(m.available) + (m.path || '未安装')]);
-  rows.push(['运行中实例', e.instances.map(i => `${i.id}(v${i.version})`).join('、') || '无']);
-  rows.push(['代理', e.proxy.enabled ? ('开 · ' + (e.proxy.url || '(未配置)')) : '关']);
-  rows.push(['书库目录', ok(e.workspaceExists) + (e.workspace || '—')]);
-  for (const [k, v] of rows) {
-    const r = el('div', 'env-row'); r.innerHTML = `<span class="k">${esc(k)}</span><span class="v">${esc(v)}</span>`; box.appendChild(r);
+  for (const m of e.models) rows.push([esc(m.name), esc(ok(m.available) + (m.path || '未安装'))]);
+  rows.push(['运行中实例', esc(e.instances.map(i => `${i.id}${i.headless ? '(内置无头)' : ''}(v${i.version})`).join('、') || '无')]);
+  rows.push(['代理', esc(e.proxy.enabled ? ('开 · ' + (e.proxy.url || '(未配置)')) : '关')]);
+  rows.push(['书库目录', esc(ok(e.workspaceExists) + (e.workspace || '—'))]);
+  for (const [k, vHtml] of rows) {
+    const r = el('div', 'env-row'); r.innerHTML = `<span class="k">${k}</span><span class="v">${vHtml}</span>`; box.appendChild(r);
   }
+  $('#envLaunchUnterm')?.addEventListener('click', async () => {
+    try { await api('/api/companion/launch', 'POST', { target: 'unterm' }); toast('已启动 Unterm'); setTimeout(renderEnv, 2000); }
+    catch (err) { toast(err.message); }
+  });
+  $('#envLaunchUnzoo')?.addEventListener('click', async () => {
+    try { await api('/api/companion/launch', 'POST', { target: 'unzoo' }); toast('已启动 Unzoo 浏览器'); setTimeout(renderEnv, 2500); }
+    catch (err) { toast(err.message); }
+  });
   $('#envReload').addEventListener('click', async () => {
     try { const b = await api('/api/bootstrap'); STATE = { ...STATE, ...b }; } catch {}
     renderEnv(); toast('已重新检测');

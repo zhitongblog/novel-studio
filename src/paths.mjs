@@ -40,8 +40,13 @@ const EXE_BY_OS = IS_WIN
     ].filter(Boolean);
 
 const CLI_BY_OS = IS_WIN
-  ? [path.join('C:', 'Program Files', 'Unterm', 'unterm-cli.exe')]
+  ? [
+      path.join(APP_DIR, 'bin', 'unterm-cli.exe'),
+      path.join('C:', 'Program Files', 'Unterm', 'unterm-cli.exe'),
+      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Unterm', 'unterm-cli.exe'),
+    ]
   : [
+      path.join(APP_DIR, 'bin', 'unterm-cli'),
       path.join(HOME, '.local', 'bin', 'unterm-cli'),
       IS_MAC ? '/Applications/Unterm.app/Contents/MacOS/unterm-cli' : null,
       '/opt/homebrew/bin/unterm-cli',
@@ -49,8 +54,24 @@ const CLI_BY_OS = IS_WIN
       '/usr/bin/unterm-cli',
     ].filter(Boolean);
 
+const CORE_BY_OS = IS_WIN
+  ? [
+      path.join(APP_DIR, 'bin', 'unterm-core.exe'),
+      path.join('C:', 'Program Files', 'Unterm', 'unterm-core.exe'),
+      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Unterm', 'unterm-core.exe'),
+    ]
+  : [
+      path.join(APP_DIR, 'bin', 'unterm-core'),
+      path.join(HOME, '.local', 'bin', 'unterm-core'),
+      IS_MAC ? '/Applications/Unterm.app/Contents/MacOS/unterm-core' : null,
+      '/opt/homebrew/bin/unterm-core',
+      '/usr/local/bin/unterm-core',
+      '/usr/bin/unterm-core',
+    ].filter(Boolean);
+
 export const UNTERM_EXE_CANDIDATES = [process.env.UNTERM_EXE, ...EXE_BY_OS].filter(Boolean);
 export const UNTERM_CLI_CANDIDATES = [process.env.UNTERM_CLI, ...CLI_BY_OS].filter(Boolean);
+export const UNTERM_CORE_CANDIDATES = [process.env.UNTERM_CORE, ...CORE_BY_OS].filter(Boolean);
 
 // 默认书库工作区：
 // - 开发期（源码树跑）：APP_DIR 上级 / books（沿用旧行为，便于本地调试）
@@ -75,6 +96,7 @@ export const DEFAULT_WORKSPACE = PACKAGED
 // 常见的 CLI 安装目录兜底（登录 shell 探测失败、或用户 profile 卡住时用）
 function commonBinDirs() {
   const dirs = [
+    path.join(APP_DIR, 'bin'),
     path.join(HOME, '.npm-global', 'bin'),
     path.join(HOME, '.local', 'bin'),
     path.join(HOME, '.bun', 'bin'),

@@ -24,6 +24,11 @@
 // 另注：Unzoo 的报错文案写的是 capability=DesktopObserve（帕斯卡），但 /lease/request 只认
 // desktop_observe（蛇形），照抄报错会被拒——本层负责转换。
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { HOME } from './paths.mjs';
+
 const UNZOO_BASE = process.env.UNZOO_BASE || 'http://127.0.0.1:9399';
 const MCP_PATH = '/api/v1/mcp/tools/call';
 // 单次浏览器调用超时（ms）：页面偶发弹阻塞 alert 或卡死时，eval/点击会永久挂起 →
@@ -31,6 +36,59 @@ const MCP_PATH = '/api/v1/mcp/tools/call';
 export const UNZOO_TIMEOUT_MS = Number(process.env.UNZOO_TIMEOUT_MS) || 45000;
 
 export function unzooBase() { return UNZOO_BASE; }
+
+export function findUnzooApp() {
+  const cands = [
+    process.env.UNZOO_EXE,
+    '/Applications/Unzoo Browser.app',
+    path.join(HOME, 'Applications/Unzoo Browser.app'),
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs/Unzoo Browser/Unzoo.exe') : null,
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Unzoo/Application/unzoo.exe') : null,
+    'C:/Program Files/Unzoo Browser/Unzoo.exe',
+    '/usr/bin/unzoo-browser',
+    path.join(HOME, '.local/bin/unzoo-browser'),
+  ].filter(Boolean);
+  for (const c of cands) {
+    try { if (fs.existsSync(c)) return c; } catch {}
+  }
+  return '';
+}
+
+export async function detectUnzoo() {
+  const appPath = findUnzooApp();
+  let running = false;
+  try {
+    const r = await fetch(`${UNZOO_BASE}/api/v1/profiles`, { signal: AbortSignal.timeout(1200) });
+    running = r.ok || r.status < 500;
+  } catch {
+    running = false;
+  }
+  return {
+    installed: !!appPath || running,
+    running,
+    appPath,
+    baseUrl: UNZOO_BASE,
+    downloadUrl: 'https://unzoo.ai/download',
+    githubUrl: 'https://github.com/zhitongblog/unzooai-skills/releases',
+  };
+}
+
+export async function launchUnzooApp() {
+  const appPath = findUnzooApp();
+  if (!appPath) return { ok: false, error: '未检测到本机安装的 Unzoo Browser，请先下载安装' };
+  try {
+    if (process.platform === 'darwin' && appPath.endsWith('.app')) {
+      const child = spawn('open', ['-a', appPath], { detached: true, stdio: 'ignore' });
+      child.unref();
+    } else {
+      const child = spawn(appPath, [], { detached: true, stdio: 'ignore', windowsHide: false });
+      child.unref();
+    }
+    return { ok: true, appPath };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+}
 
 // 调用一个 Unzoo MCP 工具。返回解包后的载荷：
 //   文本/JSON → 已 parse 的值（或原字符串）；图片 → {image_base64, mimeType}；空 → null。

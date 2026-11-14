@@ -25,3 +25,7 @@ dist/
 
 # SoloMD 预览器的会话缓存
 .solomd/
+
+# 内置打包的 Unterm 二进制（仅进安装包，不进 git 源码库）
+bin/unterm-core*
+bin/unterm-cli*

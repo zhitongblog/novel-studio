@@ -5,7 +5,7 @@ import path from 'node:path';
 import { getModel, detectModel, resolveBin, trustAgyWorkspace } from './models.mjs';
 import {
   ensureProfile, spawnInstance, instancePids, waitForNewInstance, resolveSpawnedInstance,
-  resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow, killBookAgents, processAlive, winShell, destroyPaneViaCli,
+  resolveProxyNode, proxyUrl, findUntermCli, listInstances, killProcess, closeWindow, killBookAgents, processAlive, winShell, destroyPaneViaCli, ensureUntermReady,
 } from './unterm.mjs';
 import { connectInstance } from './mcpclient.mjs';
 import { Autopilot } from './autopilot.mjs';
@@ -298,7 +298,8 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   // 【只开 tab，不开新窗口】作者要求（2026-09-19）：每本书在【已经开着的 Unterm】里开一个 tab，
   // 而不是每次 `unterm-cli start` 甩出一个新窗口——书一多桌面上全是窗口。
   // session.create 在现有窗口里开 tab、直接回 pane id（实测 0.71.8），连"认新 pane"都省了。
-  // 只有机器上一个 Unterm 都没开着时，才起第一个窗口（那时没有窗口可挂 tab）。
+  // 若本机未打开 Unterm.app，则优先自动启动内置无头引擎 unterm-core --headless，使无 GUI 也能直接开写。
+  await ensureUntermReady(onLog);
   let instance = null, mcp = null, paneId = null;
   const opened = await openBookTab({ cwd: book.dir, launchScript: launch, profile: profileName, identifyAs: cfg.untermAgentName });
   if (opened) {

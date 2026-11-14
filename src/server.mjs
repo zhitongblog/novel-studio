@@ -17,7 +17,8 @@ import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, dele
 import { STYLES } from './styles.mjs';
 import { recommendStyle, recommendCategory, recommendFanqieTags } from './planner.mjs';
 import { detectAll, getModel, canRunHeadless } from './models.mjs';
-import { listInstances, instanceIds, findUntermExe, findUntermCli, untermVersion, readProxyConfig, proxyUrlFrom, killBookAgents } from './unterm.mjs';
+import { listInstances, instanceIds, findUntermExe, findUntermCli, findUntermCore, isUntermEmbedded, ensureUntermReady, launchUntermApp, untermVersion, readProxyConfig, proxyUrlFrom, killBookAgents } from './unterm.mjs';
+import { detectUnzoo, launchUnzooApp, findUnzooApp, unzooBase } from './unzoo.mjs';
 import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
 import { connectInstance } from './mcpclient.mjs';
 import { startWriting, snapshotPaneIds } from './writer.mjs';
@@ -176,6 +177,9 @@ export function runServer(port = 8787) {
   });
   server.listen(port, '127.0.0.1', () => {
     console.log(`Novel Studio engine 已启动: http://127.0.0.1:${port}`);
+    // 若本机未打开 Unterm，自动在后台拉起内置无头 unterm-core 守护进程，确保开箱即用
+    setTimeout(() => { ensureUntermReady((e) => console.log('[unterm-core]', e.msg)).catch(() => {}); }, 800);
+    setTimeout(() => { refreshUnzooStatus().catch(() => {}); }, 500);
     setTimeout(reattachLiveSessions, 1500);
     setTimeout(() => { resumeStatelessRuns().catch(e => console.error('[engine] resumeStatelessRuns:', e?.message || e)); }, 2500);
     startOrphanWatchdog();
@@ -570,19 +574,29 @@ async function api(p, req, res, u) {
     if (p === '/api/env') {   // 环境自检：unterm 路径 + 模型 + 代理 + 实例 + 书库（供环境页展示与操作）
       const proxy = readProxyConfig();
       const uexe = findUntermExe() || '';
+      const unzoo = await refreshUnzooStatus();
+      const insts = listInstances().map(i => ({ id: i.id, version: i.version, mcp_port: i.mcp_port, headless: !!i.headless, process_role: i.process_role || 'gui' }));
       return json(res, 200, {
         platform: process.platform,
         untermExe: uexe,
         untermVersion: uexe ? untermVersion(uexe) : '',
         untermCli: findUntermCli() || '',
+        untermCore: findUntermCore() || '',
+        untermEmbedded: isUntermEmbedded(),
+        untermDownloadUrl: 'https://github.com/zhitongblog/unterm/releases/latest',
+        unzoo,
         models: detectAll(),
         // url 要走 proxyUrlFrom：unterm 自己把代理关了的时候，proxy.json 里那行旧地址不算数。
         // 环境页照抄旧地址，会让人以为还挂着 127.0.0.1:7897，而会话里其实一个字节都没走它。
         proxy: { enabled: !!cfg.enableProxy, node: cfg.proxyNode, url: proxyUrlFrom(proxy) },
-        instances: listInstances().map(i => ({ id: i.id, version: i.version, mcp_port: i.mcp_port })),
+        instances: insts,
         workspace: cfg.workspace,
         workspaceExists: (() => { try { return fs.existsSync(cfg.workspace); } catch { return false; } })(),
       });
+    }
+    if (p === '/api/companion/status') {
+      const unzoo = await refreshUnzooStatus();
+      return json(res, 200, { ok: true, companions: buildCompanionsInfo(unzoo) });
     }
     if (p === '/api/books') return json(res, 200, withUsage(listBooksWithStats()));
     if (p === '/api/sessions') return json(res, 200, sessionsInfo());
@@ -2579,6 +2593,25 @@ async function api(p, req, res, u) {
         return json(res, 200, { ok: true, prompt });
       } catch (e) { return json(res, 400, { error: e.message }); }
     }
+    if (p === '/api/companion/launch') {
+      try {
+        const target = body.target || '';
+        if (target === 'unzoo') {
+          const r = await launchUnzooApp();
+          setTimeout(() => { refreshUnzooStatus().catch(() => {}); }, 2000);
+          return json(res, r.ok ? 200 : 400, r);
+        }
+        if (target === 'unterm-headless') {
+          const inst = await ensureUntermReady();
+          return json(res, inst ? 200 : 400, { ok: !!inst, instance: inst });
+        }
+        if (target === 'unterm') {
+          const r = await launchUntermApp();
+          return json(res, r.ok ? 200 : 400, r);
+        }
+        return json(res, 400, { error: '未知组件：' + target });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
     return json(res, 404, { error: 'not found' });
   }
   json(res, 405, { error: 'method not allowed' });
@@ -2658,11 +2691,52 @@ function overhaulApi(book, cfg) {
   };
 }
 
+let _unzooCache = { at: 0, v: null };
+async function refreshUnzooStatus() {
+  const v = await detectUnzoo();
+  _unzooCache = { at: Date.now(), v };
+  return v;
+}
+function getUnzooStatusCached() {
+  if (Date.now() - _unzooCache.at > 15000) {
+    refreshUnzooStatus().catch(() => {});
+  }
+  if (_unzooCache.v) return _unzooCache.v;
+  const appPath = findUnzooApp();
+  return {
+    installed: !!appPath,
+    running: false,
+    appPath,
+    baseUrl: unzooBase(),
+    downloadUrl: 'https://unzoo.ai/download',
+    githubUrl: 'https://github.com/zhitongblog/unzooai-skills/releases',
+  };
+}
+function buildCompanionsInfo(unzooOverride = null) {
+  const uexe = findUntermExe() || '';
+  const ucore = findUntermCore() || '';
+  const insts = listInstances();
+  return {
+    unterm: {
+      guiInstalled: !!uexe,
+      guiExe: uexe,
+      coreBin: ucore,
+      embedded: isUntermEmbedded(),
+      running: insts.length > 0,
+      headlessOnly: insts.length > 0 && insts.every(i => i.id === 'core' || i.headless),
+      downloadUrl: 'https://github.com/zhitongblog/unterm/releases/latest',
+      repoUrl: 'https://github.com/zhitongblog/unterm',
+    },
+    unzoo: unzooOverride || getUnzooStatusCached(),
+  };
+}
+
 function bootstrap(cfg) {
   return {
     config: cfg,
     models: detectAllCached(),
-    instances: listInstances().map(i => ({ id: i.id, version: i.version, mcp_port: i.mcp_port, cwd: i.cwd })),
+    instances: listInstances().map(i => ({ id: i.id, version: i.version, mcp_port: i.mcp_port, cwd: i.cwd, headless: !!i.headless, process_role: i.process_role || 'gui' })),
+    companions: buildCompanionsInfo(),
     books: withUsage(listBooksWithStats()),
     sessions: sessionsInfo(),
     usage: loadUsage(),

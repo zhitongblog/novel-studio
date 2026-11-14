@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  UNTERM_EXE_CANDIDATES, UNTERM_CLI_CANDIDATES,
-  UNTERM_INSTANCES_DIR, UNTERM_PROXY_FILE, CONFIG_FILE,
+  UNTERM_EXE_CANDIDATES, UNTERM_CLI_CANDIDATES, UNTERM_CORE_CANDIDATES,
+  UNTERM_INSTANCES_DIR, UNTERM_PROXY_FILE, CONFIG_FILE, HOME, APP_DIR,
 } from './paths.mjs';
 
 const IS_WIN = process.platform === 'win32';
@@ -85,6 +85,106 @@ export function findUntermCli() {
   return (_cliCache = whichBin(IS_WIN ? 'unterm-cli.exe' : 'unterm-cli') || exe);
 }
 
+// 定位 unterm-core（可独立 --headless 运行的 MCP + PTY 守护进程，StoryAlter 客户端已内置）。
+let _coreCache;
+export function findUntermCore() {
+  if (_coreCache !== undefined) return _coreCache;
+  const ov = cfgOverride('untermCore');
+  if (ov) return (_coreCache = ov);
+  if (process.env.UNTERM_CORE && fs.existsSync(process.env.UNTERM_CORE)) return (_coreCache = process.env.UNTERM_CORE);
+  const exe = findUntermExe();
+  if (exe) {
+    const sib = path.join(path.dirname(exe), IS_WIN ? 'unterm-core.exe' : 'unterm-core');
+    if (fs.existsSync(sib)) return (_coreCache = sib);
+  }
+  for (const c of UNTERM_CORE_CANDIDATES) if (c && fs.existsSync(c)) return (_coreCache = c);
+  return (_coreCache = whichBin(IS_WIN ? 'unterm-core.exe' : 'unterm-core') || null);
+}
+
+export function isUntermEmbedded() {
+  const bundled = path.join(APP_DIR, 'bin', IS_WIN ? 'unterm-core.exe' : 'unterm-core');
+  return fs.existsSync(bundled);
+}
+
+// 读取 unterm-core 的 core.json 服务发现文件（GUI 版或 --headless 版都会写）
+export function readCoreDiscovery() {
+  const dirs = [
+    process.env.UNTERM_STATE_DIR,
+    process.platform === 'darwin' ? path.join(HOME, 'Library/Application Support/Unterm') : null,
+    IS_WIN && process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Unterm') : null,
+    !IS_WIN && process.platform !== 'darwin' ? path.join(process.env.XDG_DATA_HOME || path.join(HOME, '.local/share'), 'Unterm') : null,
+    path.join(HOME, '.unterm'),
+  ].filter(Boolean);
+  for (const d of dirs) {
+    const f = path.join(d, 'core.json');
+    try {
+      if (!fs.existsSync(f)) continue;
+      const c = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (c && c.mcp_port && c.token && (!c.pid || processAlive(c.pid))) {
+        return {
+          id: 'core',
+          mcp_port: c.mcp_port,
+          http_port: c.http_port || null,
+          auth_token: c.token,
+          pid: c.pid,
+          version: c.product_version || '',
+          product_version: c.product_version || '',
+          started_at: c.started_at || '',
+          process_role: 'core',
+          headless: !!c.headless,
+        };
+      }
+    } catch {}
+  }
+  return null;
+}
+
+// 确保本机至少有一个可用的 Unterm MCP 实例（若未打开 Unterm.app，则自动后台拉起内置 unterm-core --headless）
+export async function ensureUntermReady(onLog = () => {}) {
+  const existing = listInstances().find(i => i.mcp_port && (i.pid == null || processAlive(i.pid)));
+  if (existing) return existing;
+  const coreBin = findUntermCore();
+  if (!coreBin) return null;
+  try {
+    onLog({ msg: `未检测到运行中的 Unterm 窗口 → 自动启动内置无头终端引擎 (unterm-core --headless)…` });
+    const child = spawn(coreBin, ['--headless'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+  } catch (e) {
+    onLog({ level: 'warn', msg: `启动 unterm-core --headless 失败：${e.message || e}` });
+    return null;
+  }
+  const deadline = performance.now() + 8000;
+  while (performance.now() < deadline) {
+    const inst = listInstances().find(i => i.mcp_port && (i.pid == null || processAlive(i.pid)));
+    if (inst) return inst;
+    await sleep(300);
+  }
+  return null;
+}
+
+// 一键启动 Unterm 可视化终端（或回退启动内置无头引擎）
+export async function launchUntermApp() {
+  const exe = findUntermExe();
+  if (exe) {
+    if (process.platform === 'darwin' && exe.includes('.app/')) {
+      const appPath = exe.replace(/\/Contents\/MacOS\/.*$/, '');
+      const child = spawn('open', ['-a', appPath], { detached: true, stdio: 'ignore' });
+      child.unref();
+      return { ok: true, mode: 'gui', path: appPath };
+    }
+    const child = spawn(exe, [], { detached: true, stdio: 'ignore', windowsHide: false });
+    child.unref();
+    return { ok: true, mode: 'gui', path: exe };
+  }
+  const inst = await ensureUntermReady();
+  if (inst) return { ok: true, mode: 'headless', instance: inst };
+  return { ok: false, error: '未找到 Unterm 可执行文件' };
+}
+
 // 跨平台结束一个进程，先 TERM 后 KILL。
 // ⚠️【Unterm ≥0.65 的连坐陷阱】0.65 把 MCP/pty 搬进了独立的 unterm-core.exe，而 core 是【最早那个 GUI 窗口的
 // 子进程】、却给全机器所有窗口服务（实测：core pid 的 ParentProcessId = 第一个 unterm.exe）。对 GUI pid 用
@@ -146,8 +246,8 @@ export async function closeWindow({ id, mcp_port, auth_token, pid, pane, tab = f
     finally { try { mcp?.close?.(); } catch {} }
   }
   if (othersLeft) return true;   // pane 已关掉；进程是别人还在用的，留着
-  // tab 模式开的会话（openBookTab）：进程是作者自己的 Unterm，哪怕这是最后一个 tab 也绝不杀。
-  if (tab) return true;
+  // tab 模式开的会话（openBookTab）或共用 core 守护进程：绝不杀进程。
+  if (tab || id === 'core') return true;
   // 杀完【核实一遍】：窗口进程真的不在了才算收窗成功。
   // 不核实的代价见上：一次假成功就多留一个空窗口，而上层还以为收干净了。
   let killed = false;
@@ -277,8 +377,9 @@ export function proxyUrl() { return proxyUrlFrom(readProxyConfig()); }
 
 // —— 实例 ——
 export function listInstances() {
+  let guiList = [];
   try {
-    return fs.readdirSync(UNTERM_INSTANCES_DIR)
+    guiList = fs.readdirSync(UNTERM_INSTANCES_DIR)
       .filter(f => f.endsWith('.json'))
       .map(f => {
         try { return JSON.parse(fs.readFileSync(path.join(UNTERM_INSTANCES_DIR, f), 'utf8')); }
@@ -287,8 +388,11 @@ export function listInstances() {
       .filter(Boolean)
       // Unterm ≥0.65 的注册表里可能出现非 GUI 角色的条目（core / mcp_bridge）——那不是"窗口"，
       // 混进来会被当成孤儿窗口误杀。老版本没这个字段，一律放行。
-      .filter(i => !i.process_role || i.process_role === 'gui');
-  } catch { return []; }
+      .filter(i => (!i.process_role || i.process_role === 'gui') && (i.pid == null || processAlive(i.pid)));
+  } catch {}
+  if (guiList.length > 0) return guiList;
+  const coreInst = readCoreDiscovery();
+  return coreInst ? [coreInst] : [];
 }
 
 // Unterm ≥0.65：所有窗口【共用同一个 mcp_port 和同一个 auth_token】（core 是单例），
