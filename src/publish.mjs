@@ -491,8 +491,24 @@ export async function republishRange(book, { from, to, limit = 0, dates = null, 
     }
   } catch (e) { onLog({ level: 'warn', msg: '读番茄卷列表失败（编辑将只在当前卷查找）：' + (e.message || e) }); }
   // useAI 必须带上：原来这里漏了它，编辑重发一律按「否」申报，书里设了「是」也不管用（2026-10-02 国术实证）
+  const byNum = new Map(chs.map(c => [c.num, c]));
+  const wrappedOnLog = (e) => {
+    try {
+      const m = String(e?.msg || '').match(/✅\s*第\s*(\d+)\s*章编辑成功/);
+      if (m) {
+        const num = parseInt(m[1], 10);
+        const ch = byNum.get(num);
+        if (ch && ch.hash) {
+          const hs = loadPublishedHashes(book);
+          hs[String(num)] = ch.hash;
+          savePublishedHashes(book, hs);
+        }
+      }
+    } catch {}
+    onLog(e);
+  };
   const config = { editMode: true, bookId: pc.bookId, intervalSeconds: pc.intervalSeconds || 3, fanqieVolumes, useAI: pc.useAI !== false };
-  const r = await publishBook({ profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title, chapters: chs, config, onLog });
+  const r = await publishBook({ profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title, chapters: chs, config, onLog: wrappedOnLog });
   // 手工重发过的章要刷新指纹基线（即使中途因每日字数上限中断，也把已成功替换的章写入指纹基线）。
   if (r.ok || (r.published || 0) > 0) {
     const hs = loadPublishedHashes(book);
@@ -659,29 +675,50 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
 
   // ⚠️ publishBook 一次只能跑一种模式（内部按 mode 选 editLoop / publishLoop），【绝不能混批】。
   // 混批时新章会被拿去 editLoop 里"找番茄上已存在的章"，而新章在番茄根本不存在 →
-  // 连续 notFound → 整批卡死、新章一章没发。故拆成两次调用：先 edit 再 new。
+  // 连续 notFound → 整批卡死、新章一章没发。
+  // 🔥 铁律（2026-11-15《甦醒的利维坦》实证）：【必须先发新章(newCh)，再改旧章(editCh)】！
+  //   ① 断更较久的已签约老书，番茄会把所有历史章节的编辑按钮锁成 disabled（报「当前章节不可修改，请联系责编」），
+  //      必须先发/排期新章恢复连载更新状态，历史章节的编辑权限才会自动解锁！
+  //   ② 番茄对单日提交总字数有上限（约 14~15 万字，约 42 章），先发新章能确保不断更排期绝对优先，
+  //      不被大批量旧章覆盖挤占当日字数额度。
   const runs = [];
   let editRes = null, newRes = null;
 
-  if (editCh.length) {
-    onLog({ level: 'act', msg: `edit 覆盖 ${editCh.length} 章（重写 ${rewritten.length}、未记账 ${unbased.length}）：第 ${editCh.map(c => c.num).join('、')} 章` });
-    editRes = await publishBook({
-      profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title,
-      chapters: editCh, config: { ...baseConfig, editMode: true }, onLog,
-    });
-    runs.push(editRes);
-    if (!editRes.ok) {
-      onLog({ level: 'warn', msg: `⚠️ edit 覆盖只完成了 ${editRes.published || 0}/${editCh.length} 章（${editRes.error || editRes.status}）——新章照常继续发` });
-    }
-  }
-
   if (newCh.length) {
-    onLog({ level: 'act', msg: `追加第 ${newCh[0].num}–${newCh[newCh.length - 1].num} 章新章（共 ${newCh.length} 章）…` });
+    onLog({ level: 'act', msg: `追加第 ${newCh[0].num}–${newCh[newCh.length - 1].num} 章新章（共 ${newCh.length} 章，优先发布以激活连载/解锁旧章编辑权限）…` });
     newRes = await publishBook({
       profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title,
       chapters: newCh, config: baseConfig, onLog,
     });
     runs.push(newRes);
+  }
+
+  if (editCh.length) {
+    onLog({ level: 'act', msg: `edit 覆盖 ${editCh.length} 章（重写 ${rewritten.length}、未记账 ${unbased.length}）：第 ${editCh.map(c => c.num).join('、')} 章` });
+    const editByNum = new Map(editCh.map(c => [c.num, c]));
+    const editOnLog = (e) => {
+      try {
+        const m = String(e?.msg || '').match(/✅\s*第\s*(\d+)\s*章编辑成功/);
+        if (m) {
+          const num = parseInt(m[1], 10);
+          const ch = editByNum.get(num);
+          if (ch && ch.hash) {
+            const hs = loadPublishedHashes(book);
+            hs[String(num)] = ch.hash;
+            savePublishedHashes(book, hs);
+          }
+        }
+      } catch {}
+      onLog(e);
+    };
+    editRes = await publishBook({
+      profilePath: pc.profilePath, bookId: pc.bookId, bookName: pc.bookName || book.title,
+      chapters: editCh, config: { ...baseConfig, editMode: true }, onLog: editOnLog,
+    });
+    runs.push(editRes);
+    if (!editRes.ok) {
+      onLog({ level: 'warn', msg: `⚠️ edit 覆盖已完成 ${editRes.published || 0}/${editCh.length} 章（${editRes.error || editRes.status}），已完成的指纹已实时保存，其余待次日额度恢复后续传` });
+    }
   }
 
   // 只把【真的发上去的那些章】计入记账/指纹（publishBook 的 published 是成功计数）

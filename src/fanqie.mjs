@@ -1404,8 +1404,11 @@ class FanqiePublisher {
       }
       const ready = await this.client.evaluate(`(function(){
         if (window.__flushTimers) { try { window.__flushTimers(); } catch (e) {} }
-        const hasModal = !!document.querySelector('.byte-modal, .legacy-global-confirm-modal');
-        if (hasModal) return false;
+        const ms = document.querySelectorAll('.byte-modal, .legacy-global-confirm-modal');
+        for (const m of ms) {
+          const w = m.closest('.byte-modal-wrapper');
+          if (m.offsetParent !== null && (!w || !/hide|exit/i.test(w.className || ''))) return false;
+        }
         const nextBtn = document.querySelector('.auto-editor-next');
         return !!(nextBtn && !nextBtn.disabled);
       })()`);
@@ -1577,8 +1580,10 @@ class FanqiePublisher {
             }
             reclicked++;
             if (reclicked === 1 || reclicked % 6 === 0) {
-              this.log(`等待发布弹窗关闭(${Math.round((Date.now() - submitStart) / 1000)}s)，点击确认发布...`);
-              await this.client.clickButtonByText('确认发布');
+              if (!(await this.isConfirmBtnLoading())) {
+                this.log(`等待发布弹窗关闭(${Math.round((Date.now() - submitStart) / 1000)}s)，点击确认发布...`);
+                await this.client.clickButtonByText('确认发布');
+              }
             }
             await this.client.sleep(1000);
           }
@@ -1959,31 +1964,40 @@ class FanqiePublisher {
 
   async dismissDraftPrompt() {
     const clicked = await this.client.evaluate(`(function(){
+      document.querySelectorAll('[class*="exit"], [class*="leave"], .byte-modal-wrapper-hide').forEach(function(el){
+        try {
+          el.dispatchEvent(new TransitionEvent('transitionend', { bubbles: true }));
+          el.dispatchEvent(new AnimationEvent('animationend', { bubbles: true }));
+        } catch (e) {}
+      });
       const modals = document.querySelectorAll('.byte-modal, .legacy-global-confirm-modal, .publish-modal-confirm, .arco-modal');
       for (const m of modals) {
         if (m.offsetParent === null) continue;
+        const wrap = m.closest('.byte-modal-wrapper, .arco-modal-wrapper');
+        if (wrap && (/hide|exit|leave/i.test(wrap.className || '') || getComputedStyle(wrap).display === 'none')) continue;
+        if (/hide|exit|leave/i.test(m.className || '')) continue;
         const t = m.innerText || '';
         if (t.includes('是否继续编辑') || t.includes('刚刚更新的章节') || t.includes('未保存')) {
           const btns = [...m.querySelectorAll('button')];
           const giveUp = btns.find(b => ['放弃', '取消', '不使用'].includes((b.innerText || '').trim()));
-          if (giveUp) { giveUp.click(); return true; }
+          if (giveUp) {
+            giveUp.click();
+            setTimeout(function(){
+              document.querySelectorAll('[class*="exit"], [class*="leave"], .byte-modal-wrapper-hide').forEach(function(el){
+                try {
+                  el.dispatchEvent(new TransitionEvent('transitionend', { bubbles: true }));
+                  el.dispatchEvent(new AnimationEvent('animationend', { bubbles: true }));
+                } catch (e) {}
+              });
+            }, 50);
+            return true;
+          }
         }
       }
       return false;
     })()`);
     if (clicked) {
       this.log('检测到「是否继续编辑」草稿弹窗，已点击「放弃」并等待关闭...');
-      for (let w = 0; w < 20; w++) {
-        await this.client.sleep(200);
-        const stillOpen = await this.client.evaluate(`(function(){
-          const modals = document.querySelectorAll('.byte-modal, .legacy-global-confirm-modal, .publish-modal-confirm');
-          for (const m of modals) {
-            if (m.offsetParent !== null && (m.innerText || '').includes('是否继续编辑')) return true;
-          }
-          return false;
-        })()`);
-        if (!stillOpen) break;
-      }
       await this.client.sleep(400);
     }
     return !!clicked;
@@ -2005,6 +2019,12 @@ class FanqiePublisher {
     pureTitle = pureTitle.replace(/^\d+(?=[第一二三四五六七八九十一-龥])/, '');
     pureTitle = pureTitle.replace(/^Chapter\s*\d+[\s\.\-\_:：]*/i, '');
     pureTitle = pureTitle.trim();
+    // 番茄限制「第 + 章号 + 纯标题」总计不超过 30 字（3位数章号时纯标题最多 26 字）
+    const maxPureLen = Math.max(15, 29 - String(chapterNumber || '999').length);
+    if (pureTitle.length > maxPureLen) {
+      this.log(`⚠️ 章节标题过长(${pureTitle.length}字 > ${maxPureLen}字上限)，自动精简为 ${maxPureLen} 字...`);
+      pureTitle = pureTitle.slice(0, maxPureLen).replace(/[，、：；,.!！？?—\-]+$/, '');
+    }
 
     this.log(`章节注入 - 编号: ${chapterNumber}, 纯标题: "${pureTitle}"`);
 
@@ -2108,6 +2128,10 @@ class FanqiePublisher {
     let state = await this.nextStepState();
     for (let i = 0; i < 8 && state === 'disabled'; i++) {
       this.log(`"下一步"禁用，触发番茄识别正文(${i + 1})…`);
+      if (i === 2 && this._lastInjectedChapter) {
+        this.log('重新注入标题与正文以恢复按钮状态...');
+        await this.injectContent(this._lastInjectedChapter);
+      }
       await this.nudgeEditor();
       await this.client.sleep(600);
       state = await this.nextStepState();
@@ -2329,6 +2353,16 @@ class FanqiePublisher {
     return await this.client.evaluate(script) || { hasError: false };
   }
 
+  async isConfirmBtnLoading() {
+    return Boolean(await this.client.evaluate(`(function(){
+      var btns = document.querySelectorAll('.arco-modal button, [role="dialog"] button');
+      for (var i = 0; i < btns.length; i++) {
+        if ((btns[i].textContent || '').indexOf('确认发布') >= 0 && (btns[i].className || '').indexOf('loading') >= 0) return true;
+      }
+      return false;
+    })()`).catch(() => false));
+  }
+
   async waitForPublishDialog(maxSeconds = 30) {
     const startTime = Date.now();
     while (Date.now() - startTime < maxSeconds * 1000) {
@@ -2347,7 +2381,7 @@ class FanqiePublisher {
     let retryCount = 0;
     let scheduleEnabled = false;
 
-    const isScheduledMode = (this.config?.scheduledStartDate !== null && this.config?.scheduledStartDate !== undefined)
+    const isScheduledMode = Boolean(this.config?.scheduledStartDate)
                            || this.forcedScheduleMode;
 
     // Step 1: 选择 AI 选项（是/否）—— 定位单选项后坐标真实点击
@@ -2403,14 +2437,35 @@ class FanqiePublisher {
       return h.includes('chapter-manage') || (h.includes('/main/writer/') && !this.isEditPage(h));
     };
 
+    const isConfirmBtnLoading = async () => {
+      return Boolean(await this.client.evaluate(`(function(){
+        var btns = document.querySelectorAll('.arco-modal button, [role="dialog"] button');
+        for (var i = 0; i < btns.length; i++) {
+          if ((btns[i].textContent || '').indexOf('确认发布') >= 0 && (btns[i].className || '').indexOf('loading') >= 0) return true;
+        }
+        return false;
+      })()`).catch(() => false));
+    };
+
     const waitModalClose = async (maxMs = 5000) => {
-      const steps = Math.max(1, Math.ceil(maxMs / 500));
-      for (let i = 0; i < steps; i++) {
+      const deadline = Date.now() + maxMs;
+      while (Date.now() < deadline) {
         await this.client.sleep(500);
         if (await hasLeftPublishPage()) return true;
         if (await this.client.pageContains(checkingKeywords)) return false;
         const blk = await this.checkBlockingErrors().catch(() => null);
         if (blk && blk.hasError) return false;
+        // 若确认发布按钮处于 loading 状态（后台正在跑 45s 风险检测/入库），自动延长等待至 loading 结束
+        if (await isConfirmBtnLoading()) {
+          const loadStart = Date.now();
+          while (Date.now() - loadStart < 60000) {
+            await this.client.sleep(1000);
+            if (await hasLeftPublishPage()) return true;
+            if (!(await isConfirmBtnLoading())) break;
+          }
+          await this.client.sleep(800);
+          if (await hasLeftPublishPage()) return true;
+        }
       }
       return await hasLeftPublishPage();
     };
@@ -2558,7 +2613,7 @@ class FanqiePublisher {
       }
 
       const toastMsg = await this.client.evaluate(`(function(){
-        var ms = document.querySelectorAll('.arco-message, .byte-message, [class*="arco-message"]');
+        var ms = document.querySelectorAll('.arco-message, .byte-message');
         if (!ms.length) return '';
         var texts = [];
         ms.forEach(function(m){
@@ -3128,17 +3183,27 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
           window.__ns_edit_map = 'PENDING';
           var api = 'https://fanqienovel.com/api/author';
           var cm = 'aid=2503&app_name=muye_novel';
-          fetch(api + '/volume/volume_list/v1?' + cm + '&book_id=${bookId}', {credentials:'include'})
-            .then(function(r){return r.json();})
+          function getJson(url) {
+            return new Promise(function(resolve, reject) {
+              var xhr = new XMLHttpRequest();
+              xhr.open('GET', url, true);
+              xhr.withCredentials = true;
+              xhr.onload = function() {
+                try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+              };
+              xhr.onerror = reject;
+              xhr.send();
+            });
+          }
+          getJson(api + '/volume/volume_list/v1?' + cm + '&book_id=${bookId}')
             .then(function(vj){
               var vols = (vj && vj.data && (vj.data.volume_list || vj.data.list || vj.data.volumes)) || [];
               var tasks = [];
               vols.forEach(function(v){
-                var pages = Math.max(1, Math.ceil((v.item_count || 100) / 100));
+                var pages = Math.max(1, Math.ceil((v.item_count || 250) / 100));
                 for (var p = 0; p < pages; p++) {
                   tasks.push(
-                    fetch(api + '/chapter/chapter_list/v1?' + cm + '&book_id=${bookId}&volume_id=' + v.volume_id + '&page_index=' + p + '&page_count=100&status=0', {credentials:'include'})
-                      .then(function(r){return r.json();})
+                    getJson(api + '/chapter/chapter_list/v1?' + cm + '&book_id=${bookId}&volume_id=' + v.volume_id + '&page_index=' + p + '&page_count=100&status=0')
                       .then(function(cj){return (cj && cj.data && (cj.data.item_list || cj.data.chapter_list || cj.data.list || cj.data.items)) || [];})
                   );
                 }
