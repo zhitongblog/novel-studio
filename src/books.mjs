@@ -125,15 +125,16 @@ export function setBookModel(slugOrId, model) {
   return b;
 }
 
-// 设置一本书的连载状态：'连载中'(默认/清空) | '收尾中' | '已完本'。已完本时记 completedAt。
+// 设置一本书的连载状态：'连载中'(默认/清空) | '收尾中' | '已完本' | '已放弃'。已完本时记 completedAt，已放弃时记 abandonedAt。
 export function setBookStatus(slugOrId, status) {
   const b = getBook(slugOrId);
   if (!b) throw new Error('找不到书：' + slugOrId);
-  const allowed = ['连载中', '收尾中', '已完本'];
+  const allowed = ['连载中', '收尾中', '已完本', '已放弃'];
   if (!allowed.includes(status)) throw new Error('未知状态：' + status);
   b.status = status;
   if (status === '已完本') b.completedAt = new Date().toISOString();
-  if (status === '连载中') { delete b.completedAt; }
+  if (status === '已放弃') b.abandonedAt = new Date().toISOString();
+  if (status === '连载中') { delete b.completedAt; delete b.abandonedAt; }
   upsertBook(b);
   return b;
 }

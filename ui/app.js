@@ -239,7 +239,7 @@ function renderShelf() {
       <div class="card-progress">${esc(progress)}</div>
       <div class="meta">
         <span class="pill model">${esc(modelName(b.model))}</span>
-        ${b.status === '已完本' ? '<span class="pill done">✅ 已完本</span>' : b.status === '收尾中' ? '<span class="pill finale">🏁 收尾中</span>' : ''}
+        ${b.status === '已完本' ? '<span class="pill done">✅ 已完本</span>' : b.status === '收尾中' ? '<span class="pill finale">🏁 收尾中</span>' : b.status === '已放弃' ? '<span class="pill warn">🚫 已放弃</span>' : ''}
         ${b.fanqie?.status ? `<span class="pill ${b.fanqie.status === '已完结' ? 'done' : (b.status === '已完本' && b.fanqie.status !== '已完结' ? 'warn' : '')}" title="番茄平台状态">番茄·${esc(b.fanqie.status)}</span>` : ''}
         ${PUBLISHING.has(b.slug) ? '<span class="pill publishing" data-act="pubbadge" title="正在发布到番茄，点我看进度">📤 发布中</span>' : ''}
         <span class="pill cadence hidden" data-act="cadence" title="番茄满 7 天没有新章上线就暂停推荐"></span>

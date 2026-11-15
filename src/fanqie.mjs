@@ -3178,33 +3178,27 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
       await client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}&${volumeIdx}`);
       await client.sleep(2000);
       // 预取全书章节 item_id 映射，使 editChapter 直接导航进编辑页，免去逐章翻页搜索
+      const itemCachePath = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '.cache-items-' + bookId + '.json');
+      let cachedMap = {};
+      try { cachedMap = JSON.parse(fs.readFileSync(itemCachePath, 'utf8')) || {}; } catch {}
       try {
         await client.evaluate(`(function(){
           window.__ns_edit_map = 'PENDING';
           var api = 'https://fanqienovel.com/api/author';
           var cm = 'aid=2503&app_name=muye_novel';
-          function getJson(url) {
-            return new Promise(function(resolve, reject) {
-              var xhr = new XMLHttpRequest();
-              xhr.open('GET', url, true);
-              xhr.withCredentials = true;
-              xhr.onload = function() {
-                try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
-              };
-              xhr.onerror = reject;
-              xhr.send();
-            });
-          }
-          getJson(api + '/volume/volume_list/v1?' + cm + '&book_id=${bookId}')
+          fetch(api + '/volume/volume_list/v1?' + cm + '&book_id=${bookId}', {credentials:'include'})
+            .then(function(r){return r.json();})
             .then(function(vj){
               var vols = (vj && vj.data && (vj.data.volume_list || vj.data.list || vj.data.volumes)) || [];
               var tasks = [];
               vols.forEach(function(v){
-                var pages = Math.max(1, Math.ceil((v.item_count || 250) / 100));
+                var pages = Math.max(3, Math.ceil((v.item_count || 300) / 100));
                 for (var p = 0; p < pages; p++) {
                   tasks.push(
-                    getJson(api + '/chapter/chapter_list/v1?' + cm + '&book_id=${bookId}&volume_id=' + v.volume_id + '&page_index=' + p + '&page_count=100&status=0')
+                    fetch(api + '/chapter/chapter_list/v1?' + cm + '&book_id=${bookId}&volume_id=' + v.volume_id + '&page_index=' + p + '&page_count=100&status=0', {credentials:'include'})
+                      .then(function(r){return r.json();})
                       .then(function(cj){return (cj && cj.data && (cj.data.item_list || cj.data.chapter_list || cj.data.list || cj.data.items)) || [];})
+                      .catch(function(){return [];})
                   );
                 }
               });
@@ -3223,21 +3217,34 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
             .catch(function(){ window.__ns_edit_map = '{}'; });
           return 1;
         })()`);
+        let applied = false;
+        const applyMap = (mp) => {
+          let matchedCount = 0;
+          for (const m of mapped) {
+            if (!m.itemId && m.chapterNumber && mp[m.chapterNumber]) {
+              m.itemId = mp[m.chapterNumber];
+              matchedCount++;
+            }
+          }
+          if (matchedCount > 0) log(`⚡ 已预取 ${matchedCount}/${mapped.length} 章的直达 item_id`, 'info');
+          applied = true;
+        };
         for (let w = 0; w < 45; w++) {
           await client.sleep(300);
           const raw = await client.evaluate(`window.__ns_edit_map`);
           if (raw && raw !== 'PENDING') {
-            const mp = JSON.parse(raw);
-            let matchedCount = 0;
-            for (const m of mapped) {
-              if (!m.itemId && m.chapterNumber && mp[m.chapterNumber]) {
-                m.itemId = mp[m.chapterNumber];
-                matchedCount++;
-              }
+            let fetchedMp = {};
+            try { fetchedMp = JSON.parse(raw) || {}; } catch {}
+            const mp = { ...cachedMap, ...fetchedMp };
+            if (Object.keys(mp).length > 0) {
+              try { fs.writeFileSync(itemCachePath, JSON.stringify(mp), 'utf8'); } catch {}
             }
-            if (matchedCount > 0) log(`⚡ 已预取 ${matchedCount}/${mapped.length} 章的直达 item_id`, 'info');
+            applyMap(mp);
             break;
           }
+        }
+        if (!applied && Object.keys(cachedMap).length > 0) {
+          applyMap(cachedMap);
         }
       } catch (e) {}
     } else {
