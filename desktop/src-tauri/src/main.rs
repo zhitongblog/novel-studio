@@ -117,7 +117,7 @@ fn kill_stale_engine() {
     {
         let _ = Command::new("sh")
             .arg("-c")
-            .arg(format!("lsof -ti tcp:{} | xargs -r kill -9", ENGINE_PORT))
+            .arg(format!("PATH=\"/usr/sbin:/usr/bin:/bin:$PATH\" lsof -ti tcp:{} | xargs kill -9 2>/dev/null || true", ENGINE_PORT))
             .status();
         std::thread::sleep(std::time::Duration::from_millis(800));
     }

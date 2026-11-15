@@ -30,6 +30,7 @@
     "resources": {
       "../../bin": "engine/bin",
       "../../src": "engine/src",
+      "../../ui": "engine/ui",
       "../../package.json": "engine/package.json",
       "../../mcp.json": "engine/mcp.json"
     },
