@@ -124,7 +124,8 @@ function detectCliFailure(raw, prompt) {
 // 09-15 同一台机器正好反过来（直连 EOF、代理正常），那本书的窗口每轮都失败、几个小时白跑。
 // 代理是节点轮换的，"哪种配置能用"本来就会变，写死必然过期。
 // 所以：按模型记住上次成功的模式，失败了就翻过来再试一次，并把结果记下来。
-const NETMODE_FILE = path.join(os.homedir(), '.novel-studio', 'netmode.json');
+import { CONFIG_DIR } from './paths.mjs';
+const NETMODE_FILE = path.join(CONFIG_DIR, 'netmode.json');
 function readNetMode() { try { return JSON.parse(fs.readFileSync(NETMODE_FILE, 'utf8')) || {}; } catch { return {}; } }
 export function getNetMode(id) { const v = readNetMode()[id]; return v === 'proxy' || v === 'direct' ? v : null; }
 export function rememberNetMode(id, mode) {
@@ -142,9 +143,9 @@ export function wantProxy(id, cfg) {
   if (remembered) return remembered === 'proxy';
   return !!cfg?.enableProxy;
 }
-function applyProxy(env, on) {
+function applyProxy(env, on, cfg) {
   const keys = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
-  if (on) { const px = proxyUrl(); if (px) for (const k of keys) env[k] = px; }
+  if (on) { const px = proxyUrl(cfg); if (px) for (const k of keys) env[k] = px; }
   else for (const k of keys) delete env[k];
   return env;
 }
@@ -238,7 +239,7 @@ export function runModelOnce(model, prompt, cfg, timeoutMs = 120000) {
 
   // 跑一次（proxyOn 决定挂不挂代理）
   const once = (proxyOn) => {
-    const env = applyProxy({ ...process.env }, proxyOn);
+    const env = applyProxy({ ...process.env }, proxyOn, cfg);
     const r = spawnSync(bin, args, {
       encoding: 'utf8', timeout: timeoutMs,
       ...(viaStdin ? { input: prompt } : { stdio: ['ignore', 'pipe', 'pipe'] }),

@@ -1,0 +1,24 @@
+{
+  "comfyRoot": "C:/AI/StoryAlter/ComfyUI",
+  "comfyUrl": "http://127.0.0.1:8188",
+  "ttsRoot": "D:/AI/codex-tools/index-tts",
+  "modelFamily": "minimax-h3",
+  "modelSource": "modelscope:Comfy-Org/MiniMax-H3",
+  "modelRoot": "D:/AI/models/minimax-h3",
+  "workflowTemplate": "video_minimax_h3_i2v",
+  "models": {
+    "diffusion_models": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "text_encoders": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    "vae": "minimax_h3_video_vae_int8_convrot.safetensors",
+    "loras": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
+  },
+  "audioVae": "minimax_h3_audio_vae_fp32.safetensors",
+  "generation": {
+    "width": 432,
+    "height": 768,
+    "frames": 49,
+    "fps": 24,
+    "steps": 4,
+    "concurrency": 1
+  }
+}

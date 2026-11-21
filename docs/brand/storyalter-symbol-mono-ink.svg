@@ -1,0 +1,12 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="240 268 544 512" width="544" height="512">
+  <title>StoryAlter symbol (monochrome, ink)</title>
+  <!-- 单色版：fill/stroke 用 #15151F，嵌入时由外部 color 决定（深底用白，浅底用墨色 #15151F） -->
+  <defs>
+    <path id="sa-page" d="M 300 318 C 360 296, 420 292, 452 300 C 470 318, 474 344, 472 372 C 471 392, 476 408, 484 424 C 494 444, 504 458, 506 468 C 507 477, 499 482, 489 485 C 495 494, 494 503, 487 509 C 494 516, 493 526, 485 532 C 491 541, 490 551, 482 560 C 474 570, 461 576, 456 586 C 452 606, 456 632, 470 660 C 482 684, 496 700, 506 712 C 452 690, 380 686, 300 704 Z"/>
+  </defs>
+  <g fill="#15151F">
+    <path d="M 272 344 L 272 728 C 360 708, 440 712, 512 748 C 584 712, 664 708, 752 728 L 752 344" fill="none" stroke="#15151F" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+    <use href="#sa-page"/>
+    <use href="#sa-page" transform="translate(1024 0) scale(-1 1)"/>
+  </g>
+</svg>

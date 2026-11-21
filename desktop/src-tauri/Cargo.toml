@@ -1,7 +1,7 @@
 [package]
-name = "novel-studio-desktop"
-version = "2.0.0"
-description = "Novel Studio - 网文工作室桌面端"
+name = "storyalter-desktop"
+version = "2.1.0"
+description = "StoryAlter - AI 故事工作室桌面端"
 edition = "2021"
 
 [build-dependencies]

@@ -174,7 +174,7 @@ export function writeLaunchScript(book, model, instruction, cfg) {
   // 换回来又好了。所以"agy 永远不要代理"这条是对着某一刻的网络状态过拟合，
   // 我 09-13 写死它，结果 09-15 这本书的窗口每一轮都失败、白跑了几个小时。
   // 现在跟其它模型一样【听 cfg.enableProxy 的】；地区被拒那种失败由 CLI_FAIL_PATTERNS 认出来报给作者。
-  const proxy = wantProxy(m.id, cfg) ? proxyUrl() : '';
+  const proxy = wantProxy(m.id, cfg) ? proxyUrl(cfg) : '';
   // 顺手把本书目录写进 agy 的 trustedWorkspaces：这样窗口起来就不会弹"是否信任此项目"，
   // 少一个要 autopilot 去认的弹窗（认弹窗是这套编排里最脆的一环，能绕开就绕开）。
   if (m.id === 'agy') { try { trustAgyWorkspace(book.dir); } catch {} }
@@ -304,8 +304,11 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   const opened = await openBookTab({ cwd: book.dir, launchScript: launch, profile: profileName, identifyAs: cfg.untermAgentName });
   if (opened) {
     ({ instance, mcp, paneId } = opened);
-    onLog({ msg: `已在现有 Unterm（${instance.id}，v${instance.version}）里开 tab：pane ${paneId}` });
+    onLog({ msg: `已在内置终端内核（${instance.id}，v${instance.version}）创建后台会话：pane ${paneId}` });
   } else {
+    if (cfg.preferHeadlessCore !== false) {
+      throw new Error('未能连接内置无头终端内核 (unterm-core --headless)，且已禁用独立 Unterm 弹窗。请检查 bin/unterm-core.exe 或在「环境」页查看内核状态。');
+    }
     const beforePids = instancePids();
     // 认 pane 的第一判据：spawn 之后【新出现】的那个 pane（0.65 起 pane 编号是全机器共用的）
     const beforePaneIds = await snapshotPaneIds();
@@ -331,7 +334,7 @@ export async function startWriting({ book, model, instruction, cfg, onLog = () =
   }
 
   // 代理：仅靠 launch.ps1 注入的会话级环境变量，不改 unterm 全局配置
-  if (cfg.enableProxy) onLog({ msg: `代理已为会话注入环境变量：${proxyUrl() || '(未配置)'}` });
+  if (cfg.enableProxy) onLog({ msg: `代理已为会话注入环境变量：${proxyUrl(cfg) || '(未配置)'}` });
   onLog({ msg: `agent pane id=${paneId}` });
 
   // 登记为运行中会话，供 send / watch / stop（任意进程）连接

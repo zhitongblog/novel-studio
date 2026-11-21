@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "StoryAlter",
-  "version": "2.0.0",
-  "identifier": "com.novelstudio.app",
+  "version": "2.1.0",
+  "identifier": "com.storyalter.desktop",
   "build": {
     "frontendDist": "../../ui"
   },
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "StoryAlter · AI 网文工作室",
+        "title": "StoryAlter · AI 故事工作室",
         "width": 1280,
         "height": 820,
         "minWidth": 940,

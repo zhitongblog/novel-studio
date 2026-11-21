@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>StoryAlter · AI 网文工作室</title>
+  <title>StoryAlter · AI 故事工作室</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -12,24 +13,21 @@
     <aside class="sidebar">
       <div class="brand">
         <div class="logo" aria-label="StoryAlter">
-          <svg viewBox="0 0 44 44" width="40" height="40" role="img">
+          <!-- 品牌标识（小尺寸版）：书页 = 两张相对的侧脸，作者（青）与 AI 分身（紫）。源文件见 docs/brand/ -->
+          <svg viewBox="0 0 64 64" width="40" height="40" role="img">
             <defs>
-              <linearGradient id="nsG" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0" stop-color="#34D6A6"/>
-                <stop offset="1" stop-color="#8B7CFF"/>
-              </linearGradient>
+              <linearGradient id="saL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1FD1B2"/><stop offset="1" stop-color="#3AA6C8"/></linearGradient>
+              <linearGradient id="saR" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7D8BFF"/><stop offset="1" stop-color="#9A6BFF"/></linearGradient>
+              <path id="saP" d="M 9 16 C 15 14, 23 13, 27 14 C 29 17, 29.4 21, 29 24.5 C 29.2 26.5, 30.6 28.4, 32 30.6 C 31.6 31.6, 30.6 32, 29.6 32.3 C 30.4 33.2, 30.4 34.2, 29.8 35 C 30.2 36, 29.8 37.4, 28.6 38.4 C 27.6 39.4, 27 40.4, 27 42.5 C 27 45.5, 28.6 48.4, 31.5 51 C 25 49.5, 16 49.5, 9 51 Z"/>
             </defs>
-            <rect x="3" y="3" width="38" height="38" rx="11" fill="url(#nsG)"/>
-            <g fill="none" stroke="#141019" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M22 15 C18.5 12.8 13.5 12.8 10 14.6 L10 30 C13.5 28.2 18.5 28.2 22 30"/>
-              <path d="M22 15 C25.5 12.8 30.5 12.8 34 14.6 L34 30 C30.5 28.2 25.5 28.2 22 30"/>
-              <line x1="22" y1="15" x2="22" y2="30"/>
-            </g>
+            <rect width="64" height="64" rx="14" fill="#15151F"/>
+            <use href="#saP" fill="url(#saL)"/>
+            <use href="#saP" fill="url(#saR)" transform="translate(64 0) scale(-1 1)"/>
           </svg>
         </div>
         <div>
           <div class="brand-title">StoryAlter</div>
-          <div class="brand-sub">AI 网文工作室</div>
+          <div class="brand-sub">AI 故事工作室</div>
         </div>
       </div>
       <nav class="nav">
@@ -72,6 +70,7 @@
           <button class="btn ghost icon" id="btnRename" title="改书名（全书生效）">✏️</button>
           <button class="btn ghost icon" id="btnReadFromWrite" title="阅读已写内容">📖</button>
           <button class="btn ghost icon" id="btnOpenDir" title="打开书目录">📂</button>
+          <button class="btn" id="btnVideoTop" title="改编视频（短剧连载 / 卷预告）">🎬 改编视频</button>
           <div class="grow"></div>
           <span class="badge" id="writeTokens">tokens 0</span>
           <span class="badge" id="writeStatus">未开始</span>
@@ -157,6 +156,7 @@
                   <button class="btn" id="btnStyle">🎨 文风</button>
                   <button class="btn" id="btnRefStyle" title="对标书风格学习：贴一段对标作品正文，AI 分析出文风指南，保存后写作自动照这个腔写。只学腔、不抄内容。">📚 对标别人的书</button>
                   <button class="btn" id="btnCover">🖼️ 封面</button>
+                  <button class="btn" id="btnVideo" title="把长篇按剧情弧改编成短剧连载或卷预告，在本机 ComfyUI (H3) 渲染成片">🎬 改编视频</button>
                   <button class="btn" id="btnNameExpFromWrite" title="为本书生成 5 组候选书名+专属书封，查重并一键推送到番茄「多书名实验」">🧪 多书名实验</button>
                 </div>
                 <div class="synopsis-box">
@@ -251,10 +251,20 @@
           <!-- 镜像与日志：只在写作时才有内容，所以收在底部、默认折叠；
                开始写作时由 app.js 自动展开（setMirrorLive）。 -->
           <details class="wb-mirror" id="mirrorPanel">
-            <summary><span class="dot live" id="mirrorDot"></span> 实时镜像 · Unterm 窗口<span class="mx-hint">写作开始时自动展开</span></summary>
+            <summary><span class="dot live" id="mirrorDot"></span> 内置终端 · 实时交互<span class="mx-hint">后台运行，无需独立终端窗口</span></summary>
             <div class="mirror-wrap">
-              <pre class="mirror" id="mirror">（开始写作后，这里实时显示 AI 写作过程）</pre>
+              <pre class="mirror" id="mirror">（开始写作后，这里实时显示 AI 终端画面，可直接按键交互）</pre>
               <div class="log-feed" id="logFeed"></div>
+            </div>
+            <div class="term-bar" id="mirrorTermBar" style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">
+              <input id="mirrorInput" type="text" placeholder="向终端输入文本或命令（回车发送）…" style="flex:1;min-width:180px" />
+              <button class="btn tiny primary" id="mirrorSendBtn" type="button">发送</button>
+              <button class="btn tiny" data-tkey="\r" type="button" title="发送回车">↵ 回车</button>
+              <button class="btn tiny" data-tkey="y\r" type="button" title="输入 y 并回车">y</button>
+              <button class="btn tiny" data-tkey="\x1b[A" type="button" title="上">↑</button>
+              <button class="btn tiny" data-tkey="\x1b[B" type="button" title="下">↓</button>
+              <button class="btn tiny" data-tkey="\x1b" type="button" title="Esc">Esc</button>
+              <button class="btn tiny" data-tkey="\x03" type="button" title="中断 Ctrl+C">Ctrl+C</button>
             </div>
           </details>
         </div>
@@ -309,6 +319,68 @@
       <section class="view hidden" id="view-env">
         <header class="view-head"><h1>环境自检</h1></header>
         <div class="env" id="env"></div>
+      </section>
+
+      <!-- 改编视频 · 全屏 4 步导演工作台 -->
+      <section class="view hidden" id="view-video">
+        <header class="view-head" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:10px">
+            <button class="btn ghost" id="vidClose">← 返回本书</button>
+            <h1 id="vidBookTitle" style="margin:0">🎬 AI 导演工作台</h1>
+          </div>
+          <div class="btn-row" id="vidStepTabs" style="gap:6px">
+            <button class="btn primary" data-vstep="assets" id="vidTabAssets">① 🎭 资产定妆</button>
+            <button class="btn" data-vstep="plan" id="vidTabPlan">② 📜 分集剧本</button>
+            <button class="btn" data-vstep="board" id="vidTabBoard">③ 🎬 分镜与关键帧</button>
+            <button class="btn" data-vstep="export" id="vidTabExport">④ 🎞️ 合成与交付</button>
+          </div>
+        </header>
+
+        <div id="vidPreflight" class="hidden" style="margin:0 0 12px;padding:10px 12px;border-radius:8px;font-size:12px;line-height:1.5"></div>
+        <div id="vidStatus" class="modal-hint" style="margin-bottom:8px"></div>
+        <div class="modal-err" id="vidErr" style="margin-bottom:8px"></div>
+
+        <!-- Step 1: 资产定妆台 -->
+        <div id="vidPaneAssets" class="vid-step-pane">
+          <div id="vidBiblePane" style="padding:14px;border:1px solid var(--border,#2c2a3a);border-radius:10px"></div>
+        </div>
+
+        <!-- Step 2: 剧本与分集 -->
+        <div id="vidPanePlan" class="vid-step-pane hidden">
+          <div class="btn-row" style="align-items:flex-end;gap:10px;flex-wrap:wrap;padding:12px;border:1px solid var(--border,#2c2a3a);border-radius:10px;margin-bottom:12px">
+            <label class="field" style="max-width:130px;margin:0"><span>类型</span>
+              <select id="vidKind">
+                <option value="episode">短剧连载</option>
+                <option value="trailer">卷预告</option>
+              </select>
+            </label>
+            <label class="field" style="max-width:90px;margin:0"><span>起章</span><input id="vidFrom" type="number" min="1" placeholder="全部" /></label>
+            <label class="field" style="max-width:90px;margin:0"><span>止章</span><input id="vidTo" type="number" min="1" placeholder="全部" /></label>
+            <label class="field" style="max-width:100px;margin:0"><span>单集秒数</span><input id="vidSec" type="number" min="20" max="300" value="90" /></label>
+            <label class="field" style="max-width:110px;margin:0"><span>画幅</span>
+              <select id="vidAspect">
+                <option value="9:16">9:16 竖屏</option>
+                <option value="3:4">3:4</option>
+                <option value="16:9">16:9 横屏</option>
+              </select>
+            </label>
+            <button class="btn primary" id="vidPlanBtn">✨ AI 分集规划</button>
+          </div>
+          <div id="vidEpList" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px"></div>
+        </div>
+
+        <!-- Step 3: 分镜与关键帧画板 -->
+        <div id="vidPaneBoard" class="vid-step-pane hidden">
+          <div id="vidShotPane"></div>
+          <label class="btn ghost hidden" style="cursor:pointer;margin:0">
+            <input id="vidUploadKf" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+          </label>
+        </div>
+
+        <!-- Step 4: 合成与交付 -->
+        <div id="vidPaneExport" class="vid-step-pane hidden">
+          <div id="vidExportPane" style="padding:14px;border:1px solid var(--border,#2c2a3a);border-radius:10px"></div>
+        </div>
       </section>
     </main>
   </div>
@@ -1093,6 +1165,40 @@
       <div id="tdStatus" class="modal-hint" style="margin-top:6px"></div>
       <div id="tdBody" style="margin-top:10px;max-height:68vh;overflow-y:auto"></div>
       <div class="modal-err" id="tdErr"></div>
+    </div>
+  </div>
+
+  <!-- CLI 登录/安装引导弹窗 -->
+  <div class="modal hidden" id="authGuideModal">
+    <div class="modal-card wide">
+      <div class="modal-head">
+        <h2 id="authGuideTitle">🔑 CLI 登录引导</h2>
+        <button class="icon-btn" id="authGuideClose">✕</button>
+      </div>
+      <div id="authGuideInfo" class="modal-hint"></div>
+      <div id="authGuideProxyWarn" class="hidden" style="margin:8px 0;padding:8px 10px;border-radius:6px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.4);font-size:12px"></div>
+      <div id="authInstallBox" class="hidden" style="margin:10px 0;padding:10px;border:1px solid var(--border,#2c2a3a);border-radius:8px">
+        <div style="font-size:12px;margin-bottom:6px">请先在本机终端安装该 CLI，安装后点击「🔄 重新检测」：</div>
+        <pre id="authInstallCmd" style="margin:0;padding:8px;border-radius:6px;background:rgba(0,0,0,.35);font-size:12px;overflow-x:auto"></pre>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn primary" id="authStartBtn">🔑 一键在内置终端登录</button>
+        <button class="btn" id="authRecheckBtn">🔄 重新检测状态</button>
+        <button class="btn ghost hidden" id="authToSettingsBtn">⚙️ 去设置代理</button>
+        <a class="btn primary hidden" id="authUrlBtn" target="_blank" rel="noopener" style="text-decoration:none">🌐 在浏览器中打开授权链接</a>
+      </div>
+      <div id="authTermWrap" class="hidden" style="margin-top:10px">
+        <pre id="authTermScreen" style="margin:0;padding:10px;height:240px;overflow:auto;border-radius:8px;background:#0e0d15;color:#e5e7eb;font-size:12px;line-height:1.45;white-space:pre-wrap;word-break:break-word;border:1px solid var(--border,#2c2a3a)"></pre>
+        <div class="btn-row" style="margin-top:8px;align-items:center">
+          <button class="btn tiny" id="authKeyEnter">↵ 回车</button>
+          <button class="btn tiny" id="authKeyUp">↑</button>
+          <button class="btn tiny" id="authKeyDown">↓</button>
+          <button class="btn tiny" id="authKeyCtrlC">Ctrl+C</button>
+          <input id="authTermInput" placeholder="如需输入文本或验证码，在这里输入后点发送…" style="flex:1;min-width:160px" />
+          <button class="btn tiny primary" id="authTermSend">发送</button>
+        </div>
+      </div>
+      <div class="modal-err" id="authGuideErr"></div>
     </div>
   </div>
 

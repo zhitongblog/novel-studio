@@ -85,6 +85,19 @@ export async function sendToBook(slug, text, cfg) {
   } finally { mcp.close(); }
 }
 
+/** 向内置终端（PTY）发送原始按键或文本，供前端内嵌终端交互框使用。 */
+export async function sendRawToBook(slug, text, cfg) {
+  const sess = getSession(slug);
+  if (!sess) throw new Error('没有该书的运行中终端会话：' + slug);
+  const mcp = await connect(sess, cfg);
+  try {
+    const pane = await resolvePane(mcp, sess);
+    if (pane == null) throw new Error('终端会话里没有活动 pane');
+    await mcp.input(pane, String(text ?? ''));
+    return { ok: true, instance: sess.instanceId, pane };
+  } finally { mcp.close(); }
+}
+
 // 实时镜像：持续读屏，内容变化即回调 onFrame(text)。返回 { stop() }。
 export async function streamBook(slug, cfg, onFrame, { intervalMs = 1000 } = {}) {
   const sess = getSession(slug);

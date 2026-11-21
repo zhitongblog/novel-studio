@@ -23,14 +23,14 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(fileURLToPath(import.meta.url), '..', '..');
 
 // 每处一条规则：文件 + 认出版本号的正则（第 1 组必须是版本号本身）。
-// Cargo.lock 只改 novel-studio-desktop 那一条，绝不碰依赖的版本号。
+// Cargo.lock 只改 storyalter-desktop 那一条，绝不碰依赖的版本号。
 const TARGETS = [
   { file: 'desktop/src-tauri/tauri.conf.json', re: /("version"\s*:\s*")([0-9]+\.[0-9]+\.[0-9]+)(")/ },
   // ⚠️行尾一律写成 \r?\n：这几个文件的行尾在这个仓库里【两种都出现过】
   // （main 归一成 LF，分支还是 CRLF，正是这次合并 6 个文件全量冲突的来源）。
   // 写死 \n 的话，碰上 CRLF 的那一份会【静默认不出来】——版本号漏改一处，又漂回去。
   { file: 'desktop/src-tauri/Cargo.toml', re: /(\[package\][\s\S]{0,200}?\r?\nversion\s*=\s*")([0-9]+\.[0-9]+\.[0-9]+)(")/ },
-  { file: 'desktop/src-tauri/Cargo.lock', re: /(name = "novel-studio-desktop"\r?\nversion = ")([0-9]+\.[0-9]+\.[0-9]+)(")/ },
+  { file: 'desktop/src-tauri/Cargo.lock', re: /(name = "storyalter-desktop"\r?\nversion = ")([0-9]+\.[0-9]+\.[0-9]+)(")/ },
   { file: 'package.json', re: /("version"\s*:\s*")([0-9]+\.[0-9]+\.[0-9]+)(")/ },
 ];
 

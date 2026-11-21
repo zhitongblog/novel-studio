@@ -7,9 +7,9 @@
 // 报告都落盘了，"等你挑"这个状态没理由不落盘。丢了它，作者就得从头再审一遍或者人肉抄意见。
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
+import { CONFIG_DIR } from './paths.mjs';
 
-const DIR = path.join(os.homedir(), '.novel-studio', 'pending');
+const DIR = path.join(CONFIG_DIR, 'pending');
 const fileOf = (slug) => path.join(DIR, encodeURIComponent(String(slug)) + '.json');
 
 const _pending = new Map(); // slug -> { kind, scope, file, critique, at }

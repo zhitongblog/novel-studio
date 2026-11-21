@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 pushd "%~dp0"
-title Novel Studio
+title StoryAlter
 node "bin\novel.mjs" %*
 set "ec=%errorlevel%"
 popd

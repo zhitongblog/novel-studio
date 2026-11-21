@@ -34,7 +34,7 @@ if (!cmd || cmd === 'tui') {
 
 function printHelp() {
   console.log(`
-StoryAlter · AI 网文工作室 2.0  (Unterm × Codex/Claude/Gemini/Ollama)
+StoryAlter · AI 故事工作室 2.0  (Unterm × Codex/Claude/Gemini/Ollama)
 
 用法 (storyalter 或 novel 命令均可):
   novel                       启动交互式 TUI（默认）

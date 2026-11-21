@@ -17,7 +17,7 @@ function gitInit(dir) {
     if (r.status !== 0) return;
     fs.writeFileSync(path.join(dir, '.gitignore'), '.studio/\n', 'utf8');
     spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', timeout: 15000 });
-    spawnSync('git', ['-c', 'user.name=Novel Studio', '-c', 'user.email=novel@studio.local',
+    spawnSync('git', ['-c', 'user.name=StoryAlter', '-c', 'user.email=studio@storyalter.com',
       'commit', '-m', '初始化书目'], { cwd: dir, encoding: 'utf8', timeout: 15000 });
   } catch {}
 }
@@ -27,7 +27,7 @@ export function gitSnapshot(dir, message) {
   try {
     if (!fs.existsSync(path.join(dir, '.git'))) return null;
     spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', timeout: 20000 });
-    spawnSync('git', ['-c', 'user.name=Novel Studio', '-c', 'user.email=novel@studio.local',
+    spawnSync('git', ['-c', 'user.name=StoryAlter', '-c', 'user.email=studio@storyalter.com',
       'commit', '-m', message || '重写前自动存档', '--allow-empty'], { cwd: dir, encoding: 'utf8', timeout: 20000 });
     const h = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir, encoding: 'utf8', timeout: 10000 });
     return (h.stdout || '').trim() || null;
@@ -70,8 +70,10 @@ export function scaffoldBook(book) {
   return dir;
 }
 
-// 仅当书的标准变化时刷新上下文文件
+// 仅当书的标准变化时刷新上下文文件；若书目录尚未建出（老 books.json 记录/被清掉的空书），自动补齐脚手架
 export function refreshContext(book) {
+  if (!book?.dir) return;
+  if (!fs.existsSync(book.dir)) { scaffoldBook(book); return; }
   const files = contextFiles(book);
   for (const [name, content] of Object.entries(files)) {
     fs.writeFileSync(path.join(book.dir, name), content, 'utf8');

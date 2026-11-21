@@ -16,7 +16,8 @@ import { CONFIG_DIR } from './paths.mjs';
 import { listBooksWithStats, createBook, getBook, importBook, setBookStyle, deleteBook, detectTitleFromDir, setBookTarget, setBookOral, setBookModel, setBookSynopsis, setBookStatus, renameBook, renameEntity, suggestRenamePairs, applyRenamePairs, setBookPublish, setBookFanqieStatus, setBookWriteMode, setParticipation, participationOf, setBookPlanMode, bookStats, plannedTotalChapters, plannedVolumes, currentVolume, chaptersPerVol, setBookRomance, setBookCategory, setBookTags} from './books.mjs';
 import { STYLES } from './styles.mjs';
 import { recommendStyle, recommendCategory, recommendFanqieTags } from './planner.mjs';
-import { detectAll, getModel, canRunHeadless } from './models.mjs';
+import { detectAll, detectModel, detectModelAuth, detectAllWithAuth, getModel, canRunHeadless } from './models.mjs';
+import { startCliLoginSession, pollCliLoginSession, sendCliLoginInput, closeCliLoginSession } from './authguide.mjs';
 import { listInstances, instanceIds, findUntermExe, findUntermCli, findUntermCore, isUntermEmbedded, ensureUntermReady, launchUntermApp, untermVersion, readProxyConfig, proxyUrlFrom, killBookAgents } from './unterm.mjs';
 import { detectUnzoo, launchUnzooApp, findUnzooApp, unzooBase } from './unzoo.mjs';
 import { getSession, removeSession, pruneSessionsByPanes } from './sessions.mjs';
@@ -29,7 +30,7 @@ import { API_PROVIDERS, providerConfigured, isKeylessProvider, chatComplete } fr
 import { localHealth, probeText, probeImage } from './localai.mjs';
 import { brainstorm, writeChapterInWindow, writeChapterFromIntent, writeChaptersFromPlot, rewriteChapter, reflowChapter, isCowriteModel, isCowriteWindowModel, COWRITE_MODELS, STYLE_SLANTS } from './cowrite.mjs';
 import { maybeAutoPublish } from './autopublish.mjs';
-import { listSessions, sendToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
+import { listSessions, sendToBook, sendRawToBook, stopBook, streamBook, attachAutopilot, sessionAgentAlive } from './attach.mjs';
 import { chapterProgressLine, isFirstSight } from './progress.mjs';
 import { FANQIE_CATEGORIES, isValidCategory } from './categories.mjs';
 import { finaleArtifacts, finaleSummary } from './finaledone.mjs';
@@ -79,6 +80,8 @@ const rewriteJobs = new Map();
 const fanqieCoverJobs = new Map();
 // 改造流水线的在跑任务（slug → {status, stop}）。停止=置 stop 标志，流水线在批间自己收。
 const overhaulJobs = new Map();
+// 改编视频后台任务（分集 / 分镜 / 渲染 / 合成）：slug -> {status, kind, msg, error, data}
+const videoJobs = new Map();
 
 // 哪些章【真的改过】：本地指纹 ≠ 上次发布时记下的指纹。没有基线的不算（宁可漏发，不能误覆盖线上）。
 function changedChapters(book, { from = 1, to = 0 } = {}) {
@@ -137,15 +140,14 @@ export function runServer(port = 8787) {
     globalThis.__nsEngineGuarded = true;
     // ⚠️【崩了要留下案发现场】原来这两行只 console.error，而引擎是 Tauri 用 CREATE_NO_WINDOW 拉起来的，
     // stdout/stderr 没人接——2026-09-15 引擎两次无声消失，事后一点线索都没有，只能靠"HTTP 000"发现。
-    // 现在同时写进 ~/.novel-studio/engine.log，带时间戳和完整堆栈。
+    // 现在同时写进 ~/.storyalter/engine.log，带时间戳和完整堆栈。
     const crashLog = (tag, e) => {
       const line = `[${new Date().toISOString()}] ${tag}: ${(e && (e.stack || e.message)) || e}
 `;
       try { console.error('[engine] ' + line.trim()); } catch {}
       try {
-        const dir = path.join(os.homedir(), '.novel-studio');
-        fs.mkdirSync(dir, { recursive: true });
-        fs.appendFileSync(path.join(dir, 'engine.log'), line, 'utf8');
+        fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        fs.appendFileSync(path.join(CONFIG_DIR, 'engine.log'), line, 'utf8');
       } catch {}
     };
     process.on('uncaughtException', (e) => crashLog('uncaughtException(已忽略保活)', e));
@@ -176,7 +178,7 @@ export function runServer(port = 8787) {
     }
   });
   server.listen(port, '127.0.0.1', () => {
-    console.log(`Novel Studio engine 已启动: http://127.0.0.1:${port}`);
+    console.log(`StoryAlter engine 已启动: http://127.0.0.1:${port}`);
     // 若本机未打开 Unterm，自动在后台拉起内置无头 unterm-core 守护进程，确保开箱即用
     setTimeout(() => { ensureUntermReady((e) => console.log('[unterm-core]', e.msg)).catch(() => {}); }, 800);
     setTimeout(() => { refreshUnzooStatus().catch(() => {}); }, 500);
@@ -436,6 +438,57 @@ async function api(p, req, res, u) {
       res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });
       return fs.createReadStream(f).pipe(res);
     }
+    if (p === '/api/book/video/file') {   // 改编视频产物（分镜视频 / 抽帧 / 关键帧 / 成片 / 音频，支持 Range 拖动）
+      const book = getBook(u.searchParams.get('book'));
+      const rel = String(u.searchParams.get('rel') || '').replace(/^[/\\]+/, '');
+      if (!book || !rel) { res.writeHead(404); return res.end('not found'); }
+      const vroot = path.resolve(book.dir, 'video');
+      const f = path.resolve(vroot, rel);
+      if (!f.startsWith(vroot + path.sep) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) {
+        res.writeHead(404); return res.end('not found');
+      }
+      const stat = fs.statSync(f);
+      const ext = path.extname(f).toLowerCase();
+      const ct = ext === '.mp4' ? 'video/mp4'
+        : ext === '.png' ? 'image/png'
+        : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
+        : ext === '.webp' ? 'image/webp'
+        : ext === '.wav' ? 'audio/wav'
+        : ext === '.mp3' ? 'audio/mpeg'
+        : ext === '.m4a' ? 'audio/mp4'
+        : ext === '.ogg' ? 'audio/ogg'
+        : (ext === '.srt' || ext === '.ass') ? 'text/plain; charset=utf-8'
+        : 'application/octet-stream';
+      const range = req.headers.range;
+      if (range && /^bytes=\d*-\d*$/i.test(range)) {
+        const [rawStart, rawEnd] = range.replace(/^bytes=/i, '').split('-');
+        let start = rawStart ? parseInt(rawStart, 10) : 0;
+        let end = rawEnd ? parseInt(rawEnd, 10) : stat.size - 1;
+        if (Number.isNaN(start)) start = 0;
+        if (Number.isNaN(end) || end >= stat.size) end = stat.size - 1;
+        if (start > end || start >= stat.size) {
+          res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, 'Access-Control-Allow-Origin': '*' });
+          return res.end();
+        }
+        res.writeHead(206, {
+          'Content-Type': ct,
+          'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': end - start + 1,
+          'Cache-Control': 'no-cache',
+          'Access-Control-Allow-Origin': '*',
+        });
+        return fs.createReadStream(f, { start, end }).pipe(res);
+      }
+      res.writeHead(200, {
+        'Content-Type': ct,
+        'Content-Length': stat.size,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-cache',
+        'Access-Control-Allow-Origin': '*',
+      });
+      return fs.createReadStream(f).pipe(res);
+    }
     if (p === '/api/bootstrap') return json(res, 200, bootstrap(cfg));
     if (p === '/api/book/files') {     // 阅读工作台：文件树 + 进度
       try {
@@ -585,7 +638,7 @@ async function api(p, req, res, u) {
         untermEmbedded: isUntermEmbedded(),
         untermDownloadUrl: 'https://github.com/zhitongblog/unterm/releases/latest',
         unzoo,
-        models: detectAll(),
+        models: detectAllWithAuth({ checkCli: true }),
         // url 要走 proxyUrlFrom：unterm 自己把代理关了的时候，proxy.json 里那行旧地址不算数。
         // 环境页照抄旧地址，会让人以为还挂着 127.0.0.1:7897，而会话里其实一个字节都没走它。
         proxy: { enabled: !!cfg.enableProxy, node: cfg.proxyNode, url: proxyUrlFrom(proxy) },
@@ -593,6 +646,24 @@ async function api(p, req, res, u) {
         workspace: cfg.workspace,
         workspaceExists: (() => { try { return fs.existsSync(cfg.workspace); } catch { return false; } })(),
       });
+    }
+    if (p === '/api/auth/status') {
+      const mId = u.searchParams.get('model') || '';
+      const proxy = readProxyConfig();
+      const proxyOn = !!cfg.enableProxy;
+      const pUrl = proxyOn ? proxyUrlFrom(proxy) : '';
+      if (mId) {
+        const det = detectModel(mId);
+        const auth = detectModelAuth(mId, det, { checkCli: true });
+        return json(res, 200, { ok: true, model: { ...det, auth }, proxy: { enabled: proxyOn, url: pUrl } });
+      }
+      return json(res, 200, { ok: true, models: detectAllWithAuth({ checkCli: true }), proxy: { enabled: proxyOn, url: pUrl } });
+    }
+    if (p === '/api/auth/poll') {
+      try {
+        const id = u.searchParams.get('id') || '';
+        return json(res, 200, await pollCliLoginSession(id));
+      } catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (p === '/api/companion/status') {
       const unzoo = await refreshUnzooStatus();
@@ -2010,6 +2081,20 @@ async function api(p, req, res, u) {
         return json(res, 200, { ok: true, ...(await probeImage(backend, url)) });
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
+    if (p === '/api/local/probe-video') {   // 探测本地视频引擎（ComfyUI H3 / IndexTTS / ffmpeg）
+      try {
+        const { probeVideoEngine } = await import('./videorender.mjs');
+        const merged = body?.video ? { ...cfg, video: { ...(cfg.video || {}), ...body.video } } : cfg;
+        return json(res, 200, { ok: true, ...(await probeVideoEngine(merged)) });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p === '/api/local/start-comfyui') { // 一键启动本机 loopback ComfyUI 视频引擎
+      try {
+        const { startLocalComfyUI } = await import('./videorender.mjs');
+        const merged = body?.video ? { ...cfg, video: { ...(cfg.video || {}), ...body.video } } : cfg;
+        return json(res, 200, await startLocalComfyUI(merged, { waitMs: Number(body?.waitMs) || 35000 }));
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
     if (p === '/api/craft-options') {   // 重写弹窗要用的选项：侧重项 + 感情线档位（定义在后端，前端不重复维护一份）
       try {
         return json(res, 200, {
@@ -2446,6 +2531,32 @@ async function api(p, req, res, u) {
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     if (p === '/api/write') return await doWrite(body, cfg, res);
+    if (p === '/api/terminal/input') {
+      try {
+        const slug = slugOf(body.book);
+        if (!slug) return json(res, 400, { error: '缺少 book' });
+        const r = await sendRawToBook(slug, body.text ?? '', cfg);
+        return json(res, 200, r);
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/auth/start') {
+      try {
+        const r = await startCliLoginSession(String(body.model || ''), cfg);
+        return json(res, 200, r);
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/auth/input') {
+      try {
+        const r = await sendCliLoginInput(String(body.id || ''), body.text ?? '');
+        return json(res, 200, r);
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/auth/close') {
+      try {
+        const r = await closeCliLoginSession(String(body.id || ''));
+        return json(res, 200, r);
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
     if (p === '/api/send') {
       const slug = slugOf(body.book);
       const task = body.task || '';
@@ -2610,6 +2721,12 @@ async function api(p, req, res, u) {
           return json(res, r.ok ? 200 : 400, r);
         }
         return json(res, 400, { error: '未知组件：' + target });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (p.startsWith('/api/book/video/')) {
+      try {
+        const { handleVideoRoute } = await import('./videoroutes.mjs');
+        if (await handleVideoRoute({ p, body, cfg, res, json, getBook, pushLog, videoJobs })) return;
       } catch (e) { return json(res, 500, { error: e.message }); }
     }
     return json(res, 404, { error: 'not found' });

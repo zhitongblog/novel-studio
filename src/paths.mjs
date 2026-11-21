@@ -10,8 +10,14 @@ export const HOME = os.homedir();
 // 应用根目录（novel-studio/）
 export const APP_DIR = path.resolve(fileURLToPath(import.meta.url), '..', '..');
 
-// 应用配置目录 ~/.novel-studio
-export const CONFIG_DIR = path.join(HOME, '.novel-studio');
+// 应用配置目录 ~/.storyalter（首次启动时自动从旧版 ~/.novel-studio 迁入，保留原目录作备份）
+const LEGACY_CONFIG_DIR = path.join(HOME, '.novel-studio');
+export const CONFIG_DIR = path.join(HOME, '.storyalter');
+try {
+  if (!fs.existsSync(CONFIG_DIR) && fs.existsSync(LEGACY_CONFIG_DIR)) {
+    fs.cpSync(LEGACY_CONFIG_DIR, CONFIG_DIR, { recursive: true });
+  }
+} catch {}
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 export const BOOKS_FILE = path.join(CONFIG_DIR, 'books.json');
 export const LOG_DIR = path.join(CONFIG_DIR, 'logs');
@@ -76,10 +82,10 @@ export const UNTERM_CORE_CANDIDATES = [process.env.UNTERM_CORE, ...CORE_BY_OS].f
 // 默认书库工作区：
 // - 开发期（源码树跑）：APP_DIR 上级 / books（沿用旧行为，便于本地调试）
 // - 打包后（引擎在 .app 包内 / resources\engine 里）：绝不写进包内（重装会清、且可能只读），
-//   落到用户主目录 ~/NovelStudio/books。用户也可在「设置」里用文件夹选择器另选。
+//   落到用户主目录 ~/StoryAlter/books。用户也可在「设置」里用文件夹选择器另选。
 const PACKAGED = /\.app[\\/]Contents[\\/]/.test(APP_DIR) || /[\\/]resources[\\/]engine([\\/]|$)/i.test(APP_DIR);
 export const DEFAULT_WORKSPACE = PACKAGED
-  ? path.join(HOME, 'NovelStudio', 'books')
+  ? path.join(HOME, 'StoryAlter', 'books')
   : path.join(path.dirname(APP_DIR), 'books');
 
 

@@ -8,6 +8,8 @@ const DEFAULTS = {
   defaultModel: 'agy',               // agy | codex | claude | gemini | trae
   proxyNode: 'auto',                 // unterm 代理节点名；'auto' = 用 proxy.json 里的 current_node
   enableProxy: true,                 // 启动实例时是否开代理
+  proxyUrl: '',                      // 代理地址兜底（未装独立版 Unterm、无 ~/.unterm/proxy.json 时使用，如 http://127.0.0.1:7897）
+  preferHeadlessCore: true,          // 默认用内置 unterm-core --headless 并在软件内绘终端，不弹独立 Unterm 窗口
   untermAgentName: 'claude-code',    // 连 MCP 时自报的受信 agent 名（解锁 session.input 写操作）
   // 手动指定 Unterm 可执行文件（留空=自动找 C:\Program Files\Unterm\ 与 PATH）。
   // ⚠️ 为什么需要：装了多份 Unterm（正式版 + 自己编的开发版）时，自动查找只会看标准位置，
@@ -143,6 +145,29 @@ const DEFAULTS = {
       ckpt: '',                      // 留空=用 WebUI 当前已加载的模型
       steps: 28, cfgScale: 6, width: 896, height: 1152, sampler: 'DPM++ 2M Karras',
     },
+  },
+  // 改编视频（短剧连载 / 卷预告）：本机 ComfyUI (MiniMax H3) + IndexTTS + ffmpeg。
+  video: {
+    comfyUrl: 'http://127.0.0.1:8188',
+    comfyRoot: 'C:/AI/StoryAlter/ComfyUI',
+    modelRoot: 'D:/AI/models/minimax-h3',
+    ttsRoot: 'D:/AI/codex-tools/index-tts',
+    ttsRefAudio: '',                 // IndexTTS 旁白参考音频（wav/mp3）；留空则走 edge-tts 神经网络语音
+    edgeVoice: 'zh-CN-YunxiNeural',  // 默认 edge-tts 中文旁白音色
+    timeoutMs: 900000,               // 单镜超时：RTX 3060 实测 5 秒镜头约 85–105 秒
+    autoUnloadText: true,            // 12G 显存渲染前先卸载 Ollama 文本模型
+    aspect: '9:16',                  // '9:16' | '3:4' | '16:9'
+    width: 480,
+    height: 608,
+    fps: 24,
+    steps: 4,
+    diffusionModel: 'minimax_h3_fl2va_pruned_int8_convrot.safetensors',
+    textEncoder: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors',
+    videoVae: 'minimax_h3_video_vae_int8_convrot.safetensors',
+    audioVae: 'minimax_h3_audio_vae_fp32.safetensors',
+    turboLora: 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors',
+    ref2vaDiffusionModel: 'minimax_h3_ref2va_pruned_int8_convrot.safetensors',
+    ref2vTurboLora: 'minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors',
   },
   autopilot: {
     enabled: true,                   // 是否自动监控应答

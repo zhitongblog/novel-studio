@@ -39,9 +39,9 @@ test('bump 是【定点替换】，不重写文件——行尾和格式一个字
     const mk = (rel, body) => { fs.mkdirSync(path.dirname(path.join(tmp, rel)), { recursive: true }); fs.writeFileSync(path.join(tmp, rel), body); };
     const crlf = (s) => s.replace(/\n/g, '\r\n');
     mk('desktop/src-tauri/tauri.conf.json', crlf('{\n    "productName": "X",\n    "version": "1.0.0"\n}\n'));
-    mk('desktop/src-tauri/Cargo.toml', crlf('[package]\nname = "novel-studio-desktop"\nversion = "1.0.0"\nedition = "2021"\n'));
-    mk('desktop/src-tauri/Cargo.lock', crlf('[[package]]\nname = "serde"\nversion = "9.9.9"\n\n[[package]]\nname = "novel-studio-desktop"\nversion = "1.0.0"\n'));
-    mk('package.json', crlf('{\n    "name": "novel-studio",\n    "version": "1.0.0"\n}\n'));
+    mk('desktop/src-tauri/Cargo.toml', crlf('[package]\nname = "storyalter-desktop"\nversion = "1.0.0"\nedition = "2021"\n'));
+    mk('desktop/src-tauri/Cargo.lock', crlf('[[package]]\nname = "serde"\nversion = "9.9.9"\n\n[[package]]\nname = "storyalter-desktop"\nversion = "1.0.0"\n'));
+    mk('package.json', crlf('{\n    "name": "storyalter",\n    "version": "1.0.0"\n}\n'));
 
     setVersion('2.3.4', tmp);
 
@@ -51,7 +51,7 @@ test('bump 是【定点替换】，不重写文件——行尾和格式一个字
     assert.match(conf, /\n {4}"productName"/, '四空格缩进要原样保留，不能被 stringify 洗成两空格');
 
     const lock = fs.readFileSync(path.join(tmp, 'desktop/src-tauri/Cargo.lock'), 'utf8');
-    assert.match(lock, /name = "novel-studio-desktop"\r\nversion = "2\.3\.4"/);
+    assert.match(lock, /name = "storyalter-desktop"\r\nversion = "2\.3\.4"/);
     assert.match(lock, /name = "serde"\r\nversion = "9\.9\.9"/, '依赖的版本号绝不能被顺手改掉');
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });

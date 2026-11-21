@@ -10,6 +10,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { CONFIG_DIR } from '../src/paths.mjs';
 import { looksNetworkFailure, getNetMode, rememberNetMode } from '../src/planner.mjs';
 
 test('两天里那两句真实报错，都要认成"网络/地区"这一类', () => {
@@ -27,7 +28,7 @@ test('模型正常的中文回答不该被当成网络失败（免得白翻一�
 });
 
 test('记住的模式要能存下来、读回来，并且可以改', () => {
-  const f = path.join(os.homedir(), '.novel-studio', 'netmode.json');
+  const f = path.join(CONFIG_DIR, 'netmode.json');
   let backup = null;
   try { backup = fs.readFileSync(f, 'utf8'); } catch {}
   try {

@@ -99,7 +99,7 @@ export function runCowrite(model, prompt, cfg, timeoutMs = 300000) {
   }
   const env = { ...process.env };
   if (wantProxy(model, cfg)) {
-    const px = proxyUrl();
+    const px = proxyUrl(cfg);
     if (px) { env.HTTP_PROXY = env.HTTPS_PROXY = env.ALL_PROXY = env.http_proxy = env.https_proxy = env.all_proxy = px; }
   } else {
     for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) delete env[k];

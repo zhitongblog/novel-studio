@@ -1,4 +1,4 @@
-// Novel Studio GUI 前端逻辑（零依赖）。served by Node 引擎 / 或 Tauri 加载。
+// StoryAlter 桌面端 GUI 前端逻辑（原 Novel Studio）（零依赖）。served by Node 引擎 / 或 Tauri 加载。
 // Tauri v2(Win) 用 http://tauri.localhost 提供资源 → 此时引擎在另一个源(127.0.0.1:8799)；
 // 浏览器直连引擎时则用同源。
 const IS_TAURI = location.hostname === 'tauri.localhost' || location.protocol === 'tauri:' || (typeof window !== 'undefined' && !!window.__TAURI__);
@@ -176,7 +176,7 @@ document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', 
 function showView(name) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === name));
   document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
-  const map = { shelf: 'view-shelf', usage: 'view-usage', settings: 'view-settings', env: 'view-env' };
+  const map = { shelf: 'view-shelf', usage: 'view-usage', settings: 'view-settings', env: 'view-env', video: 'view-video' };
   $('#' + (map[name] || 'view-shelf')).classList.remove('hidden');
   if (name === 'usage') renderUsage();
   if (name === 'settings') renderSettings();
@@ -568,7 +568,7 @@ function setWriting(on) {
 // 网页版写作要驱动一个已登录该聊天站点（千问/豆包/ChatGPT/Claude）的 Unzoo 账号窗口。
 let WEB_PROFILES = null;   // 缓存 /api/unzoo/profiles 账号列表
 function isWebModel(id) { return (STATE.models || []).find(m => m.id === id)?.kind === 'web'; }
-function webProfileKey(slug) { return 'novelstudio:webProfile:' + slug; }
+function webProfileKey(slug) { return 'storyalter:webProfile:' + slug; }
 async function syncWebProfileUI() {
   const wrap = $('#webProfileWrap'); if (!wrap) return;
   const web = isWebModel($('#writeModel').value);
@@ -628,10 +628,14 @@ $('#statelessMode').addEventListener('change', () => {
 });
 $('#btnStart').addEventListener('click', async () => {
   if (!CUR) return;
-  $('#btnStart').disabled = true; $('#writeStatus').textContent = '启动中…';
   const model = $('#writeModel').value;
   const isWeb = (STATE.models || []).find(m => m.id === model)?.kind === 'web';
   const isApi = (STATE.models || []).find(m => m.id === model)?.kind === 'api';
+  if (!isWeb && !isApi) {
+    const ok = await ensureModelAuthReady(model, () => $('#btnStart').click());
+    if (!ok) return;
+  }
+  $('#btnStart').disabled = true; $('#writeStatus').textContent = '启动中…';
   const stateless = $('#statelessMode').checked;
   try {
     if (isApi) {
@@ -740,7 +744,7 @@ function rvRange() {
 $('#btnReview').addEventListener('click', openReview);
 
 // ---------- 🤝 共创模式（你出主意 · AI 逐章）----------
-const CW_MODELS = ['claude', 'codex', 'gemini', 'qwen'];   // 能开【可见窗口】的强 CLI
+const CW_MODELS = ['agy', 'claude', 'codex', 'gemini', 'qwen'];   // 能开【可见窗口】的强 CLI（与 src/cowrite.mjs 对齐）
 // 共创里两类活对模型要求不同：出主意/写一章只要能出文本（API 与本地模型都行），
 // 只有「连写 3–5 章」要开可见窗口、非 CLI 不可。所以下拉不能只列 CLI。
 const cwIsWindowModel = (id) => CW_MODELS.includes(id);
@@ -755,8 +759,10 @@ function openCowrite() {
   // 模型下拉：能开窗口的 CLI + 能出文本的 API/本地模型（后者走无头模式，见下方按钮提示）
   const avail = (STATE.models || []).filter(m => (CW_MODELS.includes(m.id) || m.kind === 'api') && m.available);
   if (!avail.length) { toast('共创模式需要 claude/codex 这类 CLI，或任一 API 模型（含本地 Ollama），但一个都没有'); return; }
-  // 优先选 CLI（能看见窗口，体验更好）；没有 CLI 时退到 API/本地
-  const prefer = CW_MODELS.find(id => avail.some(m => m.id === id)) || avail[0].id;
+  // 优先选本书当前模型，其次选 CLI（能看见窗口），没有 CLI 时退到 API/本地
+  const prefer = (CUR.model && avail.some(m => m.id === CUR.model) ? CUR.model : null)
+    || CW_MODELS.find(id => avail.some(m => m.id === id))
+    || avail[0].id;
   $('#cwModel').innerHTML = avail.map(m => `<option value="${m.id}" ${m.id === prefer ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
   $('#cwChapInfo').textContent = '下一章：第 ' + cwNextNum() + ' 章';
   // 探索式(freehand)：本书没有任何大纲，剧情由作者一段段给 → 主按钮换成「连写 3–5 章」，文案跟着换
@@ -801,12 +807,13 @@ function cwSyncModelHint() {
 
 $('#cwIdeaBtn').addEventListener('click', async () => {
   if (!CUR) return;
-  const ask = $('#cwAsk').value.trim();
-  if (!ask) { $('#cwIdeaHint').textContent = '先写你想问的点'; return; }
+  const mid = $('#cwModel').value;
+  if (!cwIsApiModel(mid) && !(await ensureModelAuthReady(mid, () => $('#cwIdeaBtn').click()))) return;
+  const ask = $('#cwAsk').value.trim() || '结合本书设定与前文，给下一章出 2–3 个冲突最强、最抓人的剧情走向方案';
   const btn = $('#cwIdeaBtn'); const old = btn.textContent; btn.disabled = true; btn.textContent = '思考中…（可能 1 分钟）';
   $('#cwIdeaHint').textContent = ''; $('#cwErr').textContent = '';
   try {
-    const r = await api('/api/book/cowrite-idea', 'POST', { book: CUR.slug, model: $('#cwModel').value, ask });
+    const r = await api('/api/book/cowrite-idea', 'POST', { book: CUR.slug, model: mid, ask });
     const ideas = (r.ideas || '').trim();
     // 直接把主意填进【本章我的要求】这个可编辑框——你在这里删改成本章要求，再点"写这一章"。
     const box = $('#cwIntent');
@@ -818,7 +825,12 @@ $('#cwIdeaBtn').addEventListener('click', async () => {
     // 旧的只读建议框不再用（内容已进可编辑框，不再"藏"起来）
     $('#cwIdeaBox').classList.add('hidden'); $('#cwIdeaBox').textContent = '';
     $('#cwIdeaHint').textContent = '✅ 已填进下面「本章我的要求」——改成你要的走向，再点“写这一章”';
-  } catch (e) { $('#cwErr').textContent = '出主意失败：' + e.message; }
+  } catch (e) {
+    $('#cwErr').textContent = '出主意失败：' + e.message;
+    if (!cwIsApiModel(mid) && isAuthErrorText(e.message)) {
+      openAuthGuide(mid, { onDone: () => $('#cwIdeaBtn').click() });
+    }
+  }
   finally { btn.disabled = false; btn.textContent = old; }
 });
 
@@ -2835,6 +2847,623 @@ $('#cvDownload').addEventListener('click', async () => {
     }
   } catch (e) { $('#cvErr').textContent = e.message; }
 });
+// ===== 改编视频工作台（全屏 4 步 AI 导演工作台） =====
+let vidPlan = { episodes: [] }, vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] }, vidRef2V = false, vidKeyframes = [], vidEdgeVoices = [], vidCurEp = 1, vidPoll = null, vidStep = 'assets';
+function vidFileUrl(rel) {
+  return `${API}/api/book/video/file?book=${encodeURIComponent(CUR.slug)}&rel=${encodeURIComponent(rel)}&t=${Date.now()}`;
+}
+function setVidStep(step) {
+  vidStep = step || 'assets';
+  const map = { assets: '#vidPaneAssets', plan: '#vidPanePlan', board: '#vidPaneBoard', export: '#vidPaneExport' };
+  document.querySelectorAll('.vid-step-pane').forEach((p) => p.classList.add('hidden'));
+  $(map[vidStep] || '#vidPaneAssets')?.classList.remove('hidden');
+  document.querySelectorAll('#vidStepTabs [data-vstep]').forEach((b) => {
+    b.classList.toggle('primary', b.dataset.vstep === vidStep);
+  });
+}
+document.querySelectorAll('#vidStepTabs [data-vstep]').forEach((b) => {
+  b.addEventListener('click', () => setVidStep(b.dataset.vstep));
+});
+
+function vidEdgeVoiceOpts(sel, emptyLabel = '（沿用默认音色）') {
+  const list = vidEdgeVoices.length ? vidEdgeVoices : [
+    { id: 'zh-CN-YunxiNeural', label: '云希 · 沉稳男声' },
+    { id: 'zh-CN-YunjianNeural', label: '云健 · 热血男声' },
+    { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 温暖女声' },
+    { id: 'zh-CN-XiaoyiNeural', label: '晓伊 · 灵动少女声' },
+  ];
+  return `<option value="">${esc(emptyLabel)}</option>` +
+    list.map((v) => `<option value="${esc(v.id)}" ${v.id === sel ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
+}
+
+function renderVideoBible() {
+  const pane = $('#vidBiblePane');
+  if (!pane) return;
+  const kfOpts = (sel) => '<option value="">（未绑定定妆图 · 仅文本锁外貌）</option>' +
+    vidKeyframes.map((k) => `<option value="${esc(k.ref)}" ${k.ref === sel ? 'selected' : ''}>${esc(k.label)}</option>`).join('');
+  const chars = vidBible.characters || [];
+  pane.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <div style="font-size:13px;opacity:.9">
+        <b>① 全书画风与角色定妆库</b> · ${vidRef2V ? '✅ 已装 ref2va（绑定定妆图自动多图锁脸）' : '⏳ 未装 ref2va（英文外貌卡 + 关键帧锁脸）'}
+      </div>
+      <div class="btn-row" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" id="vidBibleExtract">✨ AI 提取并分化外貌</button>
+        <button class="btn" id="vidAddCharBtn">➕ 新增角色</button>
+        <button class="btn primary" id="vidBibleSave">💾 保存定妆库</button>
+        <button class="btn" id="vidToPlanBtn">下一步：分集剧本 →</button>
+      </div>
+    </div>
+    <label class="field" style="margin-bottom:10px"><span style="font-size:12px">全书画风前缀（English visualStyle，每镜与生图自动注入）</span>
+      <input id="vidVisualStyle" value="${esc(vidBible.visualStyle || '')}" placeholder="如：Cinematic Chinese period drama, realistic film grain, moody lighting" />
+    </label>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:12px">
+      <label class="field" style="margin:0"><span style="font-size:12px">默认旁白音色（免费 Edge-TTS 神经网络语音）</span>
+        <select id="vidNarratorEdge">${vidEdgeVoiceOpts(vidBible.narratorEdgeVoice || '', '云希 · 沉稳男声（系统默认）')}</select>
+      </label>
+      <label class="field" style="margin:0"><span style="font-size:12px">可选：旁白参考音频（IndexTTS2 声音克隆 .wav/.mp3）</span>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="vidNarratorVoice" value="${esc(vidBible.narratorVoice || '')}" placeholder="留空走上方默认音色，或点右侧上传" style="flex:1;font-size:11px" />
+          <label class="btn tiny" style="cursor:pointer;margin:0">📤 上传<input id="vidUploadNarrVoice" type="file" accept="audio/*" hidden /></label>
+        </div>
+      </label>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px">
+    ${chars.length ? chars.map((c, i) => {
+      const refUrl = c.refImageRef ? (vidKeyframes.find((k) => k.ref === c.refImageRef)?.url || vidFileUrl(c.refImageRef)) : '';
+      return `<div class="vid-cast-row" data-idx="${i}" style="border:1px solid var(--border,#2c2a3a);border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">
+          <div style="display:flex;gap:6px;align-items:center;flex:1;min-width:140px">
+            <input class="vid-cast-name" value="${esc(c.name || '')}" placeholder="角色名" style="width:96px;font-weight:600;font-size:12px" />
+            <input class="vid-cast-role" value="${esc(c.role || '')}" placeholder="身份/定位" style="flex:1;min-width:60px;font-size:11px" />
+          </div>
+          <div style="display:flex;gap:4px">
+            <button class="btn tiny vid-gen-portrait" data-idx="${i}">🎨 AI定妆照</button>
+            <label class="btn tiny" style="cursor:pointer;margin:0" title="本地上传定妆照">📤<input class="vid-upload-portrait" type="file" accept="image/png,image/jpeg,image/webp" hidden /></label>
+            <button class="btn tiny ghost vid-del-char" data-idx="${i}" title="删除角色">🗑</button>
+          </div>
+        </div>
+        ${refUrl ? `<img src="${esc(refUrl)}" style="width:100%;max-height:180px;object-fit:cover;border-radius:6px;background:#111" />` : ''}
+        <select class="vid-cast-ref" style="font-size:11px">${kfOpts(c.refImageRef || '')}</select>
+        <textarea class="vid-cast-look" rows="3" placeholder="固定英文外貌卡（年龄、五官、发型、固定服饰颜色、标志配饰）" style="width:100%;font-size:11px">${esc(c.lookPrompt || '')}</textarea>
+        <select class="vid-cast-edge" style="font-size:11px">${vidEdgeVoiceOpts(c.edgeVoice || '', 'Edge-TTS 音色（沿用默认）')}</select>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input class="vid-cast-voice" value="${esc(c.voiceRefAudio || '')}" placeholder="可选：IndexTTS2 声音克隆音频 (.wav)" style="flex:1;font-size:11px" />
+          <label class="btn tiny" style="cursor:pointer;margin:0" title="上传角色参考音色">🎙<input class="vid-upload-voice" type="file" accept="audio/*" hidden /></label>
+        </div>
+      </div>`;
+    }).join('') : '<div class="modal-hint">点「✨ AI 提取并分化外貌」自动生成角色外貌卡，或点「➕ 新增角色」手动添加。</div>'}
+    </div>
+  `;
+  const collectCast = () => [...pane.querySelectorAll('.vid-cast-row')].map((row) => {
+    const i = Number(row.dataset.idx);
+    const base = vidBible.characters[i] || {};
+    return {
+      ...base,
+      name: row.querySelector('.vid-cast-name')?.value.trim() || base.name || '',
+      role: row.querySelector('.vid-cast-role')?.value.trim() || '',
+      lookPrompt: row.querySelector('.vid-cast-look')?.value || '',
+      refImageRef: row.querySelector('.vid-cast-ref')?.value || '',
+      edgeVoice: row.querySelector('.vid-cast-edge')?.value || '',
+      voiceRefAudio: row.querySelector('.vid-cast-voice')?.value.trim() || '',
+    };
+  }).filter((c) => c.name);
+  const saveBibleNow = async (charactersOverride) => {
+    const characters = charactersOverride || collectCast();
+    const r = await api('/api/book/video/bible/save', 'POST', {
+      book: CUR.slug,
+      visualStyle: $('#vidVisualStyle')?.value || '',
+      narratorVoice: $('#vidNarratorVoice')?.value.trim() || '',
+      narratorEdgeVoice: $('#vidNarratorEdge')?.value || '',
+      characters,
+    });
+    vidBible = r.bible || { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters };
+    return vidBible;
+  };
+  $('#vidBibleExtract')?.addEventListener('click', () => startVidJob('/api/book/video/bible/extract', { book: CUR.slug }));
+  $('#vidToPlanBtn')?.addEventListener('click', () => setVidStep('plan'));
+  $('#vidAddCharBtn')?.addEventListener('click', () => {
+    const list = collectCast();
+    list.push({ name: `新角色${list.length + 1}`, role: '配角', lookPrompt: '', refImageRef: '', edgeVoice: '', voiceRefAudio: '' });
+    vidBible = {
+      ...vidBible,
+      visualStyle: $('#vidVisualStyle')?.value || vidBible.visualStyle || '',
+      narratorVoice: $('#vidNarratorVoice')?.value.trim() || '',
+      narratorEdgeVoice: $('#vidNarratorEdge')?.value || '',
+      characters: list,
+    };
+    renderVideoBible();
+  });
+  $('#vidUploadNarrVoice')?.addEventListener('change', (ev) => {
+    const f = ev.target.files?.[0];
+    if (!f || !CUR) return;
+    const rd = new FileReader();
+    rd.onload = async () => {
+      try {
+        const r = await api('/api/book/video/bible/upload-voice', 'POST', { book: CUR.slug, filename: f.name, dataUrl: rd.result });
+        if ($('#vidNarratorVoice')) $('#vidNarratorVoice').value = r.path || '';
+        await saveBibleNow();
+        toast('旁白参考音色已上传并保存');
+      } catch (e) { $('#vidErr').textContent = e.message; }
+    };
+    rd.readAsDataURL(f);
+    ev.target.value = '';
+  });
+  pane.querySelectorAll('.vid-del-char').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const idx = Number(btn.dataset.idx);
+      const list = collectCast().filter((_, i) => i !== idx);
+      try {
+        await saveBibleNow(list);
+        toast('已删除角色');
+        renderVideoBible();
+      } catch (e) { $('#vidErr').textContent = e.message; }
+    });
+  });
+  pane.querySelectorAll('.vid-upload-portrait').forEach((inp) => {
+    inp.addEventListener('change', (ev) => {
+      const f = ev.target.files?.[0];
+      const row = inp.closest('.vid-cast-row');
+      if (!f || !row || !CUR) return;
+      const rd = new FileReader();
+      rd.onload = async () => {
+        try {
+          const r = await api('/api/book/video/upload-keyframe', 'POST', { book: CUR.slug, filename: f.name, dataUrl: rd.result });
+          const sel = row.querySelector('.vid-cast-ref');
+          if (sel) {
+            const opt = document.createElement('option');
+            opt.value = r.ref; opt.textContent = r.ref; opt.selected = true;
+            sel.appendChild(opt);
+          }
+          await saveBibleNow();
+          toast('定妆照已上传并绑定');
+          await refreshVideoPlan();
+        } catch (e) { $('#vidErr').textContent = e.message; }
+      };
+      rd.readAsDataURL(f);
+      ev.target.value = '';
+    });
+  });
+  pane.querySelectorAll('.vid-upload-voice').forEach((inp) => {
+    inp.addEventListener('change', (ev) => {
+      const f = ev.target.files?.[0];
+      const row = inp.closest('.vid-cast-row');
+      if (!f || !row || !CUR) return;
+      const rd = new FileReader();
+      rd.onload = async () => {
+        try {
+          const r = await api('/api/book/video/bible/upload-voice', 'POST', { book: CUR.slug, filename: f.name, dataUrl: rd.result });
+          const vInp = row.querySelector('.vid-cast-voice');
+          if (vInp) vInp.value = r.path || '';
+          await saveBibleNow();
+          toast('角色音色已上传并保存');
+        } catch (e) { $('#vidErr').textContent = e.message; }
+      };
+      rd.readAsDataURL(f);
+      ev.target.value = '';
+    });
+  });
+  pane.querySelectorAll('.vid-gen-portrait').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('.vid-cast-row');
+      const name = row?.querySelector('.vid-cast-name')?.value.trim() || '';
+      const lookPrompt = row?.querySelector('.vid-cast-look')?.value || '';
+      if (!name) { $('#vidErr').textContent = '请先填写角色名'; return; }
+      try { await saveBibleNow(); } catch {}
+      await startVidJob('/api/book/video/bible/gen-portrait', {
+        book: CUR.slug,
+        characterName: name,
+        visualStyle: $('#vidVisualStyle')?.value || '',
+        lookPrompt,
+      });
+    });
+  });
+  $('#vidBibleSave')?.addEventListener('click', async () => {
+    try {
+      await saveBibleNow();
+      toast('角色定妆库已保存');
+      renderVideoBible();
+    } catch (e) { $('#vidErr').textContent = e.message; }
+  });
+}
+
+function renderVideoModal() {
+  const eps = vidPlan.episodes || [];
+  const epBox = $('#vidEpList'), shotBox = $('#vidShotPane'), expBox = $('#vidExportPane');
+  if (!eps.length) {
+    epBox.innerHTML = '<div class="modal-hint" style="padding:12px">还没有分集。点击上方「✨ AI 分集规划」开始（少章书自动用正文，长篇自动补齐摘要）。</div>';
+    shotBox.innerHTML = '<div class="modal-hint">请先在「② 分集剧本」生成分集。</div>';
+    if (expBox) expBox.innerHTML = '<div class="modal-hint">请先完成分集与分镜渲染。</div>';
+    return;
+  }
+  if (!eps.find((e) => e.index === vidCurEp)) vidCurEp = eps[0].index;
+  epBox.innerHTML = eps.map((e) => {
+    const active = e.index === vidCurEp;
+    const stale = e.staleChapters?.length ? `<span style="color:#ff9f43;font-size:11px"> · ⚠第${e.staleChapters.join(',')}章已改</span>` : '';
+    const done = e.outputRel ? ' · ✅成片' : (e.shots?.length ? ` · ${e.shots.length}镜` : '');
+    return `<div class="vid-ep-item" data-ep="${e.index}" style="padding:12px;border-radius:8px;border:1px solid ${active ? '#7D8BFF' : 'var(--border,#2c2a3a)'};background:${active ? 'rgba(125,139,255,.1)' : 'transparent'};display:flex;flex-direction:column;justify-content:space-between;gap:8px">
+      <div>
+        <div style="font-weight:600;font-size:14px">${e.kind === 'trailer' ? '🎞️ 预告' : `第${e.index}集`} · ${esc(e.title)}</div>
+        <div style="font-size:12px;opacity:.75;margin-top:3px">第${e.fromChapter}–${e.toChapter}章 · 约${e.targetSeconds || 90}s${done}${stale}</div>
+        ${e.logline ? `<div style="font-size:12px;opacity:.85;margin-top:6px;line-height:1.45">${esc(e.logline)}</div>` : ''}
+      </div>
+      <div class="btn-row" style="justify-content:flex-end">
+        <button class="btn tiny primary vid-enter-ep" data-ep="${e.index}">进入分镜画板 →</button>
+      </div>
+    </div>`;
+  }).join('');
+  epBox.querySelectorAll('.vid-enter-ep').forEach((btn) => {
+    btn.addEventListener('click', () => { vidCurEp = Number(btn.dataset.ep); renderVideoModal(); setVidStep('board'); });
+  });
+
+  const ep = eps.find((e) => e.index === vidCurEp);
+  const kfOpts = (sel) => (vidKeyframes.length
+    ? '<option value="">（默认底图 / 同场接力）</option>' + vidKeyframes.map((k) => `<option value="${esc(k.ref)}" ${k.ref === sel ? 'selected' : ''}>${esc(k.label)}</option>`).join('')
+    : '<option value="">（先 AI 生关键帧或上传）</option>');
+  const speakerOpts = (sel, shotChars = []) => {
+    const names = [...new Set([...(vidBible.characters || []).map((c) => c.name), ...(shotChars || [])].filter(Boolean))];
+    if (sel && sel !== 'narrator' && !names.includes(sel)) names.push(sel);
+    return `<option value="narrator" ${!sel || sel === 'narrator' ? 'selected' : ''}>旁白 (narrator)</option>` +
+      names.map((n) => `<option value="${esc(n)}" ${n === sel ? 'selected' : ''}>${esc(n)}</option>`).join('');
+  };
+  const shots = ep.shots || [];
+  const totalSec = shots.reduce((a, s) => a + (Number(s.render?.duration) || Number(s.seconds) || 5), 0);
+  const epSelectHtml = `<select id="vidBoardEpSel" style="max-width:260px">${eps.map((e) => `<option value="${e.index}" ${e.index === ep.index ? 'selected' : ''}>${e.kind === 'trailer' ? '预告' : `第${e.index}集`} · ${esc(e.title)}</option>`).join('')}</select>`;
+  shotBox.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;padding:10px 12px;border:1px solid var(--border,#2c2a3a);border-radius:10px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        ${epSelectHtml}
+        <span style="font-size:12px;opacity:.75">第${ep.fromChapter}–${ep.toChapter}章 · ${shots.length} 镜 · 约 ${Math.round(totalSec)}s</span>
+        ${ep.staleChapters?.length ? `<span style="color:#ff9f43;font-size:12px">⚠ 原文第${ep.staleChapters.join(',')}章已更新</span>` : ''}
+      </div>
+      <div class="btn-row" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" id="vidGenSbBtn">📝 ${shots.length ? '重出分镜' : '生成分镜'}</button>
+        <button class="btn" id="vidAddShotBtn">➕ 新增镜头</button>
+        <button class="btn" id="vidUploadKfTrigger">📤 上传关键帧</button>
+        ${shots.length ? '<button class="btn" id="vidGenAllKfBtn">🎨 一键生全部关键帧</button>' : ''}
+        ${shots.length ? '<button class="btn primary" id="vidRenderAllBtn">🎥 渲染本集所有镜头</button>' : ''}
+        ${shots.length && shots.every((s) => s.render?.fileRel) ? '<button class="btn primary" id="vidToExportBtn">下一步：合成与交付 →</button>' : ''}
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">
+    ${shots.length ? shots.map((s) => {
+      const kfUrl = s.keyframeRef ? (vidKeyframes.find((k) => k.ref === s.keyframeRef)?.url || vidFileUrl(s.keyframeRef)) : '';
+      const seedVal = s.seed || (1000 + ep.index * 100 + s.index);
+      const qaRels = Array.isArray(s.render?.qaFrameRels) ? s.render.qaFrameRels : [];
+      return `<div class="vid-shot" data-shot="${s.index}" style="border:1px solid var(--border,#2c2a3a);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">
+          <div style="font-size:13px;font-weight:600">第 ${s.index} 镜 · ${esc(s.scene || '')} ${s.characters?.length ? '· ' + esc(s.characters.join('、')) : ''}</div>
+          <div style="display:flex;align-items:center;gap:4px">
+            <input class="vid-sec" type="number" min="5" max="15" value="${s.seconds || 5}" style="width:46px;font-size:12px" title="秒数 (5–15)" />s
+            <input class="vid-seed" type="number" value="${seedVal}" style="width:66px;font-size:11px" title="随机种子 (seed)" />
+            <button class="btn tiny vid-save">保存</button>
+            <button class="btn tiny ghost vid-del-shot" title="删除此镜">🗑</button>
+          </div>
+        </div>
+        ${kfUrl ? `<img src="${esc(kfUrl)}" style="width:100%;max-height:200px;object-fit:cover;border-radius:6px;background:#111" />` : '<div style="height:82px;border:1px dashed var(--border,#2c2a3a);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;opacity:.6">暂无关键帧（可点 AI 生关键帧、上传，或同场戏自动接力）</div>'}
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <select class="vid-kf" style="flex:1;min-width:110px;font-size:11px">${kfOpts(s.keyframeRef || '')}</select>
+          <button class="btn tiny vid-gen-kf">🎨 AI关键帧</button>
+          <button class="btn tiny primary vid-render">${s.render?.fileRel ? '🎥 重渲' : '🎥 渲染'}</button>
+          ${s.render?.fileRel ? '<button class="btn tiny vid-reroll" title="更换随机种子重新渲染">🎲 换种重渲</button>' : ''}
+        </div>
+        <div style="font-size:12px;opacity:.85">动作：${esc(s.action || '')}</div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="font-size:11px;opacity:.75;white-space:nowrap">说话人</span>
+          <select class="vid-speaker" style="flex:1;font-size:11px">${speakerOpts(s.speaker || 'narrator', s.characters)}</select>
+        </div>
+        <textarea class="vid-narr" rows="2" placeholder="旁白/台词（中文）" style="width:100%;font-size:12px">${esc(s.narration || '')}</textarea>
+        <textarea class="vid-prompt" rows="2" placeholder="English video prompt" style="width:100%;font-size:11px;opacity:.9">${esc(s.prompt || '')}</textarea>
+        <input class="vid-ambience" value="${esc(s.ambience || '')}" placeholder="English ambient sound / SFX（可选）" style="width:100%;font-size:11px;opacity:.85" />
+        ${s.render?.fileRel ? `<div style="display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:11px;opacity:.75;display:flex;justify-content:space-between">
+            <span>模式：${s.render.mode === 'ref2va' ? '🎭 Ref2V 锁脸' : '🖼 I2V 图生视频'} · ${(s.render.duration || s.seconds || 5).toFixed(1)}s</span>
+            ${s.render.renderSec ? `<span>耗时 ${s.render.renderSec}s</span>` : ''}
+          </div>
+          <video src="${vidFileUrl(s.render.fileRel)}" controls style="width:100%;max-height:190px;border-radius:6px;background:#000"></video>
+          ${qaRels.length ? `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px">
+            ${qaRels.map((rel, qi) => `<a href="${vidFileUrl(rel)}" target="_blank" title="${['首帧', '中帧', '尾帧'][qi] || 'QA帧'}" style="display:block;position:relative">
+              <img src="${vidFileUrl(rel)}" style="width:100%;height:68px;object-fit:cover;border-radius:4px;background:#111" />
+              <span style="position:absolute;left:4px;bottom:3px;font-size:10px;background:rgba(0,0,0,.65);color:#fff;padding:0 4px;border-radius:3px">${['首', '中', '尾'][qi] || qi + 1}</span>
+            </a>`).join('')}
+          </div>` : ''}
+        </div>` : ''}
+      </div>`;
+    }).join('') : '<div class="modal-hint">点击「生成分镜」为此集生成镜头表，或点「➕ 新增镜头」手动添加。</div>'}
+    </div>
+  `;
+
+  $('#vidBoardEpSel')?.addEventListener('change', (ev) => { vidCurEp = Number(ev.target.value); renderVideoModal(); });
+  $('#vidGenSbBtn')?.addEventListener('click', () => startVidJob('/api/book/video/storyboard', {
+    book: CUR.slug, episodeIndex: ep.index, aspect: $('#vidAspect').value,
+  }));
+  $('#vidAddShotBtn')?.addEventListener('click', async () => {
+    try {
+      await api('/api/book/video/shot/add', 'POST', { book: CUR.slug, episodeIndex: ep.index });
+      toast('已新增镜头');
+      await refreshVideoPlan();
+    } catch (e) { $('#vidErr').textContent = e.message; }
+  });
+  $('#vidUploadKfTrigger')?.addEventListener('click', () => $('#vidUploadKf')?.click());
+  $('#vidGenAllKfBtn')?.addEventListener('click', () => startVidJob('/api/book/video/shot/gen-keyframe', {
+    book: CUR.slug, episodeIndex: ep.index, aspect: $('#vidAspect').value, onlyMissing: true,
+  }));
+  $('#vidRenderAllBtn')?.addEventListener('click', () => startVidJob('/api/book/video/shot/render', {
+    book: CUR.slug, episodeIndex: ep.index, defaultKeyframeRef: vidKeyframes[0]?.ref || 'cover_bg',
+  }));
+  $('#vidToExportBtn')?.addEventListener('click', () => setVidStep('export'));
+
+  shotBox.querySelectorAll('.vid-shot').forEach((card) => {
+    const idx = Number(card.dataset.shot);
+    const saveShot = (seedOverride) => api('/api/book/video/shot/update', 'POST', {
+      book: CUR.slug, episodeIndex: ep.index, shotIndex: idx,
+      keyframeRef: card.querySelector('.vid-kf')?.value || '',
+      seconds: Number(card.querySelector('.vid-sec')?.value) || 5,
+      seed: seedOverride !== undefined ? seedOverride : (Number(card.querySelector('.vid-seed')?.value) || undefined),
+      speaker: card.querySelector('.vid-speaker')?.value || 'narrator',
+      narration: card.querySelector('.vid-narr')?.value || '',
+      prompt: card.querySelector('.vid-prompt')?.value || '',
+      ambience: card.querySelector('.vid-ambience')?.value || '',
+    });
+    card.querySelector('.vid-save')?.addEventListener('click', async () => {
+      try { await saveShot(); toast(`第 ${idx} 镜已保存`); await refreshVideoPlan(); } catch (e) { $('#vidErr').textContent = e.message; }
+    });
+    card.querySelector('.vid-del-shot')?.addEventListener('click', async () => {
+      try {
+        await api('/api/book/video/shot/delete', 'POST', { book: CUR.slug, episodeIndex: ep.index, shotIndex: idx });
+        toast(`已删除第 ${idx} 镜`);
+        await refreshVideoPlan();
+      } catch (e) { $('#vidErr').textContent = e.message; }
+    });
+    card.querySelector('.vid-gen-kf')?.addEventListener('click', async () => {
+      try {
+        await saveShot();
+        await startVidJob('/api/book/video/shot/gen-keyframe', {
+          book: CUR.slug, episodeIndex: ep.index, shotIndex: idx, aspect: $('#vidAspect').value,
+        });
+      } catch (e) { $('#vidErr').textContent = e.message; }
+    });
+    card.querySelector('.vid-render')?.addEventListener('click', async () => {
+      try {
+        await saveShot();
+        await startVidJob('/api/book/video/shot/render', {
+          book: CUR.slug, episodeIndex: ep.index, shotIndex: idx, force: true,
+          defaultKeyframeRef: vidKeyframes[0]?.ref || 'cover_bg',
+        });
+      } catch (e) { $('#vidErr').textContent = e.message; }
+    });
+    card.querySelector('.vid-reroll')?.addEventListener('click', async () => {
+      try {
+        const nextSeed = Math.floor(100000 + Math.random() * 899999);
+        const inp = card.querySelector('.vid-seed');
+        if (inp) inp.value = String(nextSeed);
+        await saveShot(nextSeed);
+        await startVidJob('/api/book/video/shot/render', {
+          book: CUR.slug, episodeIndex: ep.index, shotIndex: idx, force: true,
+          defaultKeyframeRef: vidKeyframes[0]?.ref || 'cover_bg',
+        });
+      } catch (e) { $('#vidErr').textContent = e.message; }
+    });
+  });
+
+  if (expBox) {
+    const allRendered = shots.length > 0 && shots.every((s) => s.render?.fileRel);
+    const pc = ep.publishCopy || null;
+    expBox.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <div><b>④ 合成与交付 · 第 ${ep.index} 集《${esc(ep.title)}》</b> (${shots.filter((s) => s.render?.fileRel).length}/${shots.length} 镜已渲染)</div>
+        <div class="btn-row" style="gap:8px;flex-wrap:wrap">
+          <button class="btn primary" id="vidComposeBtn" ${allRendered ? '' : 'disabled'}>🎞️ 合成成片 (MP4)</button>
+          <button class="btn" id="vidExportJianyingBtn" ${allRendered ? '' : 'disabled'}>📦 导出剪映草稿</button>
+          <button class="btn" id="vidGenPublishCopyBtn">📝 生成发布文案</button>
+          <button class="btn ghost" id="vidOpenEpDirBtn">📂 打开本集目录</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:12px">
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="vidBurnSub" checked /> <span>自动烧录短剧字幕 (ASS)</span>
+        </label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="vidUseTts" checked /> <span>启用多角色 / 旁白配音（IndexTTS2 / Edge-TTS）</span>
+        </label>
+        <label class="field" style="margin:0"><span style="font-size:12px">可选 BGM 音频（支持自动闪避）</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input id="vidBgmPath" placeholder="留空则不叠加，或点右侧上传" style="flex:1" />
+            <label class="btn tiny" style="cursor:pointer;margin:0">📤 上传<input id="vidUploadBgm" type="file" accept="audio/*" hidden /></label>
+          </div>
+        </label>
+        <label class="field" style="margin:0"><span style="font-size:12px">BGM 音量 (0.05 – 0.5)</span>
+          <input id="vidBgmVol" type="number" step="0.02" min="0.02" max="0.8" value="0.16" />
+        </label>
+      </div>
+      ${ep.outputRel ? `<div style="padding:12px;background:rgba(31,209,178,.08);border:1px solid rgba(31,209,178,.3);border-radius:8px;margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <div style="font-size:13px">✅ 成片已导出（${(ep.outputDuration || 0).toFixed(1)}s）</div>
+          <div style="display:flex;gap:6px">
+            <a class="btn tiny" href="${vidFileUrl(ep.outputRel)}" download="episode-${ep.index}.mp4">⬇ 下载 MP4</a>
+            <button class="btn tiny" id="vidOpenJianyingDirBtn">📂 打开剪映草稿目录</button>
+          </div>
+        </div>
+        <video src="${vidFileUrl(ep.outputRel)}" controls style="max-height:360px;border-radius:6px;background:#000"></video>
+      </div>` : '<div class="modal-hint" style="margin-bottom:12px">所有镜头渲染完成后，点击「🎞️ 合成成片 (MP4)」或「📦 导出剪映草稿」。</div>'}
+      ${pc ? `<div style="padding:12px;border:1px solid var(--border,#2c2a3a);border-radius:8px;display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <b style="font-size:13px">📣 短剧发布文案（抖音 / 快手 / 小红书）</b>
+          <button class="btn tiny" id="vidCopyPublishBtn">📋 一键复制全部</button>
+        </div>
+        ${pc.coverText?.length ? `<div style="font-size:12px"><b>封面花字：</b>${esc(pc.coverText.join(' / '))}</div>` : ''}
+        ${pc.titles?.length ? `<div style="font-size:12px"><b>候选标题：</b><ol style="margin:4px 0 0 18px;padding:0">${pc.titles.map((t) => `<li>${esc(t)}</li>`).join('')}</ol></div>` : ''}
+        ${pc.caption ? `<div style="font-size:12px;line-height:1.5"><b>平台简介：</b>${esc(pc.caption)}</div>` : ''}
+        ${pc.hashtags?.length ? `<div style="font-size:12px;color:#7D8BFF">${pc.hashtags.map((h) => '#' + esc(h)).join(' ')}</div>` : ''}
+      </div>` : ''}
+    `;
+    $('#vidComposeBtn')?.addEventListener('click', () => startVidJob('/api/book/video/episode/compose', {
+      book: CUR.slug,
+      episodeIndex: ep.index,
+      useTts: !!$('#vidUseTts')?.checked,
+      burnSubtitles: !!$('#vidBurnSub')?.checked,
+      bgmPath: $('#vidBgmPath')?.value.trim() || '',
+      bgmVolume: Number($('#vidBgmVol')?.value) || 0.16,
+    }));
+    $('#vidGenPublishCopyBtn')?.addEventListener('click', () => startVidJob('/api/book/video/episode/publish-copy', {
+      book: CUR.slug, episodeIndex: ep.index,
+    }));
+    $('#vidOpenEpDirBtn')?.addEventListener('click', async () => {
+      try { await api('/api/book/video/open-dir', 'POST', { book: CUR.slug, episodeIndex: ep.index }); }
+      catch (e) { $('#vidErr').textContent = e.message; }
+    });
+    $('#vidOpenJianyingDirBtn')?.addEventListener('click', async () => {
+      try { await api('/api/book/video/open-dir', 'POST', { book: CUR.slug, episodeIndex: ep.index, sub: 'jianying' }); }
+      catch (e) { $('#vidErr').textContent = e.message; }
+    });
+    $('#vidCopyPublishBtn')?.addEventListener('click', async () => {
+      if (!pc) return;
+      const txt = [
+        pc.titles?.[0] || '',
+        pc.caption || '',
+        (pc.hashtags || []).map((h) => '#' + h).join(' '),
+      ].filter(Boolean).join('\n\n');
+      try { await navigator.clipboard.writeText(txt); toast('发布文案已复制'); }
+      catch { toast('复制失败，请手动选中复制'); }
+    });
+    $('#vidUploadBgm')?.addEventListener('change', (ev) => {
+      const f = ev.target.files?.[0];
+      if (!f || !CUR) return;
+      const rd = new FileReader();
+      rd.onload = async () => {
+        try {
+          const r = await api('/api/book/video/upload-bgm', 'POST', { book: CUR.slug, filename: f.name, dataUrl: rd.result });
+          if ($('#vidBgmPath')) $('#vidBgmPath').value = r.path || '';
+          toast('BGM 已上传');
+        } catch (e) { $('#vidErr').textContent = e.message; }
+      };
+      rd.readAsDataURL(f);
+    });
+    $('#vidExportJianyingBtn')?.addEventListener('click', async () => {
+      try {
+        const r = await api('/api/book/video/episode/export-jianying', 'POST', { book: CUR.slug, episodeIndex: ep.index });
+        toast('已导出剪映草稿：' + r.outDir);
+        $('#vidStatus').textContent = '✅ 剪映草稿已导出到：' + r.outDir;
+      } catch (e) { $('#vidErr').textContent = e.message; }
+    });
+  }
+}
+
+async function refreshVideoPlan() {
+  if (!CUR) return;
+  const r = await api('/api/book/video/plan', 'POST', { book: CUR.slug });
+  vidPlan = r.plan || { episodes: [] };
+  vidBible = r.bible || { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] };
+  vidRef2V = !!r.ref2vaReady;
+  vidKeyframes = r.keyframes || [];
+  vidEdgeVoices = r.edgeVoices || [];
+  renderVideoBible();
+  renderVideoModal();
+}
+function stopVidPoll() { if (vidPoll) { clearInterval(vidPoll); vidPoll = null; } }
+async function startVidJob(endpoint, payload) {
+  if (!CUR) return;
+  $('#vidErr').textContent = '';
+  $('#vidStatus').textContent = '⏳ 正在执行…';
+  try {
+    await api(endpoint, 'POST', payload);
+    stopVidPoll();
+    vidPoll = setInterval(async () => {
+      try {
+        const s = await api('/api/book/video/job-status', 'POST', { book: CUR.slug });
+        if (s.msg) $('#vidStatus').textContent = (s.status === 'running' ? '⏳ ' : s.status === 'error' ? '❌ ' : '✅ ') + s.msg;
+        if (s.status === 'done') {
+          stopVidPoll();
+          await refreshVideoPlan();
+          toast('完成');
+        } else if (s.status === 'error') {
+          stopVidPoll();
+          $('#vidErr').textContent = s.error || '执行失败';
+        }
+      } catch {}
+    }, 2000);
+  } catch (e) { $('#vidErr').textContent = e.message; $('#vidStatus').textContent = ''; }
+}
+async function refreshVideoPreflight() {
+  const box = $('#vidPreflight');
+  if (!box) return;
+  try {
+    const r = await api('/api/local/probe-video', 'POST', {});
+    const lines = [];
+    for (const b of (r.blockers || [])) lines.push(`❌ ${esc(b)}`);
+    for (const w of (r.warnings || [])) lines.push(`⚠️ ${esc(w)}`);
+    if (!lines.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    const hasErr = (r.blockers || []).length > 0;
+    const comfyDown = r.checks?.comfy && !r.checks.comfy.ok;
+    box.style.background = hasErr ? 'rgba(255,90,90,.12)' : 'rgba(255,159,67,.12)';
+    box.style.border = `1px solid ${hasErr ? 'rgba(255,90,90,.45)' : 'rgba(255,159,67,.45)'}`;
+    box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div>${lines.join('<br>')}</div>
+      <div class="btn-row" style="gap:6px">
+        ${comfyDown ? '<button class="btn tiny primary" id="vidStartComfyBtn">▶ 一键启动 ComfyUI</button>' : ''}
+        <button class="btn tiny" id="vidRecheckEngineBtn">🔄 重新检测</button>
+      </div>
+    </div>`;
+    box.classList.remove('hidden');
+    $('#vidRecheckEngineBtn')?.addEventListener('click', () => refreshVideoPreflight());
+    $('#vidStartComfyBtn')?.addEventListener('click', async () => {
+      const btn = $('#vidStartComfyBtn');
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ 正在启动 ComfyUI…'; }
+      $('#vidErr').textContent = '';
+      try {
+        const res = await api('/api/local/start-comfyui', 'POST', {});
+        toast(res.alreadyRunning ? 'ComfyUI 已在运行' : (res.started ? 'ComfyUI 已就绪' : (res.note || '正在启动 ComfyUI')));
+        await refreshVideoPreflight();
+      } catch (e) {
+        $('#vidErr').textContent = e.message;
+        if (btn) { btn.disabled = false; btn.textContent = '▶ 一键启动 ComfyUI'; }
+      }
+    });
+  } catch {}
+}
+const openVideoModal = async () => {
+  if (!CUR) return;
+  vidPlan = { episodes: [] };
+  vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] };
+  vidKeyframes = [];
+  vidCurEp = 1;
+  $('#vidBookTitle').textContent = '🎬 AI 导演工作台 · ' + CUR.title;
+  $('#vidErr').textContent = '';
+  $('#vidStatus').textContent = '';
+  $('#vidPreflight')?.classList.add('hidden');
+  showView('video');
+  try {
+    await Promise.all([refreshVideoPlan(), refreshVideoPreflight()]);
+    setVidStep(vidPlan?.episodes?.length ? 'board' : 'assets');
+  } catch (e) { $('#vidErr').textContent = e.message; }
+};
+$('#btnVideo')?.addEventListener('click', openVideoModal);
+$('#btnVideoTop')?.addEventListener('click', openVideoModal);
+$('#vidClose')?.addEventListener('click', () => { stopVidPoll(); showView('shelf'); });
+$('#vidKind')?.addEventListener('change', () => {
+  $('#vidSec').value = $('#vidKind').value === 'trailer' ? 45 : 90;
+});
+$('#vidPlanBtn')?.addEventListener('click', () => startVidJob('/api/book/video/episodes/plan', {
+  book: CUR.slug,
+  kind: $('#vidKind').value,
+  fromChapter: Number($('#vidFrom').value) || undefined,
+  toChapter: Number($('#vidTo').value) || undefined,
+  targetSeconds: Number($('#vidSec').value) || 90,
+}));
+$('#vidUploadKf')?.addEventListener('change', (ev) => {
+  const f = ev.target.files?.[0];
+  if (!f || !CUR) return;
+  const rd = new FileReader();
+  rd.onload = async () => {
+    try {
+      await api('/api/book/video/upload-keyframe', 'POST', { book: CUR.slug, filename: f.name, dataUrl: rd.result });
+      toast('关键帧已上传');
+      await refreshVideoPlan();
+    } catch (e) { $('#vidErr').textContent = e.message; }
+  };
+  rd.readAsDataURL(f);
+  ev.target.value = '';
+});
 // ===== 书名实验工作台 & 全账号多书名实验中心 =====
 let neCurBook = null, nePoll = null, neManifest = null, neCurFqData = null;
 const NE_PALETTES = [
@@ -4675,9 +5304,24 @@ async function renderSettings() {
       <div class="btn-row" style="margin-top:6px"><button class="btn ghost" id="setImgTest" type="button" style="flex:0;padding:8px 16px">🔌 测试出图服务连接</button></div>
       <div id="setImgOut" class="modal-hint" style="margin:8px 0 0;white-space:pre-wrap"></div>
     </fieldset>
+    <fieldset class="field" style="border:1px solid var(--border,#333);border-radius:8px;padding:10px 12px">
+      <legend style="padding:0 6px;font-size:13px;opacity:.8">🎬 改编视频引擎（MiniMax H3 + IndexTTS）</legend>
+      <label class="field"><span>ComfyUI 地址（仅本机 loopback）</span>
+        <input id="setVidComfyUrl" value="${esc(c.video?.comfyUrl || 'http://127.0.0.1:8188')}"></label>
+      <label class="field"><span>H3 模型目录</span>
+        <input id="setVidModelRoot" value="${esc(c.video?.modelRoot || 'D:/AI/models/minimax-h3')}"></label>
+      <label class="field"><span>IndexTTS 目录</span>
+        <input id="setVidTtsRoot" value="${esc(c.video?.ttsRoot || 'D:/AI/codex-tools/index-tts')}"></label>
+      <label class="field"><span>旁白参考音色文件（可选 · wav/mp3）</span>
+        <input id="setVidTtsRef" value="${esc(c.video?.ttsRefAudio || '')}" placeholder="留空则只保留 H3 原生音轨"></label>
+      <div class="btn-row" style="margin-top:6px"><button class="btn ghost" id="setVidTest" type="button" style="flex:0;padding:8px 16px">🩺 检测视频引擎</button></div>
+      <div id="setVidOut" class="modal-hint" style="margin:8px 0 0;white-space:pre-wrap"></div>
+    </fieldset>
     <label class="field"><span>代理</span><select id="setProxy">
-      <option value="on" ${c.enableProxy ? 'selected' : ''}>开（用 unterm 当前代理）</option>
+      <option value="on" ${c.enableProxy ? 'selected' : ''}>开（继承 ~/.unterm/proxy.json，无则用下方地址）</option>
       <option value="off" ${!c.enableProxy ? 'selected' : ''}>关</option></select></label>
+    <label class="field"><span>代理地址兜底（可选 · 未装独立版 Unterm 时给 shell agent 注入）</span>
+      <input id="setProxyUrl" value="${esc(c.proxyUrl || '')}" placeholder="留空=自动读取 ~/.unterm/proxy.json；无 Unterm 时可填如 http://127.0.0.1:7897"></label>
     <label class="field"><span>Autopilot 自动监控应答</span><select id="setAuto">
       <option value="on" ${c.autopilot?.enabled ? 'selected' : ''}>开</option>
       <option value="off" ${!c.autopilot?.enabled ? 'selected' : ''}>关</option></select></label>
@@ -4690,6 +5334,7 @@ async function renderSettings() {
     const patch = {
       workspace: $('#setWs').value.trim(), defaultModel: $('#setModel').value,
       enableProxy: $('#setProxy').value === 'on',
+      proxyUrl: $('#setProxyUrl').value.trim(),
       autopilot: {
         enabled: $('#setAuto').value === 'on',
         maxAutoContinue: Number($('#setMax').value) || 40,
@@ -4727,6 +5372,12 @@ async function renderSettings() {
         workflowFile: $('#setComfyWf').value.trim(),
       },
     };
+    patch.video = {
+      comfyUrl: $('#setVidComfyUrl').value.trim() || 'http://127.0.0.1:8188',
+      modelRoot: $('#setVidModelRoot').value.trim() || 'D:/AI/models/minimax-h3',
+      ttsRoot: $('#setVidTtsRoot').value.trim() || 'D:/AI/codex-tools/index-tts',
+      ttsRefAudio: $('#setVidTtsRef').value.trim(),
+    };
     try { STATE.config = await api('/api/config', 'POST', { patch }); fillModels(); toast('设置已保存'); }
     catch (e) { toast(e.message); }
   });
@@ -4758,6 +5409,30 @@ async function renderSettings() {
       const r = await api('/api/local/probe-image', 'POST', { backend, baseUrl: backend === 'comfy' ? $('#setComfyUrl').value.trim() : undefined });
       out.textContent = r.ok ? `✅ 已连上 ${backend === 'a1111' ? 'SD WebUI' : 'ComfyUI'} @ ${r.baseUrl}｜${r.info}${r.models?.length ? '｜模型：' + r.models.slice(0, 5).join('、') : ''}`
                              : `❌ ${r.error}`;
+    } catch (e) { out.textContent = '❌ ' + e.message; }
+  });
+  $('#setVidTest')?.addEventListener('click', async () => {
+    const out = $('#setVidOut'); out.textContent = '⏳ 检测中…';
+    try {
+      const r = await api('/api/local/probe-video', 'POST', {
+        video: {
+          comfyUrl: $('#setVidComfyUrl').value.trim(),
+          modelRoot: $('#setVidModelRoot').value.trim(),
+          ttsRoot: $('#setVidTtsRoot').value.trim(),
+        },
+      });
+      const c = r.checks || {};
+      const lines = [
+        `显卡: ${c.gpu?.ok ? '✅' : '❌'} ${c.gpu?.detail || ''}`,
+        `内存: ${c.ram?.ok ? '✅' : '⚠️'} ${c.ram?.detail || ''}`,
+        `ComfyUI: ${c.comfy?.ok ? '✅' : '❌'} ${c.comfy?.detail || ''}`,
+        `H3 模型: ${c.models?.ok ? '✅' : '❌'} ${c.models?.detail || ''}`,
+        `IndexTTS: ${c.tts?.ok ? '✅' : '⚠️ 未找到'} ${c.tts?.detail || ''}`,
+        `ffmpeg/ffprobe: ${c.ffmpeg?.ok && c.ffprobe?.ok ? '✅ 可用' : '❌ 缺失'}`,
+      ];
+      for (const b of (r.blockers || [])) lines.push(`🚫 ${b}`);
+      for (const w of (r.warnings || [])) lines.push(`⚠️ ${w}`);
+      out.textContent = lines.join('\n');
     } catch (e) { out.textContent = '❌ ' + e.message; }
   });
   // 书库目录：原生文件夹选择器（桌面应用用 Tauri 对话框；浏览器回退到手填路径）
@@ -4812,13 +5487,29 @@ async function renderEnv() {
         ? `⚪ 已安装但未启动 (${esc(uz.appPath)}) <button class="btn tiny primary" id="envLaunchUnzoo" style="margin-left:8px">🚀 一键启动 Unzoo</button>`
         : `✖ 未安装（番茄发布/流量分析/拆书/网页模型需要） <a class="btn tiny primary" href="${esc(uz.downloadUrl || 'https://unzoo.ai/download')}" target="_blank" rel="noopener" style="margin-left:8px;text-decoration:none;">⬇️ 下载 Unzoo</a> <a class="btn tiny ghost" href="${esc(uz.githubUrl || 'https://github.com/zhitongblog/unzooai-skills/releases')}" target="_blank" rel="noopener" style="margin-left:4px;text-decoration:none;">GitHub</a>`)],
   ];
-  for (const m of e.models) rows.push([esc(m.name), esc(ok(m.available) + (m.path || '未安装'))]);
+  for (const m of e.models) {
+    const a = m.auth;
+    if (a && a.supported) {
+      if (!m.available) {
+        rows.push([esc(m.name), `✖ 未安装 <button class="btn tiny env-auth-btn" data-model="${esc(m.id)}" style="margin-left:8px">📦 安装指引</button>`]);
+      } else if (a.loggedIn) {
+        rows.push([esc(m.name), `✔ 已就绪 · ${esc(a.detail || '已登录')} (${esc(m.path)}) <button class="btn tiny ghost env-auth-btn" data-model="${esc(m.id)}" style="margin-left:8px">🔑 切换/重登</button>`]);
+      } else {
+        rows.push([esc(m.name), `⚠️ 已安装但未登录 (${esc(m.path)}) <button class="btn tiny primary env-auth-btn" data-model="${esc(m.id)}" style="margin-left:8px">🔑 去登录</button>`]);
+      }
+    } else {
+      rows.push([esc(m.name), esc(ok(m.available) + (m.path || '未安装'))]);
+    }
+  }
   rows.push(['运行中实例', esc(e.instances.map(i => `${i.id}${i.headless ? '(内置无头)' : ''}(v${i.version})`).join('、') || '无')]);
   rows.push(['代理', esc(e.proxy.enabled ? ('开 · ' + (e.proxy.url || '(未配置)')) : '关')]);
   rows.push(['书库目录', esc(ok(e.workspaceExists) + (e.workspace || '—'))]);
   for (const [k, vHtml] of rows) {
     const r = el('div', 'env-row'); r.innerHTML = `<span class="k">${k}</span><span class="v">${vHtml}</span>`; box.appendChild(r);
   }
+  box.querySelectorAll('.env-auth-btn').forEach(btn => {
+    btn.addEventListener('click', () => openAuthGuide(btn.dataset.model, { onDone: renderEnv }));
+  });
   $('#envLaunchUnterm')?.addEventListener('click', async () => {
     try { await api('/api/companion/launch', 'POST', { target: 'unterm' }); toast('已启动 Unterm'); setTimeout(renderEnv, 2000); }
     catch (err) { toast(err.message); }
@@ -4851,10 +5542,13 @@ function initDrawers() {
     const el = document.getElementById(id);
     if (!el) continue;
     let saved = null;
-    try { saved = localStorage.getItem('novelstudio:drawer:' + id); } catch {}
+    try {
+      saved = localStorage.getItem('storyalter:drawer:' + id);
+      if (saved === null) saved = localStorage.getItem('novelstudio:drawer:' + id);
+    } catch {}
     el.open = saved === null ? defOpen : saved === '1';
     el.addEventListener('toggle', () => {
-      try { localStorage.setItem('novelstudio:drawer:' + id, el.open ? '1' : '0'); } catch {}
+      try { localStorage.setItem('storyalter:drawer:' + id, el.open ? '1' : '0'); } catch {}
     });
   }
 }
@@ -4866,3 +5560,173 @@ taskRender();
 if (typeof document !== 'undefined' && document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', taskRender, { once: true });
 }
+
+// 内置交互终端：把输入/快捷键转发到后台 unterm-core PTY
+async function sendTerminalRaw(text) {
+  if (!CUR) return;
+  try { await api('/api/terminal/input', 'POST', { book: CUR.slug, text }); }
+  catch (e) { toast('终端输入失败：' + e.message); }
+}
+$('#mirrorSendBtn')?.addEventListener('click', () => {
+  const inp = $('#mirrorInput'); if (!inp) return;
+  const v = inp.value; inp.value = '';
+  sendTerminalRaw(v + '\r');
+});
+$('#mirrorInput')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); $('#mirrorSendBtn')?.click(); }
+});
+document.querySelectorAll('#mirrorTermBar [data-tkey]').forEach((b) => {
+  b.addEventListener('click', () => {
+    const raw = b.dataset.tkey.replace(/\\r/g, '\r').replace(/\\x1b/g, '\x1b').replace(/\\x03/g, '\x03');
+    sendTerminalRaw(raw);
+  });
+});
+
+// ── CLI 登录/安装引导 ─────────────────────────────────────────
+function isAuthErrorText(msg) {
+  return /(not authenticated|authentication (failed|required|expired)|failed to authenticate|401 unauthorized|please (log ?in|sign ?in)|eligibility check failed|userinfo": EOF|未登录|请先登录|未检测到.*登录)/i.test(String(msg || ''));
+}
+
+let AUTH_GUIDE_STATE = { modelId: null, sessionId: null, timer: null, onDone: null };
+
+async function closeAuthGuide() {
+  if (AUTH_GUIDE_STATE.timer) { clearInterval(AUTH_GUIDE_STATE.timer); AUTH_GUIDE_STATE.timer = null; }
+  const sid = AUTH_GUIDE_STATE.sessionId;
+  AUTH_GUIDE_STATE.sessionId = null;
+  if (sid) { try { await api('/api/auth/close', 'POST', { id: sid }); } catch {} }
+  $('#authGuideModal')?.classList.add('hidden');
+}
+
+async function refreshAuthGuideStatus() {
+  const mId = AUTH_GUIDE_STATE.modelId;
+  if (!mId) return null;
+  $('#authGuideErr').textContent = '';
+  const r = await api('/api/auth/status?model=' + encodeURIComponent(mId));
+  const m = r.model || {};
+  const a = m.auth || {};
+  const p = r.proxy || {};
+  $('#authGuideTitle').textContent = `🔑 ${m.name || mId} 登录引导`;
+  if (!m.available) {
+    $('#authGuideInfo').textContent = `当前本机尚未安装 ${m.name || mId} CLI。`;
+    $('#authInstallBox').classList.remove('hidden');
+    $('#authInstallCmd').textContent = a.installCmd || `请先安装 ${mId} CLI`;
+    $('#authStartBtn').classList.add('hidden');
+  } else if (a.loggedIn) {
+    $('#authGuideInfo').textContent = `✅ ${a.detail || '已登录'}（可直接开始写作，也可重新启动终端切换账号）`;
+    $('#authInstallBox').classList.add('hidden');
+    $('#authStartBtn').classList.remove('hidden');
+    $('#authStartBtn').textContent = '🔑 在内置终端切换/重新登录';
+  } else {
+    $('#authGuideInfo').textContent = `${a.note || '检测到尚未登录。点击下方按钮将在内置终端中启动登录流程，按提示在浏览器完成授权即可。'}`;
+    $('#authInstallBox').classList.add('hidden');
+    $('#authStartBtn').classList.remove('hidden');
+    $('#authStartBtn').textContent = '🔑 一键在内置终端登录';
+  }
+  const showProxyWarn = !!a.needsProxy && (!p.enabled || !p.url);
+  const warn = $('#authGuideProxyWarn');
+  warn.classList.toggle('hidden', !showProxyWarn);
+  if (showProxyWarn) {
+    warn.textContent = '⚠️ 当前未开启代理，海外 CLI 登录可能卡在网络验证或报错 EOF，建议先去「设置」开启代理。';
+  }
+  $('#authToSettingsBtn').classList.toggle('hidden', !showProxyWarn);
+  return r;
+}
+
+async function openAuthGuide(modelId, { onDone = null } = {}) {
+  await closeAuthGuide();
+  AUTH_GUIDE_STATE = { modelId, sessionId: null, timer: null, onDone };
+  $('#authTermWrap').classList.add('hidden');
+  $('#authTermScreen').textContent = '';
+  $('#authUrlBtn').classList.add('hidden');
+  $('#authGuideErr').textContent = '';
+  $('#authGuideModal').classList.remove('hidden');
+  try { await refreshAuthGuideStatus(); } catch (e) { $('#authGuideErr').textContent = e.message; }
+}
+
+async function ensureModelAuthReady(modelId, onReady = null) {
+  try {
+    const r = await api('/api/auth/status?model=' + encodeURIComponent(modelId));
+    const a = r?.model?.auth;
+    if (!a || !a.supported || (r.model?.available && a.loggedIn)) return true;
+    await openAuthGuide(modelId, { onDone: onReady });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+$('#authGuideClose')?.addEventListener('click', closeAuthGuide);
+$('#authRecheckBtn')?.addEventListener('click', async () => {
+  try {
+    const r = await refreshAuthGuideStatus();
+    if (r?.model?.available && r?.model?.auth?.loggedIn) {
+      toast('已检测到登录成功');
+      const cb = AUTH_GUIDE_STATE.onDone;
+      await closeAuthGuide();
+      if (cb) cb();
+    }
+  } catch (e) { $('#authGuideErr').textContent = e.message; }
+});
+$('#authToSettingsBtn')?.addEventListener('click', async () => {
+  await closeAuthGuide();
+  showView('settings');
+});
+$('#authStartBtn')?.addEventListener('click', async () => {
+  const mId = AUTH_GUIDE_STATE.modelId;
+  if (!mId) return;
+  const btn = $('#authStartBtn');
+  btn.disabled = true; $('#authGuideErr').textContent = '';
+  try {
+    const r = await api('/api/auth/start', 'POST', { model: mId });
+    AUTH_GUIDE_STATE.sessionId = r.sessionId;
+    $('#authTermWrap').classList.remove('hidden');
+    $('#authTermScreen').textContent = '正在启动内置登录终端…\n';
+    if (AUTH_GUIDE_STATE.timer) clearInterval(AUTH_GUIDE_STATE.timer);
+    AUTH_GUIDE_STATE.timer = setInterval(async () => {
+      const sid = AUTH_GUIDE_STATE.sessionId;
+      if (!sid) return;
+      try {
+        const p = await api('/api/auth/poll?id=' + encodeURIComponent(sid));
+        const scr = $('#authTermScreen');
+        if (p.screen && scr.textContent !== p.screen) {
+          scr.textContent = p.screen;
+          scr.scrollTop = scr.scrollHeight;
+        }
+        const urlBtn = $('#authUrlBtn');
+        if (p.authUrl) {
+          urlBtn.href = p.authUrl;
+          urlBtn.classList.remove('hidden');
+        }
+        if (p.loggedIn) {
+          toast(`✅ ${mId} 登录成功！`);
+          const cb = AUTH_GUIDE_STATE.onDone;
+          await closeAuthGuide();
+          if (cb) cb();
+        }
+      } catch {}
+    }, 1000);
+  } catch (e) {
+    $('#authGuideErr').textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+async function sendAuthTermRaw(text) {
+  const sid = AUTH_GUIDE_STATE.sessionId;
+  if (!sid) return;
+  try { await api('/api/auth/input', 'POST', { id: sid, text }); }
+  catch (e) { $('#authGuideErr').textContent = e.message; }
+}
+$('#authKeyEnter')?.addEventListener('click', () => sendAuthTermRaw('\r'));
+$('#authKeyUp')?.addEventListener('click', () => sendAuthTermRaw('\x1b[A'));
+$('#authKeyDown')?.addEventListener('click', () => sendAuthTermRaw('\x1b[B'));
+$('#authKeyCtrlC')?.addEventListener('click', () => sendAuthTermRaw('\x03'));
+$('#authTermSend')?.addEventListener('click', () => {
+  const inp = $('#authTermInput'); if (!inp) return;
+  const v = inp.value; inp.value = '';
+  sendAuthTermRaw(v + '\r');
+});
+$('#authTermInput')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); $('#authTermSend')?.click(); }
+});

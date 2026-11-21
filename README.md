@@ -1,4 +1,8 @@
-# 📚 Novel Studio · 网文工作室
+<p align="center"><img src="docs/brand/storyalter-lockup-light.svg" alt="StoryAlter · AI 故事工作室" width="520"></p>
+
+# StoryAlter · AI 故事工作室
+
+> 你的 AI 分身，写成小说，拍成短剧。（桌面客户端，原 Novel Studio）
 
 [![CI](https://github.com/zhitongblog/novel-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/zhitongblog/novel-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)

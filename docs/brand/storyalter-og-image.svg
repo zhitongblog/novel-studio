@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <title>StoryAlter · AI 故事工作室</title>
+  <defs>
+    <linearGradient id="sa-left" x1="0" y1="0" x2="0.6" y2="1"><stop offset="0" stop-color="#1FD1B2"/><stop offset="1" stop-color="#3AA6C8"/></linearGradient>
+    <linearGradient id="sa-right" x1="0" y1="0" x2="0.6" y2="1"><stop offset="0" stop-color="#7D8BFF"/><stop offset="1" stop-color="#9A6BFF"/></linearGradient>
+    <linearGradient id="sa-cover" x1="272" y1="0" x2="752" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#1FD1B2"/><stop offset="1" stop-color="#9A6BFF"/></linearGradient>
+    <radialGradient id="glow-l" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#1FD1B2" stop-opacity="0.22"/><stop offset="1" stop-color="#1FD1B2" stop-opacity="0"/></radialGradient>
+    <radialGradient id="glow-r" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#9A6BFF" stop-opacity="0.24"/><stop offset="1" stop-color="#9A6BFF" stop-opacity="0"/></radialGradient>
+    <path id="sa-page" d="M 300 318 C 360 296, 420 292, 452 300 C 470 318, 474 344, 472 372 C 471 392, 476 408, 484 424 C 494 444, 504 458, 506 468 C 507 477, 499 482, 489 485 C 495 494, 494 503, 487 509 C 494 516, 493 526, 485 532 C 491 541, 490 551, 482 560 C 474 570, 461 576, 456 586 C 452 606, 456 632, 470 660 C 482 684, 496 700, 506 712 C 452 690, 380 686, 300 704 Z"/>
+  </defs>
+  <rect width="1200" height="630" fill="#15151F"/>
+  <circle cx="860" cy="250" r="360" fill="url(#glow-l)"/>
+  <circle cx="1010" cy="420" r="380" fill="url(#glow-r)"/>
+  <!-- 符号：右侧大图 -->
+  <g transform="translate(770 128) scale(0.72) translate(-240 -268)">
+    <path d="M 272 344 L 272 728 C 360 708, 440 712, 512 748 C 584 712, 664 708, 752 728 L 752 344" fill="none" stroke="url(#sa-cover)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" opacity="0.6"/>
+    <use href="#sa-page" fill="url(#sa-left)"/>
+    <use href="#sa-page" fill="url(#sa-right)" transform="translate(1024 0) scale(-1 1)"/>
+  </g>
+  <text x="80" y="250" fill="#F4F3FA" font-family="'Inter','Segoe UI Variable Display','Segoe UI',sans-serif" font-size="96" font-weight="650" letter-spacing="-2">Story<tspan fill="#A99BFF">Alter</tspan></text>
+  <text x="84" y="312" fill="#9C9AB8" font-family="'PingFang SC','Microsoft YaHei UI','Microsoft YaHei',sans-serif" font-size="34" font-weight="500" letter-spacing="3">AI 故事工作室</text>
+  <rect x="84" y="350" width="120" height="4" rx="2" fill="#7D8BFF"/>
+  <text x="84" y="420" fill="#F4F3FA" font-family="'PingFang SC','Microsoft YaHei UI','Microsoft YaHei',sans-serif" font-size="40" font-weight="600">你的 AI 分身，写成小说，拍成短剧。</text>
+  <text x="84" y="470" fill="#9C9AB8" font-family="'Inter','Segoe UI',sans-serif" font-size="26">Your AI alter ego — from novel to screen.</text>
+  <text x="84" y="560" fill="#6F6D88" font-family="'Inter','Segoe UI',sans-serif" font-size="24" letter-spacing="1">storyalter.com</text>
+</svg>

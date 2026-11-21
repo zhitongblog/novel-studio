@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// Novel Studio 桌面端：Tauri 原生窗口 + 启动时拉起 Node 引擎(novel serve)作为后端。
+// StoryAlter 桌面端：Tauri 原生窗口 + 启动时拉起 Node 引擎(novel serve)作为后端。
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
@@ -132,7 +132,7 @@ fn start_engine(resource_dir: Option<PathBuf>) -> Option<Child> {
     kill_stale_engine();   // 先清残留旧引擎，确保新引擎能绑上 8787（加载最新代码）
     let engine = engine_path(resource_dir);
     let node = node_bin();
-    eprintln!("[novel-studio] starting engine: {} {} serve --port {}", node, engine, ENGINE_PORT);
+    eprintln!("[storyalter] starting engine: {} {} serve --port {}", node, engine, ENGINE_PORT);
     let mut cmd = Command::new(&node);
     cmd.arg(&engine).arg("serve").arg("--port").arg(ENGINE_PORT);
     #[cfg(not(target_os = "windows"))]
@@ -158,7 +158,7 @@ fn start_engine(resource_dir: Option<PathBuf>) -> Option<Child> {
     {
         Ok(child) => Some(child),
         Err(e) => {
-            eprintln!("[novel-studio] failed to start engine ({}). 请确认已安装 Node。", e);
+            eprintln!("[storyalter] failed to start engine ({}). 请确认已安装 Node。", e);
             None
         }
     }
@@ -174,7 +174,7 @@ fn main() {
             // 【引擎死了要自己爬起来】2026-09-15 一天里引擎无声无息地没了两次：
             // 一次把 277 章的重发停在半路没人知道，一次把大纲修订的会话记录抹了。
             // 表现都只是"HTTP 000"，窗口还在、界面还开着，作者完全看不出发生了什么。
-            // 这里守着子进程：非正常退出就重启，并把事件写进 ~/.novel-studio/engine-restart.log 留痕。
+            // 这里守着子进程：非正常退出就重启，并把事件写进 ~/.storyalter/engine-restart.log 留痕。
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -194,13 +194,13 @@ fn main() {
                 let when = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                 if let Some(home) = dirs_home() {
-                    let dir = home.join(".novel-studio");
+                    let dir = home.join(".storyalter");
                     let _ = std::fs::create_dir_all(&dir);
                     let _ = std::fs::OpenOptions::new().create(true).append(true)
                         .open(dir.join("engine-restart.log"))
                         .map(|mut f| { use std::io::Write; let _ = writeln!(f, "{} 引擎进程已退出 → 自动重启", when); });
                 }
-                eprintln!("[novel-studio] engine exited unexpectedly -> restarting");
+                eprintln!("[storyalter] engine exited unexpectedly -> restarting");
                 if let Some(sc) = handle.try_state::<Sidecar>() {
                     let mut guard = sc.0.lock().unwrap();
                     *guard = start_engine(resource_dir.clone());
@@ -218,5 +218,5 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running Novel Studio");
+        .expect("error while running StoryAlter");
 }

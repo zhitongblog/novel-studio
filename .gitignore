@@ -29,3 +29,10 @@ dist/
 # 内置打包的 Unterm 二进制（仅进安装包，不进 git 源码库）
 bin/unterm-core*
 bin/unterm-cli*
+
+# Local video engine scratch output
+tmp/
+__pycache__/
+bin/conpty.dll
+bin/OpenConsole.exe
+*.lnk

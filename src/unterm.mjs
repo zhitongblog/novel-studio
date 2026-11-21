@@ -373,7 +373,11 @@ export function proxyUrlFrom(p) {
   if (p.enabled === false || p.mode === 'off') return '';
   return p.http_proxy || p.socks_proxy || '';
 }
-export function proxyUrl() { return proxyUrlFrom(readProxyConfig()); }
+export function proxyUrl(cfg) {
+  const p = readProxyConfig();
+  if (p) return proxyUrlFrom(p);
+  return String(cfg?.proxyUrl || '').trim();
+}
 
 // —— 实例 ——
 export function listInstances() {

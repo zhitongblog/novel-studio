@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>StoryAlter</title>
+  <defs>
+    <!-- 左页 = 作者（青），右页 = 分身（紫） -->
+    <linearGradient id="sa-left" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#1FD1B2"/>
+      <stop offset="1" stop-color="#3AA6C8"/>
+    </linearGradient>
+    <linearGradient id="sa-right" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#7D8BFF"/>
+      <stop offset="1" stop-color="#9A6BFF"/>
+    </linearGradient>
+    <linearGradient id="sa-cover" x1="272" y1="0" x2="752" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1FD1B2"/>
+      <stop offset="1" stop-color="#9A6BFF"/>
+    </linearGradient>
+    <!-- 左页：外沿直边，内沿（靠书脊）是一张朝右的侧脸；两页之间的负形是一只花瓶（Rubin vase）。 -->
+    <path id="sa-page" d="
+      M 300 318
+      C 360 296, 420 292, 452 300
+      C 470 318, 474 344, 472 372
+      C 471 392, 476 408, 484 424
+      C 494 444, 504 458, 506 468
+      C 507 477, 499 482, 489 485
+      C 495 494, 494 503, 487 509
+      C 494 516, 493 526, 485 532
+      C 491 541, 490 551, 482 560
+      C 474 570, 461 576, 456 586
+      C 452 606, 456 632, 470 660
+      C 482 684, 496 700, 506 712
+      C 452 690, 380 686, 300 704
+      Z"/>
+    <g id="sa-symbol">
+      <path d="M 272 344 L 272 728 C 360 708, 440 712, 512 748 C 584 712, 664 708, 752 728 L 752 344"
+            fill="none" stroke="url(#sa-cover)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" opacity="0.6"/>
+      <use href="#sa-page" fill="url(#sa-left)"/>
+      <use href="#sa-page" fill="url(#sa-right)" transform="translate(1024 0) scale(-1 1)"/>
+    </g>
+  </defs>
+  <rect width="1024" height="1024" rx="228" fill="#15151F"/>
+  <!-- 符号原始范围约 x 272–752 / y 292–760，放大到画布约 60% 并居中 -->
+  <use href="#sa-symbol" transform="translate(512 512) scale(1.26) translate(-512 -526)"/>
+</svg>

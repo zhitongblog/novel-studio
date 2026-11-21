@@ -33,7 +33,7 @@ function workflowSdxl({ prompt, negative, width, height, seed, steps, cfgScale, 
       seed, steps, cfg: cfgScale, sampler_name: sampler || 'dpmpp_2m', scheduler: scheduler || 'karras',
       denoise: 1, model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['4', 0] } },
     6: { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
-    7: { class_type: 'SaveImage', inputs: { filename_prefix: 'novelstudio', images: ['6', 0] } },
+    7: { class_type: 'SaveImage', inputs: { filename_prefix: 'storyalter', images: ['6', 0] } },
   };
 }
 
@@ -60,7 +60,7 @@ function workflowQwenImage({ prompt, negative, width, height, seed, steps, cfgSc
       seed, steps, cfg: cfgScale, sampler_name: sampler || 'euler', scheduler: scheduler || 'simple',
       denoise: 1, model: ['7', 0], positive: ['4', 0], negative: ['5', 0], latent_image: ['6', 0] } },
     9: { class_type: 'VAEDecode', inputs: { samples: ['8', 0], vae: ['3', 0] } },
-    10: { class_type: 'SaveImage', inputs: { filename_prefix: 'novelstudio', images: ['9', 0] } },
+    10: { class_type: 'SaveImage', inputs: { filename_prefix: 'storyalter', images: ['9', 0] } },
   };
 }
 
@@ -91,7 +91,7 @@ function applyWorkflowFile(file, vars) {
 // 流程：POST /prompt 排队 → 轮询 /history/{id} 等出图 → GET /view 取二进制。
 async function comfyGenerate({ base, wf, timeoutMs, onLog }) {
   const host = root(base);
-  const clientId = 'novel-studio-' + Date.now();
+  const clientId = 'storyalter-' + Date.now();
   let r;
   try {
     r = await fetch(host + '/prompt', {

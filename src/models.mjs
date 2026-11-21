@@ -50,7 +50,7 @@ export const MODELS = {
   },
   agy: {
     id: 'agy',
-    name: 'Antigravity（Google）',
+    name: 'Antigravity / agy（Google）',
     bin: 'agy',
     untermAgentId: 'agy',
     // 实测 agy 1.1.27 的接口与 claude 几乎一致：
@@ -423,4 +423,182 @@ export function canRunHeadless(modelId) {
   if (!m) return false;
   if (m.kind === 'web' || m.kind === 'api') return false;   // 这两类本来就不走 spawn
   return !!m.bin;
+}
+
+const CLI_INSTALL_HINTS = {
+  claude: {
+    installCmd: 'npm install -g @anthropic-ai/claude-code',
+    loginArgs: ['auth', 'login'],
+    loginCmd: 'claude auth login',
+    needsProxy: true,
+    note: '运行后按提示按回车打开浏览器授权 Anthropic 账号，或配置 ANTHROPIC_API_KEY。',
+  },
+  agy: {
+    installCmd: 'winget install Google.Antigravity',
+    loginArgs: [],
+    loginCmd: 'agy',
+    needsProxy: true,
+    note: '若已安装但不在 PATH，可在终端运行 agy install；首次运行 agy 会弹出 Google OAuth 授权。',
+  },
+  codex: {
+    installCmd: 'npm install -g @openai/codex',
+    loginArgs: ['login'],
+    loginCmd: 'codex login',
+    needsProxy: true,
+    note: '运行 codex login 用 ChatGPT 账号登录，或配置 OPENAI_API_KEY。',
+  },
+  gemini: {
+    installCmd: 'npm install -g @google/gemini-cli',
+    loginArgs: [],
+    loginCmd: 'gemini',
+    needsProxy: true,
+    note: '首次运行 gemini 选择 Google 登录，或配置 GEMINI_API_KEY。',
+  },
+  qwen: {
+    installCmd: 'npm install -g @qwen-code/qwen-code',
+    loginArgs: [],
+    loginCmd: 'qwen',
+    needsProxy: false,
+    note: '首次运行 qwen 选择 Qwen OAuth 登录，即可领取每日免费额度。',
+  },
+  trae: {
+    installCmd: '请从 Trae 官网安装 Trae CLI',
+    loginArgs: [],
+    loginCmd: 'trae-cli',
+    needsProxy: false,
+    note: '首次运行 trae-cli 完成登录。',
+  },
+};
+
+function nonEmptyFile(p, minBytes = 20) {
+  try {
+    const st = fs.statSync(p);
+    return st.isFile() && st.size >= minBytes;
+  } catch { return false; }
+}
+
+function readJsonSafe(p) {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
+}
+
+/**
+ * 检测 CLI 模型的登录状态与安装/登录引导信息。
+ * web / api 模型不走本地 CLI，返回 supported: false。
+ */
+export function detectModelAuth(id, detected = null, { checkCli = false } = {}) {
+  const m = getModel(id);
+  if (!m || m.kind === 'web' || m.kind === 'api') {
+    return { supported: false, loggedIn: true, status: 'n/a' };
+  }
+  const det = detected || detectModel(id);
+  const hint = CLI_INSTALL_HINTS[id] || {
+    installCmd: '', loginArgs: [], loginCmd: m.bin, needsProxy: false, note: '',
+  };
+  if (!det.available) {
+    return {
+      supported: true,
+      installed: false,
+      loggedIn: false,
+      status: 'not_installed',
+      method: null,
+      detail: '未检测到 CLI 可执行文件',
+      ...hint,
+    };
+  }
+
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  let loggedIn = false;
+  let method = null;
+  let detail = '';
+
+  if (id === 'claude') {
+    if (process.env.ANTHROPIC_API_KEY) {
+      loggedIn = true; method = 'api_key'; detail = '已配置 ANTHROPIC_API_KEY';
+    } else if (checkCli) {
+      const r = spawnSync(det.path || m.bin, ['auth', 'status'], {
+        encoding: 'utf8', timeout: 4000, windowsHide: true,
+      });
+      const out = `${r.stdout || ''}\n${r.stderr || ''}`.trim();
+      const j = (() => { try { return JSON.parse(r.stdout || '{}'); } catch { return null; } })();
+      if (j && typeof j.loggedIn === 'boolean') {
+        loggedIn = j.loggedIn;
+        method = j.authMethod || (loggedIn ? 'oauth' : null);
+        detail = loggedIn ? `已登录 (${method || 'oauth'})` : 'Claude Code 尚未登录';
+      }
+    }
+    if (!loggedIn && !detail && home) {
+      const cred = readJsonSafe(path.join(home, '.claude', '.credentials.json'));
+      const hasOauth = !!(cred?.claudeAiOauth?.accessToken || cred?.claudeAiOauth?.refreshToken || cred?.oauthAccount);
+      const claudeJson = readJsonSafe(path.join(home, '.claude.json'));
+      const hasAcct = !!(claudeJson?.oauthAccount?.emailAddress || claudeJson?.oauthAccount?.accountUuid);
+      if (hasOauth || hasAcct) {
+        loggedIn = true; method = 'oauth'; detail = claudeJson?.oauthAccount?.emailAddress || '已登录';
+      } else {
+        detail = '未检测到 Claude 登录凭据';
+      }
+    }
+  } else if (id === 'agy') {
+    if (home) {
+      const stateA = path.join(home, '.gemini', 'antigravity', 'antigravity_state.pbtxt');
+      const stateB = path.join(home, '.gemini', 'antigravity-cli', 'jetski_state.pbtxt');
+      const googleAcc = readJsonSafe(path.join(home, '.gemini', 'google_accounts.json'));
+      if (nonEmptyFile(stateA, 30) || nonEmptyFile(stateB, 30) || googleAcc?.active) {
+        loggedIn = true;
+        method = 'google_oauth';
+        detail = googleAcc?.active ? `已登录 (${googleAcc.active})` : '已检测到 Antigravity 登录态';
+      } else {
+        detail = '未检测到 Antigravity 登录态';
+      }
+    }
+  } else if (id === 'codex') {
+    if (process.env.OPENAI_API_KEY) {
+      loggedIn = true; method = 'api_key'; detail = '已配置 OPENAI_API_KEY';
+    } else if (home) {
+      const auth = readJsonSafe(path.join(home, '.codex', 'auth.json'));
+      if (auth?.tokens?.access_token || auth?.tokens?.refresh_token || auth?.OPENAI_API_KEY) {
+        loggedIn = true; method = auth?.OPENAI_API_KEY ? 'api_key' : 'chatgpt_oauth'; detail = '已检测到 Codex 登录凭据';
+      } else {
+        detail = '未检测到 Codex 登录凭据';
+      }
+    }
+  } else if (id === 'gemini') {
+    if (process.env.GEMINI_API_KEY) {
+      loggedIn = true; method = 'api_key'; detail = '已配置 GEMINI_API_KEY';
+    } else if (home) {
+      const creds = readJsonSafe(path.join(home, '.gemini', 'oauth_creds.json'));
+      const acc = readJsonSafe(path.join(home, '.gemini', 'google_accounts.json'));
+      if (creds?.refresh_token || creds?.access_token || acc?.active) {
+        loggedIn = true; method = 'google_oauth'; detail = acc?.active ? `已登录 (${acc.active})` : '已检测到 Gemini 登录态';
+      } else {
+        detail = '未检测到 Gemini 登录凭据';
+      }
+    }
+  } else if (id === 'qwen') {
+    if (process.env.DASHSCOPE_API_KEY || process.env.OPENAI_API_KEY) {
+      loggedIn = true; method = 'api_key'; detail = '已配置 API Key';
+    } else if (home) {
+      const creds = readJsonSafe(path.join(home, '.qwen', 'oauth_creds.json'));
+      if (creds?.refresh_token || creds?.access_token) {
+        loggedIn = true; method = 'qwen_oauth'; detail = '已检测到 Qwen 登录态';
+      } else {
+        detail = '未检测到 Qwen 登录凭据';
+      }
+    }
+  } else {
+    loggedIn = true; method = 'unknown'; detail = '已安装';
+  }
+
+  return {
+    supported: true,
+    installed: true,
+    loggedIn,
+    status: loggedIn ? 'logged_in' : 'not_logged_in',
+    method,
+    detail: detail || (loggedIn ? '已登录' : '未登录'),
+    ...hint,
+  };
+}
+
+export function detectAllWithAuth(opts = {}) {
+  return detectAll().map((m) => ({ ...m, auth: detectModelAuth(m.id, m, opts) }));
 }

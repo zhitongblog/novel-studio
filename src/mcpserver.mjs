@@ -10,6 +10,11 @@ import { listInstances } from './unterm.mjs';
 import { startWriting } from './writer.mjs';
 import { listSessions, sendToBook, stopBook, streamBook } from './attach.mjs';
 import { loadUsage, bookUsage } from './usage.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadPlan, savePlan, loadBible, saveBible, planEpisodes, generateStoryboard, extractCharacterBible, composeLockedPrompt, generatePublishCopy, resolveSpeakerVoice, videoDir } from './videoplan.mjs';
+import { renderShot, synthesizeTts, composeEpisode, aspectDimensions, prepareShotRenderInputs } from './videorender.mjs';
+import { buildEpisodeSubtitles, exportJianyingDraft } from './videopost.mjs';
 
 const TOOLS = [
   { name: 'novel_list_books', description: '列出所有已登记的书及章节统计', inputSchema: { type: 'object', properties: {} } },
@@ -41,6 +46,39 @@ const TOOLS = [
     type: 'object', required: ['book'], properties: { book: { type: 'string' } } } },
   { name: 'novel_usage', description: 'Token 用量统计（可选指定 book，否则返回全部）', inputSchema: {
     type: 'object', properties: { book: { type: 'string' } } } },
+  { name: 'novel_video_bible', description: '读取或提取/保存某本书的角色定妆库（支持绑定本地定妆照与音色）', inputSchema: {
+    type: 'object', required: ['book'],
+    properties: {
+      book: { type: 'string' },
+      action: { type: 'string', enum: ['get', 'extract', 'save'] },
+      visualStyle: { type: 'string' },
+      characters: { type: 'array' },
+    } } },
+  { name: 'novel_video_plan', description: '读取或 AI 生成某本书的短剧分集/卷预告规划', inputSchema: {
+    type: 'object', required: ['book'],
+    properties: {
+      book: { type: 'string' },
+      action: { type: 'string', enum: ['get', 'generate'] },
+      kind: { type: 'string', enum: ['episode', 'trailer'] },
+      fromChapter: { type: 'number' },
+      toChapter: { type: 'number' },
+      targetSeconds: { type: 'number' },
+    } } },
+  { name: 'novel_video_storyboard', description: '为指定集生成分镜脚本', inputSchema: {
+    type: 'object', required: ['book', 'episodeIndex'],
+    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, aspect: { type: 'string', enum: ['9:16', '3:4', '16:9'] } } } },
+  { name: 'novel_video_render', description: '用本机 ComfyUI (MiniMax H3) 渲染指定集的全部或单个镜头', inputSchema: {
+    type: 'object', required: ['book', 'episodeIndex'],
+    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, shotIndex: { type: 'number' }, force: { type: 'boolean' } } } },
+  { name: 'novel_video_compose', description: '合成指定集成片 MP4（含多角色配音、ASS 字幕烧录、BGM 自动闪避）', inputSchema: {
+    type: 'object', required: ['book', 'episodeIndex'],
+    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, useTts: { type: 'boolean' }, burnSubtitles: { type: 'boolean' }, bgmPath: { type: 'string' } } } },
+  { name: 'novel_video_export_jianying', description: '导出指定集的剪映草稿工程目录', inputSchema: {
+    type: 'object', required: ['book', 'episodeIndex'],
+    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' } } } },
+  { name: 'novel_video_publish_copy', description: '为指定集生成抖音/快手/小红书短剧发布文案（标题、简介、话题标签与封面花字）', inputSchema: {
+    type: 'object', required: ['book', 'episodeIndex'],
+    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' } } } },
 ];
 
 function slugOf(idOrSlug) { const b = getBook(idOrSlug); return b ? b.slug : idOrSlug; }
@@ -74,6 +112,128 @@ async function dispatch(name, args) {
     const sess = await startWriting({ book, model, instruction, cfg, onLog: (e) => logs.push(e.msg) });
     return { ok: true, instance: sess.instance.id, mcp_port: sess.instance.mcp_port, pane: sess.paneId, autopilot: !!cfg.autopilot.enabled, logs };
   }
+  if (name === 'novel_video_bible') {
+    const book = getBook(args.book);
+    if (!book) throw new Error('找不到书：' + args.book);
+    if (args.action === 'extract') return await extractCharacterBible(book, cfg);
+    if (args.action === 'save') { saveBible(book, { visualStyle: args.visualStyle, characters: args.characters }); return loadBible(book); }
+    return loadBible(book);
+  }
+  if (name === 'novel_video_plan') {
+    const book = getBook(args.book);
+    if (!book) throw new Error('找不到书：' + args.book);
+    if (args.action === 'generate') {
+      const out = await planEpisodes(book, cfg, { kind: args.kind || 'episode', fromChapter: args.fromChapter, toChapter: args.toChapter, targetSeconds: args.targetSeconds });
+      const cur = loadPlan(book);
+      const keep = (cur.episodes || []).filter(e => e.kind !== (args.kind || 'episode'));
+      const next = [...keep, ...out.episodes].map((e, i) => ({ ...e, index: i + 1 }));
+      savePlan(book, { ...cur, version: 1, episodes: next });
+      return { episodes: next, warnings: out.warnings };
+    }
+    return loadPlan(book);
+  }
+  if (name === 'novel_video_storyboard') {
+    const book = getBook(args.book);
+    if (!book) throw new Error('找不到书：' + args.book);
+    const cur = loadPlan(book);
+    const ep = (cur.episodes || []).find(e => e.index === Number(args.episodeIndex));
+    if (!ep) throw new Error('找不到第 ' + args.episodeIndex + ' 集');
+    const aspect = args.aspect || cfg.video?.aspect || '9:16';
+    const sb = await generateStoryboard(book, cfg, ep, { aspect });
+    ep.shots = sb.shots; ep.totalSeconds = sb.totalSeconds; ep.sourceRevisions = sb.sourceRevisions; ep.aspect = aspect;
+    savePlan(book, cur);
+    return { episodeIndex: ep.index, shots: sb.shots.length, totalSeconds: sb.totalSeconds };
+  }
+  if (name === 'novel_video_render') {
+    const book = getBook(args.book);
+    if (!book) throw new Error('找不到书：' + args.book);
+    const cur = loadPlan(book);
+    const ep = (cur.episodes || []).find(e => e.index === Number(args.episodeIndex));
+    if (!ep?.shots?.length) throw new Error('这一集还没有分镜');
+    const bible = loadBible(book);
+    const targets = args.shotIndex ? ep.shots.filter(s => s.index === Number(args.shotIndex)) : ep.shots;
+    const vroot = videoDir(book);
+    for (const s of targets) {
+      const { keyframePath, refImagePaths, charRefTags } = prepareShotRenderInputs({
+        book, episode: ep, shot: s, bible, cfg, defaultRef: 'cover_bg',
+      });
+      const lockedPrompt = composeLockedPrompt(s, bible, charRefTags);
+      const r = await renderShot(book, cfg, { episodeIndex: ep.index, shot: s, keyframePath, refImagePaths, lockedPrompt, aspect: ep.aspect || '9:16', force: !!args.force });
+      s.render = {
+        mode: r.mode,
+        inputHash: r.inputHash,
+        fileRel: path.relative(vroot, r.file).replace(/\\/g, '/'),
+        qaFrameRels: (r.qaFrames || []).map((f) => path.relative(vroot, f).replace(/\\/g, '/')),
+        duration: r.duration,
+        renderSec: r.renderSec || 0,
+      };
+      savePlan(book, cur);
+    }
+    return { ok: true, rendered: targets.length };
+  }
+  if (name === 'novel_video_compose') {
+    const book = getBook(args.book);
+    if (!book) throw new Error('找不到书：' + args.book);
+    const cur = loadPlan(book);
+    const ep = (cur.episodes || []).find(e => e.index === Number(args.episodeIndex));
+    if (!ep?.shots?.length) throw new Error('这一集还没有分镜');
+    const bible = loadBible(book);
+    const vroot = videoDir(book);
+    const epDir = path.join(vroot, `ep-${String(ep.index).padStart(2, '0')}`);
+    const shotFiles = [], narrationFiles = [];
+    let offsetSec = 0;
+    for (const s of ep.shots) {
+      if (!s.render?.fileRel) throw new Error(`第 ${s.index} 镜未渲染`);
+      shotFiles.push(path.join(vroot, s.render.fileRel));
+      if (args.useTts !== false && s.narration?.trim()) {
+        const wav = path.join(epDir, 'tts', `shot-${String(s.index).padStart(2, '0')}.wav`);
+        const sp = resolveSpeakerVoice(s, bible, cfg);
+        const t = await synthesizeTts(cfg, { text: s.narration.trim(), outWav: wav, refAudio: sp.refAudio, voice: sp.edgeVoice });
+        s.render.ttsRel = path.relative(vroot, t.file).replace(/\\/g, '/');
+        narrationFiles.push({ file: t.file, offsetSec });
+      }
+      offsetSec += Number(s.render.duration) || Number(s.seconds) || 5;
+    }
+    let assSubtitleFile = '';
+    if (args.burnSubtitles !== false) {
+      const dims = aspectDimensions(ep.aspect || '9:16');
+      const subs = buildEpisodeSubtitles(ep.shots.map(s => ({ ...s, actualSeconds: s.render?.duration || s.seconds })), dims);
+      if (subs.count > 0) {
+        assSubtitleFile = path.join(epDir, `episode-${String(ep.index).padStart(2, '0')}.ass`);
+        fs.writeFileSync(assSubtitleFile, subs.ass, 'utf8');
+        fs.writeFileSync(path.join(epDir, `episode-${String(ep.index).padStart(2, '0')}.srt`), subs.srt, 'utf8');
+      }
+    }
+    const out = composeEpisode(book, { episodeIndex: ep.index, shotFiles, narrationFiles, assSubtitleFile, bgmFile: args.bgmPath || '' });
+    ep.outputRel = path.relative(vroot, out.file).replace(/\\/g, '/'); ep.outputDuration = out.duration;
+    savePlan(book, cur);
+    return { ok: true, file: out.file, duration: out.duration };
+  }
+  if (name === 'novel_video_export_jianying') {
+    const book = getBook(args.book);
+    if (!book) throw new Error('找不到书：' + args.book);
+    const cur = loadPlan(book);
+    const ep = (cur.episodes || []).find(e => e.index === Number(args.episodeIndex));
+    if (!ep?.shots?.length) throw new Error('这一集还没有分镜');
+    const vroot = videoDir(book);
+    const dims = aspectDimensions(ep.aspect || '9:16');
+    const clips = ep.shots.map(s => {
+      if (!s.render?.fileRel) throw new Error(`第 ${s.index} 镜未渲染`);
+      return { videoPath: path.join(vroot, s.render.fileRel), audioPath: s.render.ttsRel ? path.join(vroot, s.render.ttsRel) : '', durationSec: Number(s.render.duration) || Number(s.seconds) || 5, narration: s.narration || '' };
+    });
+    return exportJianyingDraft({ outDir: path.join(vroot, `ep-${String(ep.index).padStart(2, '0')}`, 'jianying_draft'), title: `${book.title} - 第${ep.index}集`, width: dims.width, height: dims.height, clips });
+  }
+  if (name === 'novel_video_publish_copy') {
+    const book = getBook(args.book);
+    if (!book) throw new Error('找不到书：' + args.book);
+    const cur = loadPlan(book);
+    const ep = (cur.episodes || []).find(e => e.index === Number(args.episodeIndex));
+    if (!ep) throw new Error('找不到第 ' + args.episodeIndex + ' 集');
+    const copy = await generatePublishCopy(book, cfg, ep);
+    ep.publishCopy = copy;
+    savePlan(book, cur);
+    return { ok: true, episodeIndex: ep.index, publishCopy: copy };
+  }
   throw new Error('未知 tool：' + name);
 }
 
@@ -101,7 +261,7 @@ export function runMcpServer() {
     };
     try {
       if (method === 'initialize') {
-        return reply({ protocolVersion: '2024-11-05', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'novel-studio', version: '1.0.0' } });
+        return reply({ protocolVersion: '2024-11-05', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'storyalter', version: '2.0.0' } });
       }
       if (method === 'tools/list') return reply({ tools: TOOLS });
       if (method === 'tools/call') {
