@@ -144,6 +144,7 @@ export function normalizeShots(raw, { characters = [], chapterNums = [], targetS
     shots.push({
       index: shots.length + 1,
       scene: str(s?.scene, `S${shots.length + 1}`),
+      settingType: ['interior', 'exterior'].includes(str(s?.settingType).toLowerCase()) ? str(s?.settingType).toLowerCase() : '',
       characters: cast,
       extraCharacters: extras,
       location: str(s?.location),
@@ -151,6 +152,7 @@ export function normalizeShots(raw, { characters = [], chapterNums = [], targetS
       camera: str(s?.camera),
       narration,
       speaker: narration ? str(s?.speaker, 'narrator') : undefined,
+      emotion: narration ? str(s?.emotion) : '',
       prompt: prompt || action,
       ambience: str(s?.ambience),
       seconds: clampSeconds(Number.isFinite(sec) ? sec : MIN_SHOT_SECONDS),
@@ -198,24 +200,33 @@ export function buildEpisodePrompt({ title, digestLines, kind, targetSeconds, ma
   return { sys, user };
 }
 
-export function buildStoryboardPrompt({ kind, targetSeconds, aspect, logline, beats, cast, source, firstChapter }) {
+export function buildStoryboardPrompt({ kind, targetSeconds, aspect, logline, beats, cast, source, firstChapter, dialogueMode = 'drama' }) {
   const shotCount = Math.max(3, Math.round(targetSeconds / 6));
-  const sys = '你是短剧分镜导演，同时精通 AI 视频生成提示词。只输出JSON。';
+  const isDrama = dialogueMode !== 'narration';
+  const voiceRule = isDrama
+    ? '- 【纯影视对白模式（极其重要）】不要写解说式旁白！凡是画面本身能演出来的动作/环境（如刮风、烧水、走路、打斗），narration 必须留空 ""，靠环境音和画面讲故事；只有在人物张嘴说话时，才填角色台词到 narration、speaker 填该角色原名（不要填 narrator）、emotion 填简短中文表演情绪（如“冷峻”、“轻声关切”、“凶狠怒吼”、“阴冷嘲讽”）。全集最多只允许开场或重大转折出现 0–1 句极简旁白\n'
+    : '- 旁白/台词写中文，简短口语化，每镜不超过 24 字（保证 5–6 秒念完不超视频时长）；画面动作必须与当镜旁白/台词严格对应，emotion 填表演情绪\n';
+  const sys = '你是顶级竖屏短剧导演，同时精通 AI 视频生成与视听语言。只输出JSON。';
   const user = `把下面的小说片段改编成一集${kind === 'trailer' ? '预告片' : '短剧'}的分镜表。\n`
     + `目标总时长约 ${targetSeconds} 秒，约 ${shotCount} 个镜头，画幅 ${aspect}。\n`
     + (logline ? `本集看点：${logline}\n` : '')
     + (beats?.length ? `必须呈现的节拍：\n${beats.map((b, i) => `${i + 1}. ${b}`).join('\n')}\n` : '')
-    + '\n分镜规则：\n'
-    + '- 一个镜头只拍一个连续动作，不能包含剪辑、转场或多个场景；每镜 5–10 秒\n'
-    + '- 视觉与剧情连贯（极其重要）：同一场戏（相同 scene，如都在 S1）的相邻镜头必须保持一致的环境、陈设与光线方向；切到下一个动作或地点前必须有因果衔接（例如先听到异动抓起油灯，下一镜再冲入胡同），禁止无铺垫瞬移\n'
+    + '\n分镜与现实常识硬规则（必须全部遵守，杜绝 AI 穿帮）：\n'
+    + '- 一个镜头只拍一个连续动作（一镜一空间一简单物理动作）：每镜 5–8 秒只拍 1 个清晰动作，严禁塞入多个复合动作（例如不要同一镜里既剥纸又咬饼又听惨叫又起身），也不要同时混写“门口和窗台（window and doorway）”导致门窗融合畸形\n'
+    + '- 显式标注室内外 settingType（"interior" 或 "exterior"）：室内戏只能拍室内陈设，室外戏只能拍室外街景，禁止室内外空间颠倒\n'
+    + '- 严禁中式专名直译误导视频模型：例如“正骨堂/医馆”必须写 traditional Chinese herbal medicine clinic（绝不写 bone-setting，否则模型会在墙上挂动物骨头！）\n'
+    + '- 饮食与道具物理合理：若拍吃东西，必须写明食物已拆开拿在手里、油纸平摊在桌上，严禁把“油纸包”和“咬一口”混在一起导致连纸咬；人物姿势必须双脚着地或坐稳椅凳，绝不出现踩窗台等反常识动作\n'
+    + '- 时代与光源写实：年代剧/古装剧严禁出现现代白色吸顶吊灯、现代亮面马术高筒靴、满街古镇景区彩灯和舞台干冰浓雾；寒夜孤灯戏只用真实单一主光源（马灯/煤炉/微弱月光）\n'
+    + '- 视觉与剧情连贯：同一场戏（相同 scene）相邻镜头保持一致的墙面材质、陈设与光线方向；切到下一个地点前必须有因果衔接\n'
     + '- 开场镜头 3 秒内抓住注意力，结尾镜头停在悬念上\n'
-    + '- 旁白/台词写中文，简短口语化，每镜不超过 30 字；画面动作必须与当镜旁白/台词严格对应\n'
-    + '- prompt 用英文写给视频模型：按时间顺序描述人物外观、动作、表情、镜头运动、光线和环境；同一人物每次出场外观描述保持一致，同场景保持相同的建筑/室内材质与色调\n'
-    + '- ambience 用英文写环境音和音效（不要音乐，不要人声台词）\n'
-    + '- characters 必须列出当镜所有出镜人物（包括背影、窗内/桌对面交互的另一方，例如甲递东西给乙，必须同时填 ["甲", "乙"]），使用人物设定里的原名，防止单人参考图导致双人串脸\n'
+    + voiceRule
+    + '- 台词简短口语化，每镜不超过 24 字（保证 5–6 秒念完不超视频时长）；人物说话镜头需在画面 prompt 中写明说话人的神态与嘴部说话动作\n'
+    + '- prompt 用英文写给视频模型：按时间顺序描述人物动作、表情、镜头运动、写实光线和空间位置；不要在 prompt 里重复塞入未出镜或不需要的手持道具\n'
+    + '- ambience 用英文写环境音和音效（不要音乐）\n'
+    + '- characters 必须列出当镜所有出镜人物（包括背影、窗内/桌对面交互的另一方，例如甲递东西给乙，必须同时填 ["甲", "乙"]），使用人物设定里的原名\n'
     + `\n【人物设定】\n${cast || '（无）'}\n\n【原文】\n${source}\n\n输出：\n`
     + '```json\n'
-    + `{"shots":[{"chapter":${firstChapter},"scene":"S1","location":"地点","characters":["人物名"],"action":"中文动作描述","camera":"slow push-in, medium close-up","narration":"旁白或台词","speaker":"narrator 或人物名","prompt":"English video prompt","ambience":"English ambience","seconds":5}]}\n`
+    + `{"shots":[{"chapter":${firstChapter},"scene":"S1","settingType":"interior","location":"地点","characters":["人物名"],"action":"中文动作描述","camera":"slow push-in, medium close-up","narration":"角色台词（无对白纯画面镜留空）","speaker":"人物原名或 narrator","emotion":"情绪（如冷峻/轻声/怒吼）","prompt":"English video prompt","ambience":"English ambience","seconds":6}]}\n`
     + '```';
   return { sys, user };
 }
@@ -275,31 +286,134 @@ export function saveBible(book, bible) {
   }, null, 1), 'utf8');
 }
 
+export const VOICE_PRESETS = [
+  { id: 'young_male', label: '沉稳青年男声', defaultDesc: 'low, calm young Chinese male voice', defaultEdge: 'zh-CN-YunxiNeural' },
+  { id: 'young_female', label: '清冷/温柔青年女声', defaultDesc: 'clear, gentle young Chinese female voice', defaultEdge: 'zh-CN-XiaoxiaoNeural' },
+  { id: 'elder_male', label: '沧桑/慈祥老年男声', defaultDesc: 'warm, weathered elderly Chinese male voice', defaultEdge: 'zh-CN-YunyangNeural' },
+  { id: 'elder_female', label: '沉稳老年女声', defaultDesc: 'calm elderly Chinese female voice', defaultEdge: 'zh-CN-XiaoyiNeural' },
+  { id: 'rough_male', label: '粗犷悍匪/硬汉男声', defaultDesc: 'rough, gruff, intimidating Chinese male voice', defaultEdge: 'zh-CN-YunjianNeural' },
+  { id: 'cold_male', label: '阴冷/狡猾反派男声', defaultDesc: 'sharp, cold, arrogant Chinese male voice', defaultEdge: 'zh-CN-YunxiNeural' },
+];
+
+/** 从角色设定自动推断声线预设（没填 voicePreset 时按 lookPrompt/role 兜底）。 */
+export function inferVoicePreset(ch) {
+  if (!ch) return 'young_male';
+  if (ch.voicePreset && VOICE_PRESETS.some((p) => p.id === ch.voicePreset)) return ch.voicePreset;
+  const txt = `${ch.role || ''} ${ch.lookPrompt || ''} ${ch.name || ''}`.toLowerCase();
+  const isFemale = /\b(woman|female|girl|lady|heroine)\b|女|姑娘|小姐|夫人|婆|娘/.test(txt);
+  const ageMatch = txt.match(/(\d{2})[\s-]*(?:year|yo)/);
+  const age = ageMatch ? Number(ageMatch[1]) : 0;
+  const isElder = age > 0
+    ? age >= 50
+    : (/\b(elder|elderly|senior|mentor|aged)\b|\bold\s+(?:man|woman|lady|master|sage)\b|老|大爷|伯|翁|爷/.test(txt));
+  const isAntag = /\b(antagonist|villain|gangster|thug|scarred|broken nose)\b|反派|恶|匪|帮|凶/.test(txt);
+  if (isFemale) return isElder ? 'elder_female' : 'young_female';
+  if (isElder) return 'elder_male';
+  if (isAntag) return /\b(lean|pale|sinister|uniform|smirk|calculating)\b|阴|冷|巡捕/.test(txt) ? 'cold_male' : 'rough_male';
+  return 'young_male';
+}
+
 /**
- * 按镜头说话人（shot.speaker）解析配音参考音频与 edge-tts 音色（纯函数）：
+ * 按镜头说话人（shot.speaker）解析配音参考音频、edge-tts 音色、H3 声线描述与表演情绪（纯函数）：
  * - speaker === 'narrator' 或未指定：走全书旁白音色（bible.narratorVoice → cfg.video.ttsRefAudio）；
- * - speaker 为角色名：优先匹配该角色的 voiceRefAudio / edgeVoice，不把旁白错配成画面里其他人的声音。
+ * - speaker 为角色名：优先该角色 voiceRefAudio → 自动匹配音色库中同 preset 样本 → 旁白兜底，并透传 emotion。
  */
-export function resolveSpeakerVoice(shot, bible, cfg = {}) {
+export function resolveSpeakerVoice(shot, bible, cfg = {}, voiceSamples = []) {
   const vcfg = cfg?.video || {};
   const speaker = str(shot?.speaker, 'narrator');
+  const emotion = str(shot?.emotion);
   const defaultRef = str(bible?.narratorVoice) || str(vcfg.ttsRefAudio);
   const defaultEdge = str(bible?.narratorEdgeVoice) || str(vcfg.edgeVoice) || 'zh-CN-YunxiNeural';
   if (!speaker || speaker.toLowerCase() === 'narrator' || speaker === '旁白') {
-    return { speaker: 'narrator', refAudio: defaultRef, edgeVoice: defaultEdge, label: '旁白' };
+    return {
+      speaker: 'narrator',
+      isCharacter: false,
+      refAudio: defaultRef,
+      edgeVoice: defaultEdge,
+      voicePreset: 'narrator',
+      voiceDesc: 'calm cinematic Chinese male narrator voice',
+      emotion,
+      label: '旁白',
+    };
   }
   const ch = matchCharacter(speaker, Array.isArray(bible?.characters) ? bible.characters : []);
+  const presetId = inferVoicePreset(ch);
+  const preset = VOICE_PRESETS.find((p) => p.id === presetId) || VOICE_PRESETS[0];
+  const autoSample = Array.isArray(voiceSamples)
+    ? voiceSamples.find((vs) => vs.preset === presetId && vs.path)
+    : null;
   return {
     speaker: ch?.name || speaker,
-    refAudio: str(ch?.voiceRefAudio) || defaultRef,
-    edgeVoice: str(ch?.edgeVoice) || defaultEdge,
+    isCharacter: true,
+    refAudio: str(ch?.voiceRefAudio) || str(autoSample?.path) || defaultRef,
+    edgeVoice: str(ch?.edgeVoice) || preset.defaultEdge || defaultEdge,
+    voicePreset: presetId,
+    voiceDesc: str(ch?.voiceDesc) || preset.defaultDesc,
+    emotion,
     label: ch?.name || speaker,
   };
 }
 
 /**
+ * 为 MiniMax H3 原生对口型说话模式（voiceMode === 'native'）注入角色中文台词与声线描述（纯函数）。
+ * 仅在角色开口（非旁白）且有 narration 台词时注入，保留自然口型同步与人物各自声线。
+ */
+export function composeNativeDialoguePrompt(shot, bible, basePrompt, cfg = {}) {
+  const prompt = str(basePrompt || shot?.prompt);
+  const line = str(shot?.narration);
+  if (!line) return prompt;
+  const sp = resolveSpeakerVoice(shot, bible, cfg);
+  if (!sp.isCharacter) return prompt;
+  const emo = sp.emotion ? `, tone: ${sp.emotion}` : '';
+  const dialogueCue = `${sp.speaker} speaks naturally in Mandarin Chinese with realistic lip-sync, using a ${sp.voiceDesc}${emo}: “${line}”.`;
+  return prompt ? `${prompt} ${dialogueCue}` : dialogueCue;
+}
+
+/**
+ * 清洗角色固定外貌卡中的手持/随身道具从句（纯函数）：
+ * 防止如 "carries a small wooden case" 写死在全书外貌卡里，导致半身/窗内镜头凭空多长出一只提箱手穿帮。
+ * 手持道具应由具体分镜 shot.prompt 按需描写，而不是每镜强塞。
+ */
+export function sanitizeLookPrompt(text) {
+  let s = String(text || '').trim();
+  if (!s) return '';
+  // 去掉整句形式的 "He/She carries/holds ..." 或 ", and he/she carries/holds ..."
+  s = s.replace(/(?:^|[.;]\s*)(?:he|she|they)\s+(?:always\s+)?(?:carries|carrying|holds|holding)\b[^.;]*[.;]?/gi, ' ');
+  s = s.replace(/,?\s*\band\s+(?:he|she|they)\s+(?:always\s+)?(?:carries|carrying|holds|holding)\b[^.;]*/gi, '');
+  s = s.replace(/,?\s*\b(?:always\s+)?(?:carries|carrying|holds|holding)\s+(?:a|an|the|his|her)\b[^,.;]*/gi, '');
+  s = s.replace(/\s{2,}/g, ' ').replace(/\s+([,.;])/g, '$1').replace(/^[.,;\s]+/, '').trim();
+  return s;
+}
+
+/** 判断画风/提示词是否属于年代剧或古装剧，用于自动附加时代反穿帮约束。 */
+export function isPeriodStyle(text) {
+  return /\b(period\s+drama|19[0-4]\d|1930s|1920s|republic\s+of\s+china|ancient|dynasty|hutong|qing|ming|tang|song|han\s+dynasty|wuxia|xianxia)\b|民国|古装|古代|胡同|长衫|旗袍/i.test(String(text || ''));
+}
+
+/**
+ * 渲染前场景提示词常识消毒（纯函数）：
+ * - 替换英文视频模型极易按字面曲解的直译词（如 bone-setting → traditional Chinese herbal medicine）；
+ * - 拆分混写的 window and doorway，防止门窗融合成齐腰半截框导致踩窗台；
+ * - 年代剧自动补齐写实物理与防现代穿帮尾注。
+ */
+export function sanitizeScenePrompt(prompt, bible = {}) {
+  let s = String(prompt || '').trim();
+  if (!s) return '';
+  s = s.replace(/\bbone[-\s]?setting\s+clinic\b/gi, 'traditional Chinese herbal medicine clinic');
+  s = s.replace(/\bbone[-\s]?setting\b/gi, 'traditional Chinese herbal medicine');
+  s = s.replace(/\boutside\s+the\s+wooden\s+window\s+and\s+doorway\b/gi, 'standing outside the wooden clinic doorway');
+  s = s.replace(/\bwindow\s+and\s+doorway\b/gi, 'wooden doorway');
+  s = s.replace(/\bdoorway\s+and\s+window\b/gi, 'wooden doorway');
+  s = s.replace(/\s{2,}/g, ' ').trim();
+  if (isPeriodStyle(`${bible?.visualStyle || ''} ${s}`) && !/no modern ceiling/i.test(s)) {
+    s += ' Grounded realistic human posture, authentic period architecture, no modern ceiling electric lamps, no modern glossy riding boots, no extra limbs.';
+  }
+  return s;
+}
+
+/**
  * 渲染前外貌锁定（纯函数）：把全书画风 + 出镜角色的固定英文外貌卡（以及 ref2va 的 <Picture i> 编号）
- * 自动注入镜头提示词，防止长篇连载写到后面“换脸/换衣服/全员长一样”。
+ * 自动注入镜头提示词，并对场景提示词做常识消毒，防止长篇连载换脸、多长手与时代穿帮。
  */
 export function composeLockedPrompt(shot, bible, refTags = []) {
   const parts = [];
@@ -310,11 +424,12 @@ export function composeLockedPrompt(shot, bible, refTags = []) {
   for (const name of (shot?.characters || [])) {
     const c = chars.find((x) => x.name === name);
     const tag = tagMap.get(name);
-    if (c?.lookPrompt || tag) {
-      parts.push(`[${name}${tag ? ` (${tag})` : ''}: ${c?.lookPrompt || 'keep exact appearance and outfit from ' + tag}]`);
+    const cleanLook = sanitizeLookPrompt(c?.lookPrompt);
+    if (cleanLook || tag) {
+      parts.push(`[${name}${tag ? ` (${tag})` : ''}: ${cleanLook || 'keep exact appearance and outfit from ' + tag}]`);
     }
   }
-  parts.push(str(shot?.prompt));
+  parts.push(sanitizeScenePrompt(str(shot?.prompt), bible));
   return parts.filter(Boolean).join(' ');
 }
 
@@ -326,11 +441,13 @@ export async function extractCharacterBible(book, cfg, { onLog } = {}) {
   if (!bibleMd && !ledger) throw new Error('找不到 novel_bible.md，请先立项或重建设定圣经');
 
   const sys = '你是影视选角与美术总监，专门把网文人物设定转成 AI 视频用的高区分度角色外貌卡。只输出JSON。';
-  const user = `从下面的设定圣经里提取主要角色和关键配角（最多 12 人），为每人写一条**固定英文外貌描述（lookPrompt）**。
+  const user = `从下面的设定圣经里提取主要角色和关键配角（最多 12 人），为每人写一条**固定英文外貌描述（lookPrompt）**以及**专属声线描述（voiceDesc / voicePreset）**。
 要求：
-1. **强制拉开视觉区分度**：不同角色在发型、脸型/气质、服饰剪影、主色调、标志配饰上必须明显不同，绝不能全员一张脸或同款衣服；
-2. lookPrompt 用英文写，简洁具体（30–50 词），包含：年龄、性别、族群、五官特征、发型、固定服装与颜色、标志物件；不要写剧情动作；
-3. 同时给一句简短的全书英文画风前缀 visualStyle（如年代质感、色调、光影、镜头风格）。
+1. **强制拉开视觉区分度**：不同角色在发型、脸型/气质、服饰剪影、主色调、贴身小配饰（如发带/耳饰/玉佩）上必须明显不同，绝不能全员一张脸或同款衣服；
+2. lookPrompt 用英文写，简洁具体（25–45 词），仅包含：年龄、性别、族群、五官/伤疤特征、发型、固定服装与颜色；
+3. **红线：严禁写入任何手持或随身道具**（如木箱、笔记本、马灯、武器、汤担、拐杖、手提包等），也不要写剧情动作——否则半身/室内镜头会强行多长出穿帮手臂；道具只由具体分镜按需描写；
+4. 为每人配 voicePreset（从 young_male / young_female / elder_male / elder_female / rough_male / cold_male 中选最贴合的）和简短英文 voiceDesc（用于原生对口型说话的声线气质，如 "low, calm young Chinese male voice"、"clear gentle young Chinese female voice"）；
+5. 同时给一句简短的全书英文画风前缀 visualStyle（如年代质感、色调、光影、镜头风格）。
 
 【设定圣经】
 ${bibleMd.slice(0, 12000)}
@@ -338,7 +455,7 @@ ${ledger ? `\n【人物现状】\n${ledger.slice(0, 3000)}` : ''}
 
 输出：
 \`\`\`json
-{"visualStyle":"Cinematic Chinese period drama, realistic film grain, natural moody lighting","characters":[{"name":"角色名","role":"主角/女主/反派/配角","lookPrompt":"25-year-old Chinese man, ..."}]}
+{"visualStyle":"Cinematic Chinese period drama, realistic film grain, natural moody lighting","characters":[{"name":"角色名","role":"主角/女主/反派/配角","voicePreset":"young_male","voiceDesc":"low, calm 24-year-old Chinese male voice","lookPrompt":"25-year-old Chinese man, ..."}]}
 \`\`\``;
 
   const text = await askModel(book, cfg, sys, user, { maxTokens: 4000, temperature: 0.4, onLog });
@@ -352,14 +469,18 @@ ${ledger ? `\n【人物现状】\n${ledger.slice(0, 3000)}` : ''}
       const name = str(c?.name);
       if (!name) return null;
       const old = prevByName.get(name);
-      return {
+      const item = {
         name,
         role: str(c?.role, old?.role || ''),
-        lookPrompt: str(c?.lookPrompt, old?.lookPrompt || ''),
+        lookPrompt: sanitizeLookPrompt(str(c?.lookPrompt, old?.lookPrompt || '')),
         refImageRef: old?.refImageRef || '',
         voiceRefAudio: old?.voiceRefAudio || '',
         edgeVoice: old?.edgeVoice || '',
+        voicePreset: str(c?.voicePreset, old?.voicePreset || ''),
+        voiceDesc: str(c?.voiceDesc, old?.voiceDesc || ''),
       };
+      if (!item.voicePreset) item.voicePreset = inferVoicePreset(item);
+      return item;
     })
     .filter(Boolean);
   for (const old of prev.characters) {
@@ -518,6 +639,7 @@ export async function generateStoryboard(book, cfg, episode, opts = {}) {
     kind, targetSeconds, aspect: opts.aspect || '9:16', logline: episode.logline, beats: episode.beats,
     cast: castNotes,
     source, firstChapter: from,
+    dialogueMode: opts.dialogueMode || episode.dialogueMode || 'drama',
   });
   const text = await askModel(book, cfg, sys, user, { maxTokens: 8000, temperature: 0.6, onLog: opts.onLog });
   const parsed = extractJson(text);

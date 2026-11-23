@@ -156,9 +156,9 @@ const DEFAULTS = {
     edgeVoice: 'zh-CN-YunxiNeural',  // 默认 edge-tts 中文旁白音色
     timeoutMs: 900000,               // 单镜超时：RTX 3060 实测 5 秒镜头约 85–105 秒
     autoUnloadText: true,            // 12G 显存渲染前先卸载 Ollama 文本模型
-    aspect: '9:16',                  // '9:16' | '3:4' | '16:9'
-    width: 480,
-    height: 608,
+    aspect: '9:16',                  // '9:16' | '4:5' | '3:4' | '16:9'
+    width: 416,
+    height: 736,
     fps: 24,
     steps: 4,
     diffusionModel: 'minimax_h3_fl2va_pruned_int8_convrot.safetensors',

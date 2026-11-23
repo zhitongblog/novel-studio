@@ -12,8 +12,9 @@ import { listSessions, sendToBook, stopBook, streamBook } from './attach.mjs';
 import { loadUsage, bookUsage } from './usage.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadPlan, savePlan, loadBible, saveBible, planEpisodes, generateStoryboard, extractCharacterBible, composeLockedPrompt, generatePublishCopy, resolveSpeakerVoice, videoDir } from './videoplan.mjs';
-import { renderShot, synthesizeTts, composeEpisode, aspectDimensions, prepareShotRenderInputs } from './videorender.mjs';
+import { loadPlan, savePlan, loadBible, saveBible, planEpisodes, generateStoryboard, extractCharacterBible, composeLockedPrompt, composeNativeDialoguePrompt, generatePublishCopy, resolveSpeakerVoice, videoDir } from './videoplan.mjs';
+import { renderShot, synthesizeTts, composeEpisode, aspectDimensions, prepareShotRenderInputs, computeClipTrimDuration, probeMedia, resolveKeyframePath, listVoiceSamples } from './videorender.mjs';
+import { auditShotPromptRealism, inspectImageRealism } from './videoqa.mjs';
 import { buildEpisodeSubtitles, exportJianyingDraft } from './videopost.mjs';
 
 const TOOLS = [
@@ -64,21 +65,24 @@ const TOOLS = [
       toChapter: { type: 'number' },
       targetSeconds: { type: 'number' },
     } } },
-  { name: 'novel_video_storyboard', description: '为指定集生成分镜脚本', inputSchema: {
+  { name: 'novel_video_storyboard', description: '为指定集生成分镜脚本（默认纯影视对白模式，可选漫剧旁白模式）', inputSchema: {
     type: 'object', required: ['book', 'episodeIndex'],
-    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, aspect: { type: 'string', enum: ['9:16', '3:4', '16:9'] } } } },
-  { name: 'novel_video_render', description: '用本机 ComfyUI (MiniMax H3) 渲染指定集的全部或单个镜头', inputSchema: {
+    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, aspect: { type: 'string', enum: ['9:16', '4:5', '3:4', '16:9'] }, dialogueMode: { type: 'string', enum: ['drama', 'narration'] } } } },
+  { name: 'novel_video_render', description: '用本机 ComfyUI (MiniMax H3) 渲染指定集的全部或单个镜头（支持 Keyframe-First I2V 与 native 原生对口型说话）', inputSchema: {
     type: 'object', required: ['book', 'episodeIndex'],
-    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, shotIndex: { type: 'number' }, force: { type: 'boolean' } } } },
-  { name: 'novel_video_compose', description: '合成指定集成片 MP4（含多角色配音、ASS 字幕烧录、BGM 自动闪避）', inputSchema: {
+    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, shotIndex: { type: 'number' }, force: { type: 'boolean' }, renderMode: { type: 'string', enum: ['auto', 'fl2va', 'ref2va'] }, voiceMode: { type: 'string', enum: ['tts', 'native'] } } } },
+  { name: 'novel_video_compose', description: '合成指定集成片 MP4（支持 IndexTTS2 多角色情绪配音或保留 H3 原生对口型人声、ASS 字幕烧录、BGM 自动闪避）', inputSchema: {
     type: 'object', required: ['book', 'episodeIndex'],
-    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, useTts: { type: 'boolean' }, burnSubtitles: { type: 'boolean' }, bgmPath: { type: 'string' } } } },
+    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, useTts: { type: 'boolean' }, burnSubtitles: { type: 'boolean' }, trimToTts: { type: 'boolean' }, voiceMode: { type: 'string', enum: ['tts', 'native'] }, bgmPath: { type: 'string' } } } },
   { name: 'novel_video_export_jianying', description: '导出指定集的剪映草稿工程目录', inputSchema: {
     type: 'object', required: ['book', 'episodeIndex'],
     properties: { book: { type: 'string' }, episodeIndex: { type: 'number' } } } },
   { name: 'novel_video_publish_copy', description: '为指定集生成抖音/快手/小红书短剧发布文案（标题、简介、话题标签与封面花字）', inputSchema: {
     type: 'object', required: ['book', 'episodeIndex'],
     properties: { book: { type: 'string' }, episodeIndex: { type: 'number' } } } },
+  { name: 'novel_video_qa', description: '对指定集或单镜执行现实常识与时代穿帮质检（Prompt 防呆 + 可选多模态视觉审片）', inputSchema: {
+    type: 'object', required: ['book', 'episodeIndex'],
+    properties: { book: { type: 'string' }, episodeIndex: { type: 'number' }, shotIndex: { type: 'number' }, useVision: { type: 'boolean' } } } },
 ];
 
 function slugOf(idOrSlug) { const b = getBook(idOrSlug); return b ? b.slug : idOrSlug; }
@@ -139,10 +143,11 @@ async function dispatch(name, args) {
     const ep = (cur.episodes || []).find(e => e.index === Number(args.episodeIndex));
     if (!ep) throw new Error('找不到第 ' + args.episodeIndex + ' 集');
     const aspect = args.aspect || cfg.video?.aspect || '9:16';
-    const sb = await generateStoryboard(book, cfg, ep, { aspect });
-    ep.shots = sb.shots; ep.totalSeconds = sb.totalSeconds; ep.sourceRevisions = sb.sourceRevisions; ep.aspect = aspect;
+    const dialogueMode = args.dialogueMode === 'narration' ? 'narration' : 'drama';
+    const sb = await generateStoryboard(book, cfg, ep, { aspect, dialogueMode });
+    ep.shots = sb.shots; ep.totalSeconds = sb.totalSeconds; ep.sourceRevisions = sb.sourceRevisions; ep.aspect = aspect; ep.dialogueMode = dialogueMode;
     savePlan(book, cur);
-    return { episodeIndex: ep.index, shots: sb.shots.length, totalSeconds: sb.totalSeconds };
+    return { episodeIndex: ep.index, shots: sb.shots.length, totalSeconds: sb.totalSeconds, dialogueMode };
   }
   if (name === 'novel_video_render') {
     const book = getBook(args.book);
@@ -151,16 +156,20 @@ async function dispatch(name, args) {
     const ep = (cur.episodes || []).find(e => e.index === Number(args.episodeIndex));
     if (!ep?.shots?.length) throw new Error('这一集还没有分镜');
     const bible = loadBible(book);
+    const voiceMode = args.voiceMode === 'native' || args.voiceMode === 'tts' ? args.voiceMode : (ep.voiceMode === 'native' ? 'native' : 'tts');
+    ep.voiceMode = voiceMode;
     const targets = args.shotIndex ? ep.shots.filter(s => s.index === Number(args.shotIndex)) : ep.shots;
     const vroot = videoDir(book);
     for (const s of targets) {
       const { keyframePath, refImagePaths, charRefTags } = prepareShotRenderInputs({
-        book, episode: ep, shot: s, bible, cfg, defaultRef: 'cover_bg',
+        book, episode: ep, shot: s, bible, cfg, defaultRef: 'cover_bg', renderMode: args.renderMode || 'auto',
       });
-      const lockedPrompt = composeLockedPrompt(s, bible, charRefTags);
-      const r = await renderShot(book, cfg, { episodeIndex: ep.index, shot: s, keyframePath, refImagePaths, lockedPrompt, aspect: ep.aspect || '9:16', force: !!args.force });
+      let lockedPrompt = composeLockedPrompt(s, bible, charRefTags);
+      if (voiceMode === 'native') lockedPrompt = composeNativeDialoguePrompt(s, bible, lockedPrompt, cfg);
+      const r = await renderShot(book, cfg, { episodeIndex: ep.index, shot: s, keyframePath, refImagePaths, lockedPrompt, aspect: ep.aspect || '9:16', voiceMode, force: !!args.force });
       s.render = {
         mode: r.mode,
+        voiceMode,
         inputHash: r.inputHash,
         fileRel: path.relative(vroot, r.file).replace(/\\/g, '/'),
         qaFrameRels: (r.qaFrames || []).map((f) => path.relative(vroot, f).replace(/\\/g, '/')),
@@ -169,7 +178,7 @@ async function dispatch(name, args) {
       };
       savePlan(book, cur);
     }
-    return { ok: true, rendered: targets.length };
+    return { ok: true, rendered: targets.length, voiceMode };
   }
   if (name === 'novel_video_compose') {
     const book = getBook(args.book);
@@ -178,36 +187,53 @@ async function dispatch(name, args) {
     const ep = (cur.episodes || []).find(e => e.index === Number(args.episodeIndex));
     if (!ep?.shots?.length) throw new Error('这一集还没有分镜');
     const bible = loadBible(book);
+    const voiceMode = args.voiceMode === 'native' || args.voiceMode === 'tts' ? args.voiceMode : (ep.voiceMode === 'native' ? 'native' : 'tts');
+    ep.voiceMode = voiceMode;
+    const voiceSamples = listVoiceSamples(book, cfg);
     const vroot = videoDir(book);
     const epDir = path.join(vroot, `ep-${String(ep.index).padStart(2, '0')}`);
-    const shotFiles = [], narrationFiles = [];
+    const trimToTts = args.trimToTts !== false;
+    const shotClips = [], narrationFiles = [];
     let offsetSec = 0;
     for (const s of ep.shots) {
       if (!s.render?.fileRel) throw new Error(`第 ${s.index} 镜未渲染`);
-      shotFiles.push(path.join(vroot, s.render.fileRel));
-      if (args.useTts !== false && s.narration?.trim()) {
+      const f = path.join(vroot, s.render.fileRel);
+      const origDur = Number(s.render.duration) || Number(s.seconds) || 5;
+      let ttsDur = 0;
+      const sp = resolveSpeakerVoice(s, bible, cfg, voiceSamples);
+      const needTts = !!(args.useTts !== false && s.narration?.trim() && !(voiceMode === 'native' && sp.isCharacter));
+      if (needTts) {
         const wav = path.join(epDir, 'tts', `shot-${String(s.index).padStart(2, '0')}.wav`);
-        const sp = resolveSpeakerVoice(s, bible, cfg);
-        const t = await synthesizeTts(cfg, { text: s.narration.trim(), outWav: wav, refAudio: sp.refAudio, voice: sp.edgeVoice });
+        const t = await synthesizeTts(cfg, { text: s.narration.trim(), outWav: wav, refAudio: sp.refAudio, voice: sp.edgeVoice, emotion: sp.emotion });
+        ttsDur = Number(t.duration) || 0;
         s.render.ttsRel = path.relative(vroot, t.file).replace(/\\/g, '/');
+        s.render.ttsDuration = ttsDur;
         narrationFiles.push({ file: t.file, offsetSec });
       }
-      offsetSec += Number(s.render.duration) || Number(s.seconds) || 5;
+      const clipDur = computeClipTrimDuration({ videoDuration: origDur, ttsDuration: ttsDur, hasNarration: needTts, trimToTts: trimToTts && needTts });
+      s.render.trimmedDuration = clipDur;
+      shotClips.push({ file: f, trimSec: clipDur < origDur - 0.2 ? clipDur : 0 });
+      offsetSec += clipDur;
     }
     let assSubtitleFile = '';
     if (args.burnSubtitles !== false) {
-      const dims = aspectDimensions(ep.aspect || '9:16');
-      const subs = buildEpisodeSubtitles(ep.shots.map(s => ({ ...s, actualSeconds: s.render?.duration || s.seconds })), dims);
+      const firstMeta = probeMedia(shotClips[0].file);
+      const dims = (firstMeta.width && firstMeta.height) ? { width: firstMeta.width, height: firstMeta.height } : aspectDimensions(ep.aspect || '9:16');
+      const subs = buildEpisodeSubtitles(ep.shots.map(s => ({
+        ...s,
+        actualSeconds: s.render?.trimmedDuration || s.render?.duration || s.seconds,
+        ttsDurationSec: s.render?.ttsDuration || 0,
+      })), dims);
       if (subs.count > 0) {
         assSubtitleFile = path.join(epDir, `episode-${String(ep.index).padStart(2, '0')}.ass`);
         fs.writeFileSync(assSubtitleFile, subs.ass, 'utf8');
         fs.writeFileSync(path.join(epDir, `episode-${String(ep.index).padStart(2, '0')}.srt`), subs.srt, 'utf8');
       }
     }
-    const out = composeEpisode(book, { episodeIndex: ep.index, shotFiles, narrationFiles, assSubtitleFile, bgmFile: args.bgmPath || '' });
+    const out = composeEpisode(book, { episodeIndex: ep.index, shotClips, narrationFiles, assSubtitleFile, bgmFile: args.bgmPath || '', voiceMode });
     ep.outputRel = path.relative(vroot, out.file).replace(/\\/g, '/'); ep.outputDuration = out.duration;
     savePlan(book, cur);
-    return { ok: true, file: out.file, duration: out.duration };
+    return { ok: true, file: out.file, duration: out.duration, voiceMode };
   }
   if (name === 'novel_video_export_jianying') {
     const book = getBook(args.book);
@@ -233,6 +259,29 @@ async function dispatch(name, args) {
     ep.publishCopy = copy;
     savePlan(book, cur);
     return { ok: true, episodeIndex: ep.index, publishCopy: copy };
+  }
+  if (name === 'novel_video_qa') {
+    const book = getBook(args.book);
+    if (!book) throw new Error('找不到书：' + args.book);
+    const cur = loadPlan(book);
+    const ep = (cur.episodes || []).find(e => e.index === Number(args.episodeIndex));
+    if (!ep?.shots?.length) throw new Error('这一集还没有分镜');
+    const bible = loadBible(book);
+    const targets = args.shotIndex ? ep.shots.filter(s => s.index === Number(args.shotIndex)) : ep.shots;
+    const results = [];
+    for (const s of targets) {
+      const prevShot = ep.shots.find(x => x.index === s.index - 1) || null;
+      const imgPath = (s.keyframeRef && resolveKeyframePath(book, s.keyframeRef))
+        || (s.render?.qaFrameRels?.[1] && resolveKeyframePath(book, s.render.qaFrameRels[1]))
+        || null;
+      const qa = (args.useVision !== false && imgPath)
+        ? await inspectImageRealism({ imagePath: imgPath, shot: s, bible, cfg }).catch(e => ({ ...auditShotPromptRealism(s, bible, prevShot), visionChecked: false, note: e.message }))
+        : { ...auditShotPromptRealism(s, bible, prevShot), visionChecked: false };
+      s.qa = { ...qa, checkedAt: new Date().toISOString() };
+      results.push({ shotIndex: s.index, ok: qa.ok, score: qa.score, issueCount: qa.issues.length, issues: qa.issues });
+    }
+    savePlan(book, cur);
+    return { ok: true, episodeIndex: ep.index, results };
   }
   throw new Error('未知 tool：' + name);
 }

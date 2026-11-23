@@ -6,7 +6,8 @@ import path from 'node:path';
 import {
   extractJson, normalizeEpisodes, normalizeShots, matchCharacter, snapFrames,
   revisionOf, staleChapters, parseBibleCharacters, buildEpisodePrompt, buildStoryboardPrompt,
-  composeLockedPrompt, resolveSpeakerVoice, saveBible, loadBible,
+  composeLockedPrompt, composeNativeDialoguePrompt, sanitizeLookPrompt, sanitizeScenePrompt,
+  inferVoicePreset, resolveSpeakerVoice, saveBible, loadBible,
 } from '../src/videoplan.mjs';
 
 const chapters = Array.from({ length: 10 }, (_, i) => ({ num: i + 1, revision: `r${i + 1}` }));
@@ -123,6 +124,28 @@ test('prompt 构造包含关键约束', () => {
   assert.match(s.user, /1\. 相遇/);
 });
 
+test('sanitizeLookPrompt 剥离固定外貌卡中的手持/随身道具，杜绝半身镜多长手穿帮', () => {
+  const raw = '24-year-old Chinese man, dark blue tunic, black trousers. His hands are calloused, and he carries a small wooden case with him. His eyes are intense.';
+  const clean = sanitizeLookPrompt(raw);
+  assert.doesNotMatch(clean, /wooden case|carries/i);
+  assert.match(clean, /dark blue tunic/);
+  assert.match(clean, /His eyes are intense/);
+
+  const raw2 = '22-year-old Chinese woman, dark green wool coat. She carries a leather notebook and has a sharp gaze.';
+  assert.doesNotMatch(sanitizeLookPrompt(raw2), /carries a leather notebook/i);
+});
+
+test('sanitizeScenePrompt 消毒直译误导词与门窗混写，并为年代剧补写实防穿帮约束', () => {
+  const s = sanitizeScenePrompt(
+    'Inside a bone-setting clinic outside the wooden window and doorway.',
+    { visualStyle: 'Cinematic 1930s Chinese period drama' }
+  );
+  assert.doesNotMatch(s, /bone-setting/i);
+  assert.match(s, /traditional Chinese herbal medicine clinic/i);
+  assert.doesNotMatch(s, /window and doorway/i);
+  assert.match(s, /no modern ceiling electric lamps/i);
+});
+
 test('composeLockedPrompt 把画风与角色固定外貌注入镜头提示词', () => {
   const bible = {
     visualStyle: 'Cinematic period drama.',
@@ -139,7 +162,8 @@ test('composeLockedPrompt 把画风与角色固定外貌注入镜头提示词', 
   assert.match(out, /^Cinematic period drama\./);
   assert.match(out, /\[林砚 \(<Picture 1>\): 25yo Chinese man, dark blue changshan\]/);
   assert.match(out, /\[沈知微: 22yo Chinese woman, pale green silk qipao\]/);
-  assert.match(out, /They walk in the alley\.$/);
+  assert.match(out, /They walk in the alley\./);
+  assert.match(out, /no modern ceiling electric lamps/);
 });
 
 test('resolveSpeakerVoice 按 speaker 隔离旁白与角色音色，不误用画面首个角色', () => {
@@ -166,6 +190,51 @@ test('resolveSpeakerVoice 按 speaker 隔离旁白与角色音色，不误用画
   const hero = resolveSpeakerVoice({ speaker: '林砚', characters: ['沈知微', '林砚'] }, bible, cfg);
   assert.strictEqual(hero.refAudio, 'D:/voices/linyan.wav');
   assert.strictEqual(hero.edgeVoice, 'zh-CN-YunjianNeural');
+
+  // 无手动音频时，按 voicePreset 自动从 voiceSamples 匹配女声样本
+  const samples = [
+    { path: 'D:/lib/young_female.wav', preset: 'young_female' },
+    { path: 'D:/lib/elder_male.wav', preset: 'elder_male' },
+  ];
+  const autoFemale = resolveSpeakerVoice(
+    { speaker: '沈知微', emotion: '轻声关切', characters: ['沈知微'] },
+    { ...bible, characters: [{ name: '沈知微', role: 'Female Lead', lookPrompt: '22-year-old Chinese woman' }] },
+    cfg,
+    samples
+  );
+  assert.strictEqual(autoFemale.voicePreset, 'young_female');
+  assert.strictEqual(autoFemale.refAudio, 'D:/lib/young_female.wav');
+  assert.strictEqual(autoFemale.emotion, '轻声关切');
+});
+
+test('inferVoicePreset 与 composeNativeDialoguePrompt 为不同角色生成独立 H3 原生对口型说话指令', () => {
+  assert.strictEqual(inferVoicePreset({ name: 'Xu Wan', role: 'Female Lead', lookPrompt: '22-year-old Chinese woman' }), 'young_female');
+  assert.strictEqual(inferVoicePreset({ name: 'Lao Liu Tou', role: 'Supporting', lookPrompt: '60-year-old Chinese man' }), 'elder_male');
+  assert.strictEqual(inferVoicePreset({ name: 'Liu Er Sa', role: 'Antagonist', lookPrompt: '35-year-old scarred man, broken nose' }), 'rough_male');
+  assert.strictEqual(inferVoicePreset({ name: 'Ma San', role: 'Antagonist', lookPrompt: '30-year-old lean pale sinister uniform' }), 'cold_male');
+
+  const bible = {
+    characters: [
+      { name: '徐晚', role: '女主', lookPrompt: '22-year-old woman', voiceDesc: 'clear, gentle young Chinese female voice' },
+    ],
+  };
+  const nativePrompt = composeNativeDialoguePrompt(
+    { speaker: '徐晚', narration: '早利索了，懒得拆。', emotion: '倔强温和' },
+    bible,
+    'Xu Wan stands outside the window.'
+  );
+  assert.match(nativePrompt, /Mandarin Chinese with realistic lip-sync/);
+  assert.match(nativePrompt, /clear, gentle young Chinese female voice/);
+  assert.match(nativePrompt, /倔强温和/);
+  assert.match(nativePrompt, /早利索了，懒得拆。/);
+
+  // 旁白不注入人物对口型指令
+  const narrPrompt = composeNativeDialoguePrompt(
+    { speaker: 'narrator', narration: '子夜北风呼啸。' },
+    bible,
+    'Alley at night.'
+  );
+  assert.strictEqual(narrPrompt, 'Alley at night.');
 });
 
 test('saveBible / loadBible 保留旁白音色与角色 edgeVoice/voiceRefAudio', () => {

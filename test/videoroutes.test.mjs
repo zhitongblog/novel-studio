@@ -151,9 +151,9 @@ test('videoroutes: 合成成片（含无原音轨视频 + BGM 闪避 + ASS 字�
     const s1 = path.join(vroot, 'ep-01', 'shots', 's1.mp4');
     const s2 = path.join(vroot, 'ep-01', 'shots', 's2.mp4');
     const bgm = path.join(vroot, 'bgm', 'theme.wav');
-    // 刻意构造无原音轨视频，验证 composeEpisode 的无 [0:a] 兜底路径
-    makeTinyMp4File(s1, { withAudio: false, sec: 2 });
-    makeTinyMp4File(s2, { withAudio: false, sec: 2 });
+    // 刻意构造 6 秒视频 + 短台词，验证 trimToTts 自动收紧镜头节奏
+    makeTinyMp4File(s1, { withAudio: false, sec: 6 });
+    makeTinyMp4File(s2, { withAudio: false, sec: 6 });
     makeTinyWavFile(bgm, 2);
 
     savePlan(env.book, {
@@ -164,15 +164,15 @@ test('videoroutes: 合成成片（含无原音轨视频 + BGM 闪避 + ASS 字�
         title: '雨夜交锋',
         fromChapter: 1,
         toChapter: 2,
-        aspect: '9:16',
+        aspect: '4:5',
         shots: [
           {
-            index: 1, scene: 'S1', action: '镜头一', narration: '黑夜降临。', speaker: 'narrator', seconds: 5,
-            render: { fileRel: 'ep-01/shots/s1.mp4', duration: 2 },
+            index: 1, scene: 'S1', action: '镜头一', narration: '黑夜降临。', speaker: 'narrator', seconds: 6,
+            render: { fileRel: 'ep-01/shots/s1.mp4', duration: 6 },
           },
           {
-            index: 2, scene: 'S1', action: '镜头二', narration: '真相就在门后！', speaker: '林砚', seconds: 5,
-            render: { fileRel: 'ep-01/shots/s2.mp4', duration: 2 },
+            index: 2, scene: 'S1', action: '镜头二', narration: '真相就在门后！', speaker: '林砚', seconds: 6,
+            render: { fileRel: 'ep-01/shots/s2.mp4', duration: 6 },
           },
         ],
       }],
@@ -182,6 +182,7 @@ test('videoroutes: 合成成片（含无原音轨视频 + BGM 闪避 + ASS 字�
       episodeIndex: 1,
       useTts: true,
       burnSubtitles: true,
+      trimToTts: true,
       bgmPath: bgm,
       bgmVolume: 0.2,
     });
@@ -201,7 +202,8 @@ test('videoroutes: 合成成片（含无原音轨视频 + BGM 闪避 + ASS 字�
     assert.equal(meta.width, 960);
     assert.equal(meta.height, 1216);
     assert.equal(meta.hasAudio, true);
-    assert.ok(meta.duration >= 3.5);
+    // 原两镜合计 12s，按短台词收紧后应显著低于 10s
+    assert.ok(meta.duration >= 4.5 && meta.duration < 10.5, `预期收紧后时长在 4.5–10.5s，实际 ${meta.duration}s`);
 
     // 导出剪映草稿
     const jy = await env.call('/api/book/video/episode/export-jianying', { episodeIndex: 1 });
@@ -209,6 +211,21 @@ test('videoroutes: 合成成片（含无原音轨视频 + BGM 闪避 + ASS 字�
     assert.equal(jy.data.clipCount, 2);
     const dc = JSON.parse(fs.readFileSync(jy.data.draftContentFile, 'utf8'));
     assert.equal(dc.tracks.length, 3); // video + audio(tts) + text(subtitle)
+
+    // native 模式合成：角色台词保留原声（跳过角色 TTS 覆盖），字幕依然正常烧录
+    const nativeStart = await env.call('/api/book/video/episode/compose', {
+      episodeIndex: 1,
+      voiceMode: 'native',
+      useTts: true,
+      burnSubtitles: true,
+    });
+    assert.equal(nativeStart.status, 200);
+    const nativeJob = await env.waitJob(60000);
+    assert.equal(nativeJob.status, 'done', `native 合成失败: ${nativeJob.error}`);
+    const planAfterNative = loadPlan(env.book);
+    // 第 2 镜 speaker='林砚' 是角色，在 native 模式下应保留原声不生成 ttsRel
+    assert.equal(planAfterNative.episodes[0].shots[1].render.ttsRel, '');
+    assert.equal(planAfterNative.episodes[0].voiceMode, 'native');
   } finally {
     env.cleanup();
   }

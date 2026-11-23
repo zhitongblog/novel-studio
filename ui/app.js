@@ -2848,7 +2848,7 @@ $('#cvDownload').addEventListener('click', async () => {
   } catch (e) { $('#cvErr').textContent = e.message; }
 });
 // ===== 改编视频工作台（全屏 4 步 AI 导演工作台） =====
-let vidPlan = { episodes: [] }, vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] }, vidRef2V = false, vidKeyframes = [], vidEdgeVoices = [], vidCurEp = 1, vidPoll = null, vidStep = 'assets';
+let vidPlan = { episodes: [] }, vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] }, vidRef2V = false, vidKeyframes = [], vidEdgeVoices = [], vidVoicePresets = [], vidVoiceSamples = [], vidCurEp = 1, vidPoll = null, vidStep = 'assets';
 function vidFileUrl(rel) {
   return `${API}/api/book/video/file?book=${encodeURIComponent(CUR.slug)}&rel=${encodeURIComponent(rel)}&t=${Date.now()}`;
 }
@@ -2925,10 +2925,27 @@ function renderVideoBible() {
         </div>
         ${refUrl ? `<img src="${esc(refUrl)}" style="width:100%;max-height:180px;object-fit:cover;border-radius:6px;background:#111" />` : ''}
         <select class="vid-cast-ref" style="font-size:11px">${kfOpts(c.refImageRef || '')}</select>
-        <textarea class="vid-cast-look" rows="3" placeholder="固定英文外貌卡（年龄、五官、发型、固定服饰颜色、标志配饰）" style="width:100%;font-size:11px">${esc(c.lookPrompt || '')}</textarea>
-        <select class="vid-cast-edge" style="font-size:11px">${vidEdgeVoiceOpts(c.edgeVoice || '', 'Edge-TTS 音色（沿用默认）')}</select>
+        <textarea class="vid-cast-look" rows="3" placeholder="固定英文外貌卡（年龄、五官、发型、固定服饰颜色；严禁写手持道具）" style="width:100%;font-size:11px">${esc(c.lookPrompt || '')}</textarea>
         <div style="display:flex;gap:6px;align-items:center">
-          <input class="vid-cast-voice" value="${esc(c.voiceRefAudio || '')}" placeholder="可选：IndexTTS2 声音克隆音频 (.wav)" style="flex:1;font-size:11px" />
+          <select class="vid-cast-vpreset" style="width:130px;font-size:11px" title="角色声线类型（用于自动配对音色与 H3 原生发声）">
+            <option value="">自动声线类型</option>
+            ${(vidVoicePresets.length ? vidVoicePresets : [
+              { id: 'young_male', label: '沉稳青年男声' },
+              { id: 'young_female', label: '清冷/温柔女声' },
+              { id: 'elder_male', label: '沧桑老年男声' },
+              { id: 'rough_male', label: '粗犷硬汉/悍匪' },
+              { id: 'cold_male', label: '阴冷反派男声' },
+            ]).map((vp) => `<option value="${esc(vp.id)}" ${vp.id === c.voicePreset ? 'selected' : ''}>${esc(vp.label)}</option>`).join('')}
+          </select>
+          <input class="vid-cast-vdesc" value="${esc(c.voiceDesc || '')}" placeholder="H3 原生说话声线描述（英文，如 clear young female voice）" style="flex:1;font-size:11px" />
+        </div>
+        <select class="vid-cast-edge" style="font-size:11px">${vidEdgeVoiceOpts(c.edgeVoice || '', 'Edge-TTS 音色（沿用预设）')}</select>
+        ${vidVoiceSamples.length ? `<select class="vid-cast-vsample" style="font-size:11px" title="从本机/本书音色库一键选定参考音频">
+          <option value="">🎙 从音色库快速选取参考音频…</option>
+          ${vidVoiceSamples.map((vs) => `<option value="${esc(vs.path)}" ${vs.path === c.voiceRefAudio ? 'selected' : ''}>${esc(vs.label)}</option>`).join('')}
+        </select>` : ''}
+        <div style="display:flex;gap:6px;align-items:center">
+          <input class="vid-cast-voice" value="${esc(c.voiceRefAudio || '')}" placeholder="IndexTTS2 声音克隆音频路径 (.wav/.mp3)" style="flex:1;font-size:11px" />
           <label class="btn tiny" style="cursor:pointer;margin:0" title="上传角色参考音色">🎙<input class="vid-upload-voice" type="file" accept="audio/*" hidden /></label>
         </div>
       </div>`;
@@ -2944,10 +2961,19 @@ function renderVideoBible() {
       role: row.querySelector('.vid-cast-role')?.value.trim() || '',
       lookPrompt: row.querySelector('.vid-cast-look')?.value || '',
       refImageRef: row.querySelector('.vid-cast-ref')?.value || '',
+      voicePreset: row.querySelector('.vid-cast-vpreset')?.value || '',
+      voiceDesc: row.querySelector('.vid-cast-vdesc')?.value.trim() || '',
       edgeVoice: row.querySelector('.vid-cast-edge')?.value || '',
       voiceRefAudio: row.querySelector('.vid-cast-voice')?.value.trim() || '',
     };
   }).filter((c) => c.name);
+  pane.querySelectorAll('.vid-cast-vsample').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const row = sel.closest('.vid-cast-row');
+      const vInp = row?.querySelector('.vid-cast-voice');
+      if (vInp && sel.value) vInp.value = sel.value;
+    });
+  });
   const saveBibleNow = async (charactersOverride) => {
     const characters = charactersOverride || collectCast();
     const r = await api('/api/book/video/bible/save', 'POST', {
@@ -3117,10 +3143,19 @@ function renderVideoModal() {
         ${ep.staleChapters?.length ? `<span style="color:#ff9f43;font-size:12px">⚠ 原文第${ep.staleChapters.join(',')}章已更新</span>` : ''}
       </div>
       <div class="btn-row" style="gap:6px;flex-wrap:wrap">
+        <select id="vidDialogueMode" style="font-size:12px" title="分镜叙事风格">
+          <option value="drama" ${(ep.dialogueMode || 'drama') === 'drama' ? 'selected' : ''}>🎬 纯影视对白（去解说旁白）</option>
+          <option value="narration" ${ep.dialogueMode === 'narration' ? 'selected' : ''}>📖 漫剧旁白解说</option>
+        </select>
+        <select id="vidVoiceMode" style="font-size:12px" title="人物发声方案">
+          <option value="native" ${ep.voiceMode === 'native' ? 'selected' : ''}>👄 H3 原生对口型说话（全员各自声线）</option>
+          <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 IndexTTS2 多角色克隆 + 情绪</option>
+        </select>
         <button class="btn" id="vidGenSbBtn">📝 ${shots.length ? '重出分镜' : '生成分镜'}</button>
         <button class="btn" id="vidAddShotBtn">➕ 新增镜头</button>
         <button class="btn" id="vidUploadKfTrigger">📤 上传关键帧</button>
         ${shots.length ? '<button class="btn" id="vidGenAllKfBtn">🎨 一键生全部关键帧</button>' : ''}
+        ${shots.length ? '<button class="btn" id="vidQaAllBtn" title="检查穿帮/时代错误/动作过载/视觉审片">🛡 常识质检本集</button>' : ''}
         ${shots.length ? '<button class="btn primary" id="vidRenderAllBtn">🎥 渲染本集所有镜头</button>' : ''}
         ${shots.length && shots.every((s) => s.render?.fileRel) ? '<button class="btn primary" id="vidToExportBtn">下一步：合成与交付 →</button>' : ''}
       </div>
@@ -3144,15 +3179,21 @@ function renderVideoModal() {
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <select class="vid-kf" style="flex:1;min-width:110px;font-size:11px">${kfOpts(s.keyframeRef || '')}</select>
           <button class="btn tiny vid-gen-kf">🎨 AI关键帧</button>
-          <button class="btn tiny primary vid-render">${s.render?.fileRel ? '🎥 重渲' : '🎥 渲染'}</button>
+          <button class="btn tiny vid-qa-shot" title="检查分镜与关键帧/抽帧现实常识">🛡 质检</button>
+          <button class="btn tiny primary vid-render" title="${s.keyframeRef && s.keyframeRef !== 'cover_bg' ? '已绑定关键帧：默认走 Keyframe-First I2V 保持构图稳定' : '无专属关键帧：走多角色定妆照 Ref2V'}">${s.render?.fileRel ? '🎥 重渲' : '🎥 渲染'}</button>
           ${s.render?.fileRel ? '<button class="btn tiny vid-reroll" title="更换随机种子重新渲染">🎲 换种重渲</button>' : ''}
         </div>
+        ${s.qa ? `<div style="font-size:11px;padding:6px 8px;border-radius:6px;background:${s.qa.ok ? 'rgba(31,209,178,.08)' : 'rgba(255,159,67,.12)'};border:1px solid ${s.qa.ok ? 'rgba(31,209,178,.3)' : 'rgba(255,159,67,.4)'}">
+          <div><b>${s.qa.ok ? '✅ 常识质检通过' : '⚠️ 发现穿帮/常识风险'}</b>（${s.qa.score ?? '-'}分${s.qa.visionChecked ? ' · 含VLM视觉审片' : ' · 规则防呆'}）</div>
+          ${(s.qa.issues || []).length ? `<ul style="margin:4px 0 0 16px;padding:0;line-height:1.45">${s.qa.issues.map((it) => `<li>${esc(it.msg || it)}</li>`).join('')}</ul>` : ''}
+        </div>` : ''}
         <div style="font-size:12px;opacity:.85">动作：${esc(s.action || '')}</div>
         <div style="display:flex;gap:6px;align-items:center">
           <span style="font-size:11px;opacity:.75;white-space:nowrap">说话人</span>
           <select class="vid-speaker" style="flex:1;font-size:11px">${speakerOpts(s.speaker || 'narrator', s.characters)}</select>
+          <input class="vid-emotion" value="${esc(s.emotion || '')}" placeholder="情绪（冷峻/轻声/怒吼）" style="width:128px;font-size:11px" title="表演情绪（透传给 IndexTTS2 与 H3 对口型）" />
         </div>
-        <textarea class="vid-narr" rows="2" placeholder="旁白/台词（中文）" style="width:100%;font-size:12px">${esc(s.narration || '')}</textarea>
+        <textarea class="vid-narr" rows="2" placeholder="角色台词（无对白纯画面镜留空，靠环境音推进）" style="width:100%;font-size:12px">${esc(s.narration || '')}</textarea>
         <textarea class="vid-prompt" rows="2" placeholder="English video prompt" style="width:100%;font-size:11px;opacity:.9">${esc(s.prompt || '')}</textarea>
         <input class="vid-ambience" value="${esc(s.ambience || '')}" placeholder="English ambient sound / SFX（可选）" style="width:100%;font-size:11px;opacity:.85" />
         ${s.render?.fileRel ? `<div style="display:flex;flex-direction:column;gap:6px">
@@ -3176,6 +3217,7 @@ function renderVideoModal() {
   $('#vidBoardEpSel')?.addEventListener('change', (ev) => { vidCurEp = Number(ev.target.value); renderVideoModal(); });
   $('#vidGenSbBtn')?.addEventListener('click', () => startVidJob('/api/book/video/storyboard', {
     book: CUR.slug, episodeIndex: ep.index, aspect: $('#vidAspect').value,
+    dialogueMode: $('#vidDialogueMode')?.value || 'drama',
   }));
   $('#vidAddShotBtn')?.addEventListener('click', async () => {
     try {
@@ -3188,8 +3230,12 @@ function renderVideoModal() {
   $('#vidGenAllKfBtn')?.addEventListener('click', () => startVidJob('/api/book/video/shot/gen-keyframe', {
     book: CUR.slug, episodeIndex: ep.index, aspect: $('#vidAspect').value, onlyMissing: true,
   }));
+  $('#vidQaAllBtn')?.addEventListener('click', () => startVidJob('/api/book/video/shot/qa', {
+    book: CUR.slug, episodeIndex: ep.index,
+  }));
   $('#vidRenderAllBtn')?.addEventListener('click', () => startVidJob('/api/book/video/shot/render', {
     book: CUR.slug, episodeIndex: ep.index, defaultKeyframeRef: vidKeyframes[0]?.ref || 'cover_bg',
+    voiceMode: $('#vidVoiceMode')?.value || ep.voiceMode || 'tts',
   }));
   $('#vidToExportBtn')?.addEventListener('click', () => setVidStep('export'));
 
@@ -3201,6 +3247,7 @@ function renderVideoModal() {
       seconds: Number(card.querySelector('.vid-sec')?.value) || 5,
       seed: seedOverride !== undefined ? seedOverride : (Number(card.querySelector('.vid-seed')?.value) || undefined),
       speaker: card.querySelector('.vid-speaker')?.value || 'narrator',
+      emotion: card.querySelector('.vid-emotion')?.value.trim() || '',
       narration: card.querySelector('.vid-narr')?.value || '',
       prompt: card.querySelector('.vid-prompt')?.value || '',
       ambience: card.querySelector('.vid-ambience')?.value || '',
@@ -3223,12 +3270,21 @@ function renderVideoModal() {
         });
       } catch (e) { $('#vidErr').textContent = e.message; }
     });
+    card.querySelector('.vid-qa-shot')?.addEventListener('click', async () => {
+      try {
+        await saveShot();
+        await startVidJob('/api/book/video/shot/qa', {
+          book: CUR.slug, episodeIndex: ep.index, shotIndex: idx,
+        });
+      } catch (e) { $('#vidErr').textContent = e.message; }
+    });
     card.querySelector('.vid-render')?.addEventListener('click', async () => {
       try {
         await saveShot();
         await startVidJob('/api/book/video/shot/render', {
           book: CUR.slug, episodeIndex: ep.index, shotIndex: idx, force: true,
           defaultKeyframeRef: vidKeyframes[0]?.ref || 'cover_bg',
+          voiceMode: $('#vidVoiceMode')?.value || ep.voiceMode || 'tts',
         });
       } catch (e) { $('#vidErr').textContent = e.message; }
     });
@@ -3241,6 +3297,7 @@ function renderVideoModal() {
         await startVidJob('/api/book/video/shot/render', {
           book: CUR.slug, episodeIndex: ep.index, shotIndex: idx, force: true,
           defaultKeyframeRef: vidKeyframes[0]?.ref || 'cover_bg',
+          voiceMode: $('#vidVoiceMode')?.value || ep.voiceMode || 'tts',
         });
       } catch (e) { $('#vidErr').textContent = e.message; }
     });
@@ -3260,11 +3317,20 @@ function renderVideoModal() {
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:12px">
-        <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="vidBurnSub" checked /> <span>自动烧录短剧字幕 (ASS)</span>
+        <label class="field" style="margin:0"><span style="font-size:12px">人声合成方案</span>
+          <select id="vidComposeVoiceMode">
+            <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 IndexTTS2 多角色配音 + 情绪</option>
+            <option value="native" ${ep.voiceMode === 'native' ? 'selected' : ''}>👄 保留 H3 原生对口型人声（不盖角色 TTS）</option>
+          </select>
         </label>
         <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="vidUseTts" checked /> <span>启用多角色 / 旁白配音（IndexTTS2 / Edge-TTS）</span>
+          <input type="checkbox" id="vidBurnSub" checked /> <span>自动烧录短剧字幕 (ASS，自动分片防劈词)</span>
+        </label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="vidUseTts" checked /> <span>启用多角色 / 旁白配音（native 模式仅配残余旁白）</span>
+        </label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="vidTrimTts" checked /> <span>✂ 按配音自动收紧镜头节奏（去拖尾）</span>
         </label>
         <label class="field" style="margin:0"><span style="font-size:12px">可选 BGM 音频（支持自动闪避）</span>
           <div style="display:flex;gap:6px;align-items:center">
@@ -3300,8 +3366,10 @@ function renderVideoModal() {
     $('#vidComposeBtn')?.addEventListener('click', () => startVidJob('/api/book/video/episode/compose', {
       book: CUR.slug,
       episodeIndex: ep.index,
+      voiceMode: $('#vidComposeVoiceMode')?.value || ep.voiceMode || 'tts',
       useTts: !!$('#vidUseTts')?.checked,
       burnSubtitles: !!$('#vidBurnSub')?.checked,
+      trimToTts: !!$('#vidTrimTts')?.checked,
       bgmPath: $('#vidBgmPath')?.value.trim() || '',
       bgmVolume: Number($('#vidBgmVol')?.value) || 0.16,
     }));
@@ -3357,6 +3425,8 @@ async function refreshVideoPlan() {
   vidRef2V = !!r.ref2vaReady;
   vidKeyframes = r.keyframes || [];
   vidEdgeVoices = r.edgeVoices || [];
+  vidVoicePresets = r.voicePresets || [];
+  vidVoiceSamples = r.voiceSamples || [];
   renderVideoBible();
   renderVideoModal();
 }

@@ -27,44 +27,126 @@ export function formatSrtTime(sec) {
   return `${pad2(h)}:${pad2(m)}:${pad2(s)},${String(ms).padStart(3, '0')}`;
 }
 
-/** 将一段中文台词按短剧可读宽度切分并插入换行符，避免单行溢出竖屏画幅。 */
-export function wrapCaption(text, maxChars = 14) {
+/** 将单个超长中文短句按均衡字数折行，避免 14+2 劈词留孤尾。 */
+function balanceSplitSegment(seg, maxChars) {
+  if (seg.length <= maxChars) return [seg];
+  const lineCount = Math.ceil(seg.length / maxChars);
+  const ideal = Math.ceil(seg.length / lineCount);
+  const out = [];
+  let pos = 0;
+  for (let l = 0; l < lineCount; l++) {
+    const rem = seg.length - pos;
+    if (l === lineCount - 1 || rem <= maxChars) {
+      out.push(seg.slice(pos));
+      break;
+    }
+    const linesLeft = lineCount - l;
+    let cut = pos + Math.ceil(rem / linesLeft);
+    // 尽量在常见虚词/连接字之后断开（的、了、着、在、向、与、和、却、便、就、把、被），减少把实词劈开
+    const lo = Math.max(pos + 3, cut - 3);
+    const hi = Math.min(pos + maxChars, cut + 2);
+    for (let k = cut; k >= lo; k--) {
+      if (/[的了着在上里中前后与和却便就把被是]/.test(seg[k - 1])) { cut = k; break; }
+    }
+    if (cut > hi) cut = Math.min(pos + maxChars, pos + ideal);
+    out.push(seg.slice(pos, cut));
+    pos = cut;
+  }
+  return out.filter(Boolean);
+}
+
+/** 将一段中文台词按短剧可读宽度切分并插入换行符，均衡换行且避免劈词留 1–2 字孤尾。 */
+export function wrapCaption(text, maxChars = 13) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return '';
   if (clean.length <= maxChars) return clean;
-  // 优先按标点切分成多句，再按字数折行
+  // 优先按标点切分成短句，再尽量合并短句、对超长短句做均衡折行
   const parts = clean.split(/(?<=[，。！？；：、,.!?;])/).map((s) => s.trim()).filter(Boolean);
   const lines = [];
   let cur = '';
   for (const p of parts) {
-    if ((cur + p).length <= maxChars) {
+    if (!cur && p.length <= maxChars) {
+      cur = p;
+    } else if (cur && (cur + p).length <= maxChars) {
       cur += p;
     } else {
-      if (cur) lines.push(cur);
+      if (cur) { lines.push(cur); cur = ''; }
       if (p.length <= maxChars) {
         cur = p;
       } else {
-        for (let i = 0; i < p.length; i += maxChars) {
-          const chunk = p.slice(i, i + maxChars);
-          if (i + maxChars >= p.length) cur = chunk;
-          else lines.push(chunk);
-        }
+        const balanced = balanceSplitSegment(p, maxChars);
+        for (let i = 0; i < balanced.length - 1; i++) lines.push(balanced[i]);
+        cur = balanced[balanced.length - 1] || '';
       }
     }
   }
   if (cur) lines.push(cur);
+  // 若最后一行过短（<=2 汉字且不含独立短句）且与上一行合并后超幅不大，或可从上一行借 2 字平衡
+  if (lines.length >= 2) {
+    const last = lines[lines.length - 1];
+    const prev = lines[lines.length - 2];
+    const lastBare = last.replace(/[，。！？；：、,.!?;…]/g, '');
+    if (lastBare.length > 0 && lastBare.length <= 2 && !/[，。！？；：]/.test(prev.slice(-1))) {
+      const merged = prev + last;
+      if (merged.length <= maxChars + 1) {
+        lines.splice(lines.length - 2, 2, merged);
+      } else {
+        const re = balanceSplitSegment(merged, maxChars);
+        lines.splice(lines.length - 2, 2, ...re);
+      }
+    }
+  }
   return lines.join('\n');
 }
 
 /**
- * 根据分镜列表（含实际时长 durationSec 或预估 seconds 与 narration）生成 ASS 与 SRT 字幕文本。
- * @param {Array<{narration?:string, seconds?:number, actualSeconds?:number}>} shots
+ * 将长台词按中文标点与字数占比拆成多条连续字幕（每条严格控制在 1–2 行，避免 3 行大字压画面）。
+ */
+export function splitSubtitleCues(text, startSec, endSec, maxCharsPerCue = 18) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+  const totalDur = Math.max(0.3, endSec - startSec);
+  const segs = clean.split(/(?<=[，。！？；：,.!?;])/).map((s) => s.trim()).filter(Boolean);
+  if (clean.length <= maxCharsPerCue || segs.length <= 1) {
+    return [{ start: startSec, end: endSec, text: clean }];
+  }
+  const chunks = [];
+  let cur = '';
+  for (const seg of segs) {
+    if (cur && (cur + seg).length > maxCharsPerCue) {
+      chunks.push(cur);
+      cur = seg;
+    } else {
+      cur += seg;
+    }
+  }
+  if (cur) chunks.push(cur);
+  if (chunks.length <= 1) return [{ start: startSec, end: endSec, text: clean }];
+  const weights = chunks.map((c) => Math.max(1, c.replace(/[，。！？；：、,.!?;…\s]/g, '').length));
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const cues = [];
+  let t = startSec;
+  chunks.forEach((chunk, i) => {
+    const isLast = i === chunks.length - 1;
+    const dur = isLast ? Math.max(0.3, endSec - t) : Math.max(0.4, (totalDur * weights[i]) / totalWeight);
+    const nextT = isLast ? endSec : Math.min(endSec - 0.1, t + dur);
+    cues.push({ start: t, end: nextT, text: chunk });
+    t = nextT;
+  });
+  return cues;
+}
+
+/**
+ * 根据分镜列表（含实际时长 actualSeconds / 预估 seconds、可选 ttsDurationSec 与 narration）生成 ASS 与 SRT 字幕文本。
+ * @param {Array<{narration?:string, seconds?:number, actualSeconds?:number, ttsDurationSec?:number}>} shots
  * @param {{width?:number, height?:number}} dims
  */
-export function buildEpisodeSubtitles(shots, { width = 540, height = 960 } = {}) {
-  const maxChars = width >= height ? 24 : 14;
-  const fontSize = Math.max(22, Math.round(Math.min(width, height) * 0.056));
-  const marginV = Math.round(height * 0.12);
+export function buildEpisodeSubtitles(shots, { width = 416, height = 736 } = {}) {
+  const isWide = width >= height;
+  const maxChars = isWide ? 22 : 12;
+  const maxCharsPerCue = isWide ? 34 : 18;
+  const fontSize = Math.max(20, Math.round(Math.min(width, height) * 0.044));
+  const marginV = Math.round(height * 0.11);
 
   const assHeader = [
     '[Script Info]',
@@ -76,7 +158,7 @@ export function buildEpisodeSubtitles(shots, { width = 540, height = 960 } = {})
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Drama,Microsoft YaHei,${fontSize},&H00FFFFFF,&H0000FFFF,&H00121212,&H80000000,-1,0,0,0,100,100,1,0,1,3,1,2,28,28,${marginV},1`,
+    `Style: Drama,Microsoft YaHei,${fontSize},&H00FFFFFF,&H0000FFFF,&H00101018,&H90000000,-1,0,0,0,100,100,0.5,0,1,2.2,0.8,2,24,24,${marginV},1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
@@ -91,11 +173,17 @@ export function buildEpisodeSubtitles(shots, { width = 540, height = 960 } = {})
     const dur = Math.max(0.5, Number(shot.actualSeconds || shot.seconds || 5));
     const text = String(shot.narration || '').trim();
     const start = cursor + 0.08;
-    const end = Math.max(start + 0.3, cursor + dur - 0.08);
+    const ttsDur = Number(shot.ttsDurationSec) || 0;
+    // 若有实际配音时长且比镜头短，字幕随配音结束（留 0.25s 缓冲），不干挂屏幕
+    const rawEnd = ttsDur > 0 ? Math.min(cursor + dur - 0.08, start + ttsDur + 0.25) : (cursor + dur - 0.08);
+    const end = Math.max(start + 0.3, rawEnd);
     if (text) {
-      const wrapped = wrapCaption(text, maxChars);
-      assEvents.push(`Dialogue: 0,${formatAssTime(start)},${formatAssTime(end)},Drama,,0,0,0,,${wrapped.replace(/\n/g, '\\N')}`);
-      srtBlocks.push(`${srtIdx++}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${wrapped}\n`);
+      const cues = splitSubtitleCues(text, start, end, maxCharsPerCue);
+      for (const cue of cues) {
+        const wrapped = wrapCaption(cue.text, maxChars).replace(/[，。！？；：、,.!?;]$/g, (m) => (m === '？' || m === '！' ? m : ''));
+        assEvents.push(`Dialogue: 0,${formatAssTime(cue.start)},${formatAssTime(cue.end)},Drama,,0,0,0,,${wrapped.replace(/\n/g, '\\N')}`);
+        srtBlocks.push(`${srtIdx++}\n${formatSrtTime(cue.start)} --> ${formatSrtTime(cue.end)}\n${wrapped}\n`);
+      }
     }
     cursor += dur;
   }

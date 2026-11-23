@@ -3,14 +3,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
-  loadPlan, savePlan, loadBible, saveBible, composeLockedPrompt, extractCharacterBible,
-  currentRevisions, staleChapters, planEpisodes, generateStoryboard, generatePublishCopy,
-  resolveSpeakerVoice, EDGE_VOICES, videoDir,
+  loadPlan, savePlan, loadBible, saveBible, composeLockedPrompt, composeNativeDialoguePrompt,
+  extractCharacterBible, currentRevisions, staleChapters, planEpisodes, generateStoryboard,
+  generatePublishCopy, resolveSpeakerVoice, EDGE_VOICES, VOICE_PRESETS, videoDir,
 } from './videoplan.mjs';
 import {
   renderShot, synthesizeTts, composeEpisode, probeVideoEngine, hasRef2VModels,
-  aspectDimensions, prepareShotRenderInputs,
+  aspectDimensions, prepareShotRenderInputs, computeClipTrimDuration, probeMedia,
+  resolveKeyframePath, listVoiceSamples,
 } from './videorender.mjs';
+import { auditShotPromptRealism, inspectImageRealism } from './videoqa.mjs';
 import { buildEpisodeSubtitles, exportJianyingDraft } from './videopost.mjs';
 import { generateCoverBg } from './imagegen.mjs';
 
@@ -121,6 +123,8 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       ref2vaReady: hasRef2VModels(cfg.video || {}),
       keyframes: listKeyframes(book),
       edgeVoices: EDGE_VOICES,
+      voicePresets: VOICE_PRESETS,
+      voiceSamples: listVoiceSamples(book, cfg),
     });
     return true;
   }
@@ -268,16 +272,18 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
 
   if (p === '/api/book/video/storyboard') {
     const epIdx = Number(body.episodeIndex);
-    const resObj = startVideoJob(videoJobs, slug, 'storyboard', `正在为第 ${epIdx} 集生成分镜…`, pushLog, async (onLog) => {
+    const dialogueMode = body.dialogueMode === 'narration' ? 'narration' : 'drama';
+    const resObj = startVideoJob(videoJobs, slug, 'storyboard', `正在为第 ${epIdx} 集生成分镜（${dialogueMode === 'drama' ? '纯影视对白' : '漫剧旁白'}）…`, pushLog, async (onLog) => {
       const cur = loadPlan(book);
       const ep = (cur.episodes || []).find((e) => e.index === epIdx);
       if (!ep) throw new Error(`找不到第 ${epIdx} 集`);
       const aspect = body.aspect || cfg.video?.aspect || '9:16';
-      const sb = await generateStoryboard(book, cfg, ep, { aspect, onLog });
+      const sb = await generateStoryboard(book, cfg, ep, { aspect, dialogueMode, onLog });
       ep.shots = sb.shots;
       ep.totalSeconds = sb.totalSeconds;
       ep.sourceRevisions = sb.sourceRevisions;
       ep.aspect = aspect;
+      ep.dialogueMode = dialogueMode;
       savePlan(book, cur);
       return { episodeIndex: epIdx, ...sb };
     });
@@ -290,7 +296,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
     const ep = (cur.episodes || []).find((e) => e.index === Number(body.episodeIndex));
     const shot = ep?.shots?.find((s) => s.index === Number(body.shotIndex));
     if (!shot) { json(res, 404, { error: '找不到对应镜头' }); return true; }
-    for (const k of ['prompt', 'ambience', 'narration', 'action', 'keyframeRef', 'speaker', 'scene']) {
+    for (const k of ['prompt', 'ambience', 'narration', 'action', 'keyframeRef', 'speaker', 'emotion', 'scene', 'settingType']) {
       if (typeof body[k] === 'string') shot[k] = body[k];
     }
     if (Array.isArray(body.characters)) {
@@ -350,11 +356,51 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
     return true;
   }
 
+  if (p === '/api/book/video/shot/qa') {
+    const epIdx = Number(body.episodeIndex);
+    const shotIdx = body.shotIndex ? Number(body.shotIndex) : 0;
+    const useVision = body.useVision !== false;
+    const resObj = startVideoJob(videoJobs, slug, 'qa', `正在对第 ${epIdx} 集执行现实常识质检…`, pushLog, async (onLog) => {
+      const cur = loadPlan(book);
+      const ep = (cur.episodes || []).find((e) => e.index === epIdx);
+      if (!ep?.shots?.length) throw new Error('这一集还没有分镜');
+      const bible = loadBible(book);
+      const targets = shotIdx ? ep.shots.filter((s) => s.index === shotIdx) : ep.shots;
+      if (!targets.length) throw new Error(`找不到第 ${shotIdx} 镜`);
+      let flagged = 0;
+      for (const s of targets) {
+        const prevShot = ep.shots.find((x) => x.index === s.index - 1) || null;
+        // 优先审静态关键帧（渲染前拦穿帮），其次审已渲染中帧
+        const imgPath = (s.keyframeRef && resolveKeyframePath(book, s.keyframeRef))
+          || (s.render?.qaFrameRels?.[1] && resolveKeyframePath(book, s.render.qaFrameRels[1]))
+          || null;
+        let resQa;
+        if (useVision && imgPath) {
+          try {
+            resQa = await inspectImageRealism({ imagePath: imgPath, shot: s, bible, cfg, onLog });
+          } catch (e) {
+            onLog({ level: 'warn', msg: `第 ${s.index} 镜视觉审片失败（${e.message}），降级为静态规则检查` });
+            resQa = { ...auditShotPromptRealism(s, bible, prevShot), visionChecked: false, note: e.message };
+          }
+        } else {
+          resQa = { ...auditShotPromptRealism(s, bible, prevShot), visionChecked: false };
+        }
+        s.qa = { ...resQa, checkedAt: new Date().toISOString() };
+        if (!resQa.ok) flagged++;
+        savePlan(book, cur);
+      }
+      return { episodeIndex: epIdx, checked: targets.length, flagged };
+    });
+    json(res, 200, resObj);
+    return true;
+  }
+
   if (p === '/api/book/video/shot/render') {
     const epIdx = Number(body.episodeIndex);
     const shotIdx = body.shotIndex ? Number(body.shotIndex) : 0;
     const force = !!body.force;
     const defaultRef = body.defaultKeyframeRef || 'cover_bg';
+    const renderMode = ['auto', 'fl2va', 'ref2va'].includes(body.renderMode) ? body.renderMode : 'auto';
     const probe = await probeVideoEngine(cfg);
     if (!probe.ready) {
       json(res, 400, { error: probe.blockers.join('；') });
@@ -367,17 +413,25 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       const targets = shotIdx ? ep.shots.filter((s) => s.index === shotIdx) : ep.shots;
       if (!targets.length) throw new Error(`找不到第 ${shotIdx} 镜`);
       const aspect = ep.aspect || cfg.video?.aspect || '9:16';
+      const voiceMode = body.voiceMode === 'native' || body.voiceMode === 'tts'
+        ? body.voiceMode
+        : (ep.voiceMode === 'native' ? 'native' : 'tts');
+      ep.voiceMode = voiceMode;
       const bible = loadBible(book);
       for (const s of targets) {
         const { keyframePath, refImagePaths, charRefTags } = prepareShotRenderInputs({
-          book, episode: ep, shot: s, bible, cfg, defaultRef,
+          book, episode: ep, shot: s, bible, cfg, defaultRef, renderMode,
         });
-        const lockedPrompt = composeLockedPrompt(s, bible, charRefTags);
+        let lockedPrompt = composeLockedPrompt(s, bible, charRefTags);
+        if (voiceMode === 'native') {
+          lockedPrompt = composeNativeDialoguePrompt(s, bible, lockedPrompt, cfg);
+        }
         const r = await renderShot(book, cfg, {
-          episodeIndex: epIdx, shot: s, keyframePath, refImagePaths, lockedPrompt, aspect, force, onLog,
+          episodeIndex: epIdx, shot: s, keyframePath, refImagePaths, lockedPrompt, aspect, voiceMode, force, onLog,
         });
         s.render = {
           mode: r.mode,
+          voiceMode,
           inputHash: r.inputHash,
           fileRel: toVideoRel(book, r.file),
           qaFrameRels: r.qaFrames.map((f) => toVideoRel(book, f)),
@@ -386,7 +440,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
         };
         savePlan(book, cur);
       }
-      return { episodeIndex: epIdx, rendered: targets.length };
+      return { episodeIndex: epIdx, rendered: targets.length, voiceMode };
     });
     json(res, 200, resObj);
     return true;
@@ -396,44 +450,74 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
     const epIdx = Number(body.episodeIndex);
     const useTts = body.useTts !== false;
     const burnSubtitles = body.burnSubtitles !== false;
+    const trimToTts = body.trimToTts !== false;
     const bgmFile = String(body.bgmPath || '').trim();
     const bgmVolume = body.bgmVolume !== undefined ? Number(body.bgmVolume) : 0.16;
     const resObj = startVideoJob(videoJobs, slug, 'compose', `正在合成第 ${epIdx} 集成片…`, pushLog, async (onLog) => {
       const cur = loadPlan(book);
       const ep = (cur.episodes || []).find((e) => e.index === epIdx);
       if (!ep?.shots?.length) throw new Error('这一集还没有分镜');
+      const voiceMode = body.voiceMode === 'native' || body.voiceMode === 'tts'
+        ? body.voiceMode
+        : (ep.voiceMode === 'native' ? 'native' : 'tts');
+      ep.voiceMode = voiceMode;
       const bible = loadBible(book);
+      const voiceSamples = listVoiceSamples(book, cfg);
       const vroot = videoDir(book);
       const epDir = path.join(vroot, `ep-${String(epIdx).padStart(2, '0')}`);
       fs.mkdirSync(epDir, { recursive: true });
-      const shotFiles = [];
+      const shotClips = [];
       const narrationFiles = [];
       let offsetSec = 0;
       for (const s of ep.shots) {
         if (!s.render?.fileRel) throw new Error(`第 ${s.index} 镜还没有渲染，先全部渲染后再合成`);
         const f = path.join(vroot, s.render.fileRel);
-        shotFiles.push(f);
-        if (useTts && s.narration?.trim()) {
+        const origDur = Number(s.render.duration) || Number(s.seconds) || 5;
+        let ttsDur = 0;
+        const sp = resolveSpeakerVoice(s, bible, cfg, voiceSamples);
+        // native 模式下：角色台词保留 H3 原生对口型人声（跳过 TTS 覆盖），仅旁白才按需走 TTS
+        const needTtsForShot = !!(useTts && s.narration?.trim() && !(voiceMode === 'native' && sp.isCharacter));
+        if (needTtsForShot) {
           const wav = path.join(epDir, 'tts', `shot-${String(s.index).padStart(2, '0')}.wav`);
-          const sp = resolveSpeakerVoice(s, bible, cfg);
-          onLog({ level: 'act', msg: `合成第 ${s.index} 镜配音（${sp.label}）…` });
+          onLog({ level: 'act', msg: `合成第 ${s.index} 镜配音（${sp.label}${sp.emotion ? ` · ${sp.emotion}` : ''}）…` });
           const t = await synthesizeTts(cfg, {
             text: s.narration.trim(),
             outWav: wav,
             refAudio: sp.refAudio,
             voice: sp.edgeVoice,
+            emotion: sp.emotion,
           });
+          ttsDur = Number(t.duration) || 0;
           s.render.ttsRel = toVideoRel(book, t.file);
+          s.render.ttsDuration = ttsDur;
           narrationFiles.push({ file: t.file, offsetSec });
+        } else if (voiceMode === 'native' && sp.isCharacter) {
+          s.render.ttsRel = '';
+          s.render.ttsDuration = 0;
         }
-        offsetSec += Number(s.render.duration) || Number(s.seconds) || 5;
+        const clipDur = computeClipTrimDuration({
+          videoDuration: origDur,
+          ttsDuration: ttsDur,
+          hasNarration: needTtsForShot,
+          trimToTts: trimToTts && needTtsForShot,
+        });
+        s.render.trimmedDuration = clipDur;
+        shotClips.push({ file: f, trimSec: clipDur < origDur - 0.2 ? clipDur : 0 });
+        offsetSec += clipDur;
       }
 
       let assSubtitleFile = '';
       if (burnSubtitles) {
-        const dims = aspectDimensions(ep.aspect || cfg.video?.aspect || '9:16');
+        const firstMeta = probeMedia(shotClips[0].file);
+        const dims = (firstMeta.width && firstMeta.height)
+          ? { width: firstMeta.width, height: firstMeta.height }
+          : aspectDimensions(ep.aspect || cfg.video?.aspect || '9:16');
         const subs = buildEpisodeSubtitles(
-          ep.shots.map((s) => ({ ...s, actualSeconds: s.render?.duration || s.seconds })),
+          ep.shots.map((s) => ({
+            ...s,
+            actualSeconds: s.render?.trimmedDuration || s.render?.duration || s.seconds,
+            ttsDurationSec: s.render?.ttsDuration || 0,
+          })),
           dims
         );
         if (subs.count > 0) {
@@ -443,11 +527,11 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
         }
       }
 
-      const out = composeEpisode(book, { episodeIndex: epIdx, shotFiles, narrationFiles, assSubtitleFile, bgmFile, bgmVolume, onLog });
+      const out = composeEpisode(book, { episodeIndex: epIdx, shotClips, narrationFiles, assSubtitleFile, bgmFile, bgmVolume, voiceMode, onLog });
       ep.outputRel = toVideoRel(book, out.file);
       ep.outputDuration = out.duration;
       savePlan(book, cur);
-      return { episodeIndex: epIdx, outputRel: ep.outputRel, duration: out.duration };
+      return { episodeIndex: epIdx, outputRel: ep.outputRel, duration: out.duration, voiceMode };
     });
     json(res, 200, resObj);
     return true;
@@ -497,7 +581,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       clips.push({
         videoPath: path.join(vroot, s.render.fileRel),
         audioPath: s.render.ttsRel ? path.join(vroot, s.render.ttsRel) : '',
-        durationSec: Number(s.render.duration) || Number(s.seconds) || 5,
+        durationSec: Number(s.render.trimmedDuration) || Number(s.render.duration) || Number(s.seconds) || 5,
         narration: s.narration || '',
       });
     }

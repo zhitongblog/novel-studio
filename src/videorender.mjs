@@ -30,10 +30,10 @@ export function sha256File(filePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex').slice(0, 16);
 }
 
-/** 根据配置与分镜参数算输入指纹；关键帧/参考图、提示词、种子、模型、尺寸任一变了都会重算。 */
-export function computeShotInputHash({ mode = 'fl2va', keyframeHash = '', refHashes = [], prompt, seed, width, height, frames, steps, vcfg }) {
+/** 根据配置与分镜参数算输入指纹；关键帧/参考图、提示词、语音模式、种子、模型、尺寸任一变了都会重算。 */
+export function computeShotInputHash({ mode = 'fl2va', voiceMode = 'tts', keyframeHash = '', refHashes = [], prompt, seed, width, height, frames, steps, vcfg }) {
   const payload = JSON.stringify({
-    mode, keyframeHash, refHashes, prompt, seed: Number(seed) || 1,
+    mode, voiceMode, keyframeHash, refHashes, prompt, seed: Number(seed) || 1,
     width: Number(width), height: Number(height), frames: Number(frames), steps: Number(steps),
     diffusionModel: mode === 'ref2va' ? vcfg.ref2vaDiffusionModel : vcfg.diffusionModel,
     textEncoder: vcfg.textEncoder,
@@ -41,6 +41,51 @@ export function computeShotInputHash({ mode = 'fl2va', keyframeHash = '', refHas
     turboLora: mode === 'ref2va' ? vcfg.ref2vTurboLora : vcfg.turboLora,
   });
   return crypto.createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
+/** 扫描本书与本机共享声线目录（video/voices、~/.storyalter/voices、ttsRoot/voices），自动按文件名推断 preset。 */
+export function listVoiceSamples(book, cfg = {}) {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const vcfg = cfg?.video || {};
+  const dirs = [
+    { dir: path.join(videoDir(book), 'voices'), scope: '本书' },
+    { dir: videoDir(book), scope: '本书', shallowPrefix: 'voice_' },
+    ...(vcfg.voiceLibraryDir ? [{ dir: vcfg.voiceLibraryDir, scope: '音色库' }] : []),
+    ...(home ? [{ dir: path.join(home, '.storyalter', 'voices'), scope: '全局' }] : []),
+    { dir: path.join(vcfg.ttsRoot || 'D:/AI/codex-tools/index-tts', 'voices'), scope: 'IndexTTS' },
+  ];
+  const inferPresetFromName = (name) => {
+    const s = name.toLowerCase();
+    if (/young_female|female|woman|girl|nv|女主|女声|少女/.test(s)) return 'young_female';
+    if (/elder_female|old_woman|老太|婆婆/.test(s)) return 'elder_female';
+    if (/elder_male|old_man|elder|老头|老者|大爷/.test(s)) return 'elder_male';
+    if (/rough_male|rough|gangster|thug|悍匪|反派粗/.test(s)) return 'rough_male';
+    if (/cold_male|cold|sinister|阴冷|巡捕/.test(s)) return 'cold_male';
+    if (/young_male|male|hero|男主|青年男/.test(s)) return 'young_male';
+    if (/narrator|旁白/.test(s)) return 'narrator';
+    return '';
+  };
+  const seen = new Set();
+  const out = [];
+  for (const item of dirs) {
+    try {
+      if (!item.dir || !fs.existsSync(item.dir)) continue;
+      for (const f of fs.readdirSync(item.dir)) {
+        if (!/\.(wav|mp3|m4a|ogg)$/i.test(f)) continue;
+        if (item.shallowPrefix && !f.toLowerCase().startsWith(item.shallowPrefix)) continue;
+        const abs = path.join(item.dir, f);
+        if (seen.has(abs) || !fs.statSync(abs).isFile()) continue;
+        seen.add(abs);
+        out.push({
+          id: `${item.scope}:${f}`,
+          label: `[${item.scope}] ${f}`,
+          path: abs,
+          preset: inferPresetFromName(f),
+        });
+      }
+    } catch {}
+  }
+  return out;
 }
 
 export function resolveKeyframePath(book, ref) {
@@ -58,19 +103,61 @@ export function resolveKeyframePath(book, ref) {
   return f.startsWith(vroot + path.sep) && fs.existsSync(f) ? f : null;
 }
 
+function sameCharacterSet(a = [], b = []) {
+  const sa = new Set((a || []).map((x) => String(x || '').trim()).filter(Boolean));
+  const sb = new Set((b || []).map((x) => String(x || '').trim()).filter(Boolean));
+  if (sa.size !== sb.size) return false;
+  for (const x of sa) if (!sb.has(x)) return false;
+  return true;
+}
+
+/**
+ * 判断是否可以安全接力上一镜尾帧（纯函数）：
+ * 以下场景必须断开接力，防止吞掉新入场角色或把室内外/正反打机位锁死颠倒：
+ * - 当前镜头已有专属 keyframeRef；
+ * - 跨场戏（scene 不同）；
+ * - 出场角色集合发生变化（如第 13 镜 2 人 → 第 14 镜马三入场变 3 人）；
+ * - 室内外 settingType 切换，或本镜是过肩/反打机位（over-the-shoulder / reverse shot）。
+ */
+export function shouldRelayPrevFrame(prevShot, curShot) {
+  if (!prevShot || !curShot) return false;
+  if (curShot.keyframeRef) return false;
+  if (!curShot.scene || prevShot.scene !== curShot.scene) return false;
+  if (!prevShot.render?.qaFrameRels?.length) return false;
+  if (!sameCharacterSet(prevShot.characters, curShot.characters)) return false;
+  if (prevShot.settingType && curShot.settingType && prevShot.settingType !== curShot.settingType) return false;
+  const camText = `${curShot.camera || ''} ${curShot.prompt || ''}`;
+  if (/\b(over[-\s]?the[-\s]?shoulder|reverse\s+shot|from\s+inside\b[\s\S]{0,40}\blooking\s+out|from\s+outside\b[\s\S]{0,40}\blooking\s+in)\b/i.test(camText)) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * 统一解析单镜渲染输入（UI 路由与 MCP 共用）：
- * - 同场戏接力：未指定关键帧且与上一镜同 scene 时，自动复用上一镜尾帧；
- * - 多角色锁脸（ref2va 就绪时）：收集出镜角色定妆照 + 同场戏尾帧，生成 <Picture i> 标签。
+ * - Keyframe-First（renderMode === 'auto'）：若本镜已有专属静态关键帧（非封面兜底图），默认优先走 fl2va (I2V)
+ *   让已审核通过的静态构图自然动起来，避免 ref2va 盲抽空间布局导致现实穿帮；
+ * - 多角色锁脸（无专属关键帧且 ref2va 就绪，或显式 renderMode === 'ref2va'）：收集出镜角色定妆照 + 安全同场戏尾帧。
  */
-export function prepareShotRenderInputs({ book, episode, shot, bible, cfg, defaultRef = 'cover_bg', useR2VOverride } = {}) {
+export function prepareShotRenderInputs({
+  book, episode, shot, bible, cfg, defaultRef = 'cover_bg', renderMode = 'auto', useR2VOverride,
+} = {}) {
   const shots = Array.isArray(episode?.shots) ? episode.shots : [];
   const prevShot = shots.find((x) => x.index === shot.index - 1);
-  const sameSceneLastFrame = (!shot.keyframeRef && shot.scene && prevShot?.scene === shot.scene && prevShot?.render?.qaFrameRels?.length)
+  const canRelay = shouldRelayPrevFrame(prevShot, shot);
+  const sameSceneLastFrame = canRelay
     ? resolveKeyframePath(book, prevShot.render.qaFrameRels[prevShot.render.qaFrameRels.length - 1])
     : null;
-  const keyframePath = sameSceneLastFrame || resolveKeyframePath(book, shot.keyframeRef || defaultRef);
-  const useR2V = useR2VOverride !== undefined ? !!useR2VOverride : hasRef2VModels(cfg?.video || {});
+  const explicitKeyframePath = shot.keyframeRef && shot.keyframeRef !== 'cover_bg'
+    ? resolveKeyframePath(book, shot.keyframeRef)
+    : null;
+  const keyframePath = explicitKeyframePath || sameSceneLastFrame || resolveKeyframePath(book, shot.keyframeRef || defaultRef);
+
+  const r2vAvailable = useR2VOverride !== undefined ? !!useR2VOverride : hasRef2VModels(cfg?.video || {});
+  // Keyframe-First：有专属静态关键帧且未强行指定 ref2va 时，优先走 fl2va (I2V) 保留审过关的构图与现实物理
+  const preferI2V = renderMode === 'fl2va' || (renderMode === 'auto' && !!explicitKeyframePath);
+  const useR2V = !preferI2V && r2vAvailable;
+
   const refImagePaths = [];
   const refTags = [];
   if (useR2V) {
@@ -90,7 +177,9 @@ export function prepareShotRenderInputs({ book, episode, shot, bible, cfg, defau
   }
   return {
     keyframePath: keyframePath || refImagePaths[0] || null,
+    explicitKeyframePath,
     sameSceneLastFrame,
+    preferI2V,
     refImagePaths,
     charRefTags: refTags.filter((r) => r.name !== '_prev_scene_frame'),
   };
@@ -171,10 +260,32 @@ export function buildH3I2VGraph({ imageName, prompt, seed, width, height, frames
   };
 }
 
-export function aspectDimensions(aspect, base = { width: 480, height: 608 }) {
+/** 画幅映射到 H3 兼容的 32 倍数分辨率（9:16 精确竖屏 416×736 → 2× 放大 832×1472；4:5 保留 480×608）。 */
+export function aspectDimensions(aspect, base = { width: 416, height: 736 }) {
   if (aspect === '16:9') return { width: 640, height: 352 };
   if (aspect === '3:4') return { width: 480, height: 640 };
-  return { width: Number(base.width) || 480, height: Number(base.height) || 608 };
+  if (aspect === '4:5') return { width: 480, height: 608 };
+  if (aspect === '9:16') return { width: 416, height: 736 };
+  return { width: Number(base?.width) || 416, height: Number(base?.height) || 736 };
+}
+
+/**
+ * 按实际配音时长计算短剧镜头剪辑时长（纯函数）：
+ * - 解决“2 秒台词却被迫播完 6.5 秒画面”的拖沓感；
+ * - 保留 tailPadSec 呼吸留白与 minShotSec 最低镜头时长，绝不截断配音。
+ */
+export function computeClipTrimDuration({
+  videoDuration,
+  ttsDuration = 0,
+  hasNarration = false,
+  minShotSec = 2.6,
+  tailPadSec = 0.65,
+  trimToTts = true,
+}) {
+  const vDur = Math.max(0.5, Number(videoDuration) || 5);
+  if (!trimToTts || !hasNarration || !(Number(ttsDuration) > 0)) return vDur;
+  const target = Math.max(minShotSec, Number(ttsDuration) + tailPadSec);
+  return Math.min(vDur, Math.round(target * 100) / 100);
 }
 
 function runCmd(bin, args, timeoutMs = 120000) {
@@ -267,8 +378,8 @@ async function submitAndWaitComfy(base, graph, timeoutMs, onLog) {
   throw new Error(`ComfyUI 渲染超时（>${Math.round(timeoutMs / 1000)} 秒）`);
 }
 
-/** 渲染单个镜头：有角色定妆图且 ref2va 就绪时自动走多参考图锁脸 (ref2va)，否则走关键帧图生视频 (fl2va)。 */
-export async function renderShot(book, cfg, { episodeIndex, shot, keyframePath, refImagePaths = [], lockedPrompt, aspect = '9:16', force = false, onLog }) {
+/** 渲染单个镜头：有专属关键帧优先走 fl2va (I2V)，无专属关键帧且 ref2va 就绪走多图锁脸 (ref2va)；支持 native 对口型说话模式。 */
+export async function renderShot(book, cfg, { episodeIndex, shot, keyframePath, refImagePaths = [], lockedPrompt, aspect = '9:16', voiceMode = 'tts', force = false, onLog }) {
   const vcfg = cfg.video || {};
   const base = assertLoopbackUrl(vcfg.comfyUrl || 'http://127.0.0.1:8188');
   const validRefs = (refImagePaths || []).filter((p) => p && fs.existsSync(p));
@@ -285,7 +396,7 @@ export async function renderShot(book, cfg, { episodeIndex, shot, keyframePath, 
   const keyframeHash = !useRef2V && keyframePath ? sha256File(keyframePath) : '';
   const refHashes = useRef2V ? validRefs.map((p) => sha256File(p)) : [];
   const mode = useRef2V ? 'ref2va' : 'fl2va';
-  const inputHash = computeShotInputHash({ mode, keyframeHash, refHashes, prompt: effectivePrompt, seed, width, height, frames, steps, vcfg });
+  const inputHash = computeShotInputHash({ mode, voiceMode, keyframeHash, refHashes, prompt: effectivePrompt, seed, width, height, frames, steps, vcfg });
 
   const epDir = path.join(videoDir(book), `ep-${String(episodeIndex).padStart(2, '0')}`);
   const shotsDir = path.join(epDir, 'shots');
@@ -362,8 +473,8 @@ function synthesizeWindowsSapi(text, outWav) {
   return { file: outWav, duration: Number(meta.trim()) || 0, fallback: 'sapi' };
 }
 
-/** 合成单句旁白/台词：优先 IndexTTS2（若配了参考音色且可用），否则走 edge-tts 真人神经网络语音，最后兜底 Windows SAPI。 */
-export function synthesizeTts(cfg, { text, outWav, refAudio, voice }) {
+/** 合成单句旁白/台词：优先 IndexTTS2（支持按角色克隆 + --emotion-text 情绪演绎），否则 edge-tts，最后兜底 Windows SAPI。 */
+export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = '', emotionWeight = 0.65 }) {
   const vcfg = cfg.video || {};
   const ttsRoot = vcfg.ttsRoot || 'D:/AI/codex-tools/index-tts';
   const exe = path.join(ttsRoot, '.venv/Scripts/indextts2.exe');
@@ -382,6 +493,9 @@ export function synthesizeTts(cfg, { text, outWav, refAudio, voice }) {
   }
   fs.mkdirSync(path.dirname(outWav), { recursive: true });
   const args = ['synth', '--voice', ref, '--output', outWav, '--text', text, '--force'];
+  if (emotion && String(emotion).trim()) {
+    args.push('--emotion-text', String(emotion).trim(), '--emotion-weight', String(Number(emotionWeight) || 0.65));
+  }
   if (fs.existsSync(modelDir)) args.push('--model-dir', modelDir);
   return new Promise((resolve, reject) => {
     const p = spawn(exe, args, { windowsHide: true });
@@ -401,34 +515,74 @@ export function synthesizeTts(cfg, { text, outWav, refAudio, voice }) {
   });
 }
 
-/** 合成一集的成片 MP4：按镜头顺序拼接；若提供了旁白音轨，则与原环境音混音。 */
-export function composeEpisode(book, { episodeIndex, shotFiles, narrationFiles = [], assSubtitleFile = '', bgmFile = '', bgmVolume = 0.16, onLog }) {
-  if (!shotFiles.length) throw new Error('没有已渲染的镜头可合成');
-  for (const f of shotFiles) if (!fs.existsSync(f)) throw new Error(`镜头文件不存在：${f}`);
+/**
+ * 合成一集的成片 MP4：按镜头顺序拼接（支持按配音时长裁剪拖尾）；若提供了旁白音轨，则与原环境音混音。
+ * 既支持旧调用 shotFiles: string[]，也支持 shotClips: Array<{file:string, trimSec?:number}>。
+ */
+export function composeEpisode(book, { episodeIndex, shotFiles = [], shotClips = null, narrationFiles = [], assSubtitleFile = '', bgmFile = '', bgmVolume = 0.16, voiceMode = 'tts', onLog }) {
+  const clips = Array.isArray(shotClips) && shotClips.length
+    ? shotClips
+    : (shotFiles || []).map((file) => ({ file }));
+  if (!clips.length) throw new Error('没有已渲染的镜头可合成');
+  for (const c of clips) if (!c?.file || !fs.existsSync(c.file)) throw new Error(`镜头文件不存在：${c?.file}`);
   const epDir = path.join(videoDir(book), `ep-${String(episodeIndex).padStart(2, '0')}`);
   fs.mkdirSync(epDir, { recursive: true });
+
+  // 如某镜头需要按配音时长收紧拖尾，精确重编码截出子片段，避免关键帧对齐误差导致音画漂移
+  const tempTrimFiles = [];
+  const finalShotFiles = [];
+  let trimmedCount = 0;
+  for (let i = 0; i < clips.length; i++) {
+    const c = clips[i];
+    const meta = probeMedia(c.file);
+    const trimSec = Number(c.trimSec) || 0;
+    if (trimSec > 0 && trimSec < meta.duration - 0.2) {
+      const trimOut = path.join(epDir, `_trim_${String(i + 1).padStart(2, '0')}.mp4`);
+      const trimArgs = ['-y', '-v', 'error', '-i', c.file, '-t', trimSec.toFixed(3), '-c:v', 'libx264', '-preset', 'fast', '-crf', '18'];
+      if (meta.hasAudio) trimArgs.push('-c:a', 'aac');
+      trimArgs.push(trimOut);
+      runCmd('ffmpeg', trimArgs, 120000);
+      tempTrimFiles.push(trimOut);
+      finalShotFiles.push(trimOut);
+      trimmedCount++;
+    } else {
+      finalShotFiles.push(c.file);
+    }
+  }
+
   const listFile = path.join(epDir, 'concat.txt');
-  fs.writeFileSync(listFile, shotFiles.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'), 'utf8');
+  fs.writeFileSync(listFile, finalShotFiles.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'), 'utf8');
   const rawConcat = path.join(epDir, '_concat.mp4');
   const mixedMp4 = path.join(epDir, '_mixed.mp4');
   const outMp4 = path.join(epDir, `episode-${String(episodeIndex).padStart(2, '0')}.mp4`);
 
-  onLog?.({ level: 'act', msg: `正在拼接 ${shotFiles.length} 个镜头…` });
-  runCmd('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', rawConcat], 120000);
+  onLog?.({ level: 'act', msg: `正在拼接 ${finalShotFiles.length} 个镜头${trimmedCount ? `（已按配音收紧 ${trimmedCount} 镜节奏）` : ''}…` });
+  if (trimmedCount > 0) {
+    // 含重编码裁剪片段时统一流参数拼接，防止部分 copy 部分重编码的时间基/SPS 差异
+    const concatMeta = probeMedia(finalShotFiles[0]);
+    const reArgs = ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:v', 'libx264', '-preset', 'fast', '-crf', '18'];
+    if (concatMeta.hasAudio) reArgs.push('-c:a', 'aac');
+    reArgs.push(rawConcat);
+    runCmd('ffmpeg', reArgs, 180000);
+  } else {
+    runCmd('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', rawConcat], 120000);
+  }
+  for (const tf of tempTrimFiles) { try { fs.unlinkSync(tf); } catch {} }
 
   const validNarr = narrationFiles.filter((n) => n?.file && fs.existsSync(n.file));
   const hasBgm = !!(bgmFile && fs.existsSync(bgmFile));
   if (validNarr.length === 0 && !hasBgm) {
     fs.renameSync(rawConcat, mixedMp4);
   } else {
-    // 把每句旁白按镜头起止时间偏移后混入（原视频有环境音时压低到 0.25，无原音轨时自动省略 [0:a]）
+    // 把每句旁白按镜头起止时间偏移后混入（native 原生说话模式保留原音轨 1.0，tts 覆盖模式压低环境音到 0.25）
     const concatMeta = probeMedia(rawConcat);
     const hasOrigAudio = !!concatMeta.hasAudio;
+    const origVol = voiceMode === 'native' ? 1.0 : 0.25;
     const inputs = ['-i', rawConcat];
     const filters = [];
     const labels = [];
     if (hasOrigAudio) {
-      filters.push('[0:a]volume=0.25[bg]');
+      filters.push(`[0:a]volume=${origVol}[bg]`);
       labels.push('[bg]');
     }
     validNarr.forEach((n, idx) => {

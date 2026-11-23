@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { formatAssTime, formatSrtTime, wrapCaption, buildEpisodeSubtitles, exportJianyingDraft } from '../src/videopost.mjs';
+import { formatAssTime, formatSrtTime, wrapCaption, splitSubtitleCues, buildEpisodeSubtitles, exportJianyingDraft } from '../src/videopost.mjs';
 
 test('formatAssTime and formatSrtTime format timestamps accurately', () => {
   assert.equal(formatAssTime(0), '0:00:00.00');
@@ -13,26 +13,39 @@ test('formatAssTime and formatSrtTime format timestamps accurately', () => {
   assert.equal(formatSrtTime(59.9999), '00:01:00,000');
 });
 
-test('wrapCaption breaks long Chinese narration into readable lines', () => {
+test('wrapCaption breaks long Chinese narration into balanced lines without orphan tail', () => {
   const out = wrapCaption('黑夜里，他推开那扇尘封已久的铁门，看见了满屋子的火光。', 12);
   assert.ok(out.includes('\n'));
   for (const line of out.split('\n')) {
     assert.ok(line.length <= 16);
   }
+  // 验证《灯下记》第 2 镜原句不再把“脚步声”劈成孤尾“步声。”
+  const s2 = wrapCaption('门外冻泥地上忽然传来细碎的脚步声。', 12);
+  const lines2 = s2.split('\n');
+  assert.equal(lines2.length, 2);
+  assert.ok(lines2[1].replace(/[。]/g, '').length >= 4, `不应留孤尾：${s2}`);
 });
 
-test('buildEpisodeSubtitles generates valid ASS and SRT from shots', () => {
+test('splitSubtitleCues splits long multi-clause narration into sequential 1-2 line cues', () => {
+  const cues = splitSubtitleCues('子夜北风呼啸，正骨堂内艾草与红花油味弥漫，孤灯摇曳。', 0.08, 6.5, 18);
+  assert.ok(cues.length >= 2);
+  assert.ok(cues[0].end <= cues[1].start + 0.001);
+  assert.equal(cues[cues.length - 1].end, 6.5);
+});
+
+test('buildEpisodeSubtitles generates valid ASS and SRT and aligns end to ttsDurationSec', () => {
   const res = buildEpisodeSubtitles([
     { actualSeconds: 5, narration: '第一镜旁白。' },
     { actualSeconds: 6, narration: '' },
-    { actualSeconds: 7, narration: '第三镜台词，冲突爆发！' },
-  ], { width: 540, height: 960 });
+    { actualSeconds: 7, ttsDurationSec: 2.0, narration: '腕子还疼不？' },
+  ], { width: 416, height: 736 });
 
   assert.equal(res.count, 2);
   assert.equal(res.totalSeconds, 18);
-  assert.match(res.ass, /PlayResX: 540/);
+  assert.match(res.ass, /PlayResX: 416/);
   assert.match(res.ass, /Dialogue: 0,0:00:00\.08,0:00:04\.92/);
-  assert.match(res.ass, /Dialogue: 0,0:00:11\.08,0:00:17\.92/);
+  // 第三镜配音仅 2.0s，字幕应在 11.08 + 2.0 + 0.25 = 13.33 结束，不再傻挂到 17.92
+  assert.match(res.ass, /Dialogue: 0,0:00:11\.08,0:00:13\.33/);
   assert.match(res.srt, /1\n00:00:00,080 --> 00:00:04,920/);
 });
 
