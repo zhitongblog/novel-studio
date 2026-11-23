@@ -2848,7 +2848,7 @@ $('#cvDownload').addEventListener('click', async () => {
   } catch (e) { $('#cvErr').textContent = e.message; }
 });
 // ===== 改编视频工作台（全屏 4 步 AI 导演工作台） =====
-let vidPlan = { episodes: [] }, vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] }, vidRef2V = false, vidKeyframes = [], vidEdgeVoices = [], vidVoicePresets = [], vidVoiceSamples = [], vidCurEp = 1, vidPoll = null, vidStep = 'assets';
+let vidPlan = { episodes: [] }, vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] }, vidRef2V = false, vidKeyframes = [], vidEdgeVoices = [], vidVoicePresets = [], vidStylePresets = [], vidVoiceSamples = [], vidCurEp = 1, vidPoll = null, vidStep = 'assets';
 function vidFileUrl(rel) {
   return `${API}/api/book/video/file?book=${encodeURIComponent(CUR.slug)}&rel=${encodeURIComponent(rel)}&t=${Date.now()}`;
 }
@@ -2882,32 +2882,52 @@ function renderVideoBible() {
   const kfOpts = (sel) => '<option value="">（未绑定定妆图 · 仅文本锁外貌）</option>' +
     vidKeyframes.map((k) => `<option value="${esc(k.ref)}" ${k.ref === sel ? 'selected' : ''}>${esc(k.label)}</option>`).join('');
   const chars = vidBible.characters || [];
+  const stylePresets = vidStylePresets.length ? vidStylePresets : [
+    { id: 'anime_25d', label: '🎨 国风电影厚涂 2.5D（推荐）', prompt: 'High-budget 2.5D Chinese donghua animated feature film style, rich painterly brushwork, subtle crisp ink outlines, dramatic warm lantern rim lighting vs cold atmospheric shadows, expressive stylized anime characters, cinematic depth of field, no live-action photorealism' },
+    { id: 'anime_2d_cel', label: '✒️ 2D 精品赛璐璐番剧', prompt: 'High-budget 2D cel-shaded Chinese anime series style, crisp clean black ink linework, dramatic cel shading, expressive anime eyes, hand-painted atmospheric background, no live-action photorealism' },
+    { id: 'donghua_3d', label: '🧊 3D 电影级国漫 CG', prompt: 'High-end 3D Chinese donghua CG animated film style, Unreal Engine 5 cinematic stylized rendering, detailed cloth physics, volumetric atmospheric lighting, refined stylized Asian CG faces' },
+    { id: 'live_action', label: '🎬 电影写实真人', prompt: 'Cinematic Chinese period drama, realistic 35mm film grain, natural moody lighting, authentic textures' },
+  ];
+  const curStyle = (vidBible.visualStyle || '').trim();
+  const hasVoicePack = vidVoiceSamples.filter((v) => v.preset).length >= 6;
   pane.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
       <div style="font-size:13px;opacity:.9">
-        <b>① 全书画风与角色定妆库</b> · ${vidRef2V ? '✅ 已装 ref2va（绑定定妆图自动多图锁脸）' : '⏳ 未装 ref2va（英文外貌卡 + 关键帧锁脸）'}
+        <b>① 全书画风与角色定妆库</b> · ${vidRef2V ? '✅ 已装 ref2va' : '⏳ I2V 模式'} · ${hasVoicePack ? `🎙 真人音色库已就绪（${vidVoiceSamples.length}）` : '🎙 建议一键安装真人音色库'}
       </div>
       <div class="btn-row" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" id="vidInstallVoicePackBtn" title="安装 IndexTTS2 官方 8 种真人配音样本到本机全局音色库">${hasVoicePack ? '🔄 刷新真人音色库' : '🎙 一键安装真人音色库'}</button>
         <button class="btn" id="vidBibleExtract">✨ AI 提取并分化外貌</button>
         <button class="btn" id="vidAddCharBtn">➕ 新增角色</button>
         <button class="btn primary" id="vidBibleSave">💾 保存定妆库</button>
         <button class="btn" id="vidToPlanBtn">下一步：分集剧本 →</button>
       </div>
     </div>
-    <label class="field" style="margin-bottom:10px"><span style="font-size:12px">全书画风前缀（English visualStyle，每镜与生图自动注入）</span>
-      <input id="vidVisualStyle" value="${esc(vidBible.visualStyle || '')}" placeholder="如：Cinematic Chinese period drama, realistic film grain, moody lighting" />
-    </label>
+    <div style="margin-bottom:10px;padding:10px;border:1px solid var(--border,#2c2a3a);border-radius:8px;background:rgba(125,139,255,.05)">
+      <div style="font-size:12px;margin-bottom:6px;opacity:.9"><b>一键画风预设</b>（推荐 2.5D 国风厚涂动画：告别写实恐怖谷，画风稳定、出片更快）</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        ${stylePresets.map((sp) => {
+          const active = curStyle && curStyle.toLowerCase().includes(sp.prompt.slice(0, 28).toLowerCase());
+          return `<button type="button" class="btn tiny ${active ? 'primary' : ''} vid-style-preset" data-prompt="${esc(sp.prompt)}">${esc(sp.label)}</button>`;
+        }).join('')}
+      </div>
+      <label class="field" style="margin:0"><span style="font-size:11px;opacity:.8">全书画风前缀（English visualStyle，每镜、定妆照与关键帧自动注入并锁画风）</span>
+        <input id="vidVisualStyle" value="${esc(curStyle || stylePresets[0].prompt)}" placeholder="选择上方预设或自定义英文画风" />
+      </label>
+    </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:12px">
-      <label class="field" style="margin:0"><span style="font-size:12px">默认旁白音色（免费 Edge-TTS 神经网络语音）</span>
+      <label class="field" style="margin:0"><span style="font-size:12px">默认旁白音色（离线兜底 / Edge-TTS）</span>
         <select id="vidNarratorEdge">${vidEdgeVoiceOpts(vidBible.narratorEdgeVoice || '', '云希 · 沉稳男声（系统默认）')}</select>
       </label>
-      <label class="field" style="margin:0"><span style="font-size:12px">可选：旁白参考音频（IndexTTS2 声音克隆 .wav/.mp3）</span>
+      <label class="field" style="margin:0"><span style="font-size:12px">旁白真人参考音色（IndexTTS2 声音克隆 .wav/.mp3）</span>
         <div style="display:flex;gap:6px;align-items:center">
-          <input id="vidNarratorVoice" value="${esc(vidBible.narratorVoice || '')}" placeholder="留空走上方默认音色，或点右侧上传" style="flex:1;font-size:11px" />
+          <input id="vidNarratorVoice" value="${esc(vidBible.narratorVoice || '')}" placeholder="留空自动用音色库 narrator.wav，或点右侧上传" style="flex:1;font-size:11px" />
+          <button type="button" class="btn tiny" id="vidPreviewNarrVoice" title="用当前旁白音色试听一句">▶ 试听</button>
           <label class="btn tiny" style="cursor:pointer;margin:0">📤 上传<input id="vidUploadNarrVoice" type="file" accept="audio/*" hidden /></label>
         </div>
       </label>
     </div>
+    <audio id="vidVoicePreviewAudio" controls style="display:none;width:100%;height:34px;margin-bottom:10px"></audio>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px">
     ${chars.length ? chars.map((c, i) => {
       const refUrl = c.refImageRef ? (vidKeyframes.find((k) => k.ref === c.refImageRef)?.url || vidFileUrl(c.refImageRef)) : '';
@@ -2945,7 +2965,8 @@ function renderVideoBible() {
           ${vidVoiceSamples.map((vs) => `<option value="${esc(vs.path)}" ${vs.path === c.voiceRefAudio ? 'selected' : ''}>${esc(vs.label)}</option>`).join('')}
         </select>` : ''}
         <div style="display:flex;gap:6px;align-items:center">
-          <input class="vid-cast-voice" value="${esc(c.voiceRefAudio || '')}" placeholder="IndexTTS2 声音克隆音频路径 (.wav/.mp3)" style="flex:1;font-size:11px" />
+          <input class="vid-cast-voice" value="${esc(c.voiceRefAudio || '')}" placeholder="留空按声线类型自动匹配真人音色库，或上传 .wav" style="flex:1;font-size:11px" />
+          <button type="button" class="btn tiny vid-preview-char-voice" title="试听该角色的 IndexTTS2 真人配音">▶ 试听</button>
           <label class="btn tiny" style="cursor:pointer;margin:0" title="上传角色参考音色">🎙<input class="vid-upload-voice" type="file" accept="audio/*" hidden /></label>
         </div>
       </div>`;
@@ -2986,6 +3007,67 @@ function renderVideoBible() {
     vidBible = r.bible || { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters };
     return vidBible;
   };
+  pane.querySelectorAll('.vid-style-preset').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const inp = $('#vidVisualStyle');
+      if (inp) inp.value = btn.dataset.prompt || '';
+      pane.querySelectorAll('.vid-style-preset').forEach((b) => b.classList.toggle('primary', b === btn));
+      toast('已切换画风预设（点「💾 保存定妆库」生效）');
+    });
+  });
+  const playVoicePreview = async ({ speaker, refAudio, edgeVoice, emotion, text }) => {
+    $('#vidErr').textContent = '';
+    $('#vidStatus').textContent = `⏳ 正在合成「${speaker === 'narrator' ? '旁白' : speaker}」试听配音…`;
+    try {
+      const r = await api('/api/book/video/voice/preview', 'POST', { book: CUR.slug, speaker, refAudio, edgeVoice, emotion, text });
+      const aud = $('#vidVoicePreviewAudio');
+      if (aud && r.url) {
+        aud.src = `${API}${r.url}&t=${Date.now()}`;
+        aud.style.display = 'block';
+        aud.play().catch(() => {});
+      }
+      $('#vidStatus').textContent = `✅ 试听就绪（${r.speaker} · ${r.provider} · ${(r.duration || 0).toFixed(1)}s）`;
+    } catch (e) {
+      $('#vidErr').textContent = e.message;
+      $('#vidStatus').textContent = '';
+    }
+  };
+  $('#vidInstallVoicePackBtn')?.addEventListener('click', async () => {
+    $('#vidErr').textContent = '';
+    $('#vidStatus').textContent = '⏳ 正在安装 IndexTTS2 官方 8 种真人角色音色库…';
+    try {
+      const r = await api('/api/book/video/voices/install-pack', 'POST', { book: CUR.slug });
+      vidVoiceSamples = r.voiceSamples || [];
+      $('#vidStatus').textContent = `✅ 真人音色库已就绪（已安装 ${r.installed?.length || 0} 种声线到 ${r.destDir || '~/.storyalter/voices'}）`;
+      toast(`已安装 ${r.installed?.length || 0} 种真人声线`);
+      renderVideoBible();
+    } catch (e) {
+      $('#vidErr').textContent = e.message;
+      $('#vidStatus').textContent = '';
+    }
+  });
+  $('#vidPreviewNarrVoice')?.addEventListener('click', async () => {
+    try { await saveBibleNow(); } catch {}
+    await playVoicePreview({
+      speaker: 'narrator',
+      refAudio: $('#vidNarratorVoice')?.value.trim() || '',
+      edgeVoice: $('#vidNarratorEdge')?.value || '',
+      text: '子夜大雪纷飞，一盏孤灯照亮半条旧巷。',
+    });
+  });
+  pane.querySelectorAll('.vid-preview-char-voice').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('.vid-cast-row');
+      const name = row?.querySelector('.vid-cast-name')?.value.trim() || '角色';
+      try { await saveBibleNow(); } catch {}
+      await playVoicePreview({
+        speaker: name,
+        refAudio: row?.querySelector('.vid-cast-voice')?.value.trim() || '',
+        edgeVoice: row?.querySelector('.vid-cast-edge')?.value || '',
+        text: `我是${name}。今夜风雪太大，有话进屋慢慢说。`,
+      });
+    });
+  });
   $('#vidBibleExtract')?.addEventListener('click', () => startVidJob('/api/book/video/bible/extract', { book: CUR.slug }));
   $('#vidToPlanBtn')?.addEventListener('click', () => setVidStep('plan'));
   $('#vidAddCharBtn')?.addEventListener('click', () => {
@@ -3148,8 +3230,8 @@ function renderVideoModal() {
           <option value="narration" ${ep.dialogueMode === 'narration' ? 'selected' : ''}>📖 漫剧旁白解说</option>
         </select>
         <select id="vidVoiceMode" style="font-size:12px" title="人物发声方案">
-          <option value="native" ${ep.voiceMode === 'native' ? 'selected' : ''}>👄 H3 原生对口型说话（全员各自声线）</option>
-          <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 IndexTTS2 多角色克隆 + 情绪</option>
+          <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 影院级多角色配音（IndexTTS2 真人库+混音，推荐）</option>
+          <option value="native" ${ep.voiceMode === 'native' ? 'selected' : ''}>👄 H3 原生对口型直出（自动人声增强）</option>
         </select>
         <button class="btn" id="vidGenSbBtn">📝 ${shots.length ? '重出分镜' : '生成分镜'}</button>
         <button class="btn" id="vidAddShotBtn">➕ 新增镜头</button>
@@ -3319,8 +3401,8 @@ function renderVideoModal() {
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:12px">
         <label class="field" style="margin:0"><span style="font-size:12px">人声合成方案</span>
           <select id="vidComposeVoiceMode">
-            <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 IndexTTS2 多角色配音 + 情绪</option>
-            <option value="native" ${ep.voiceMode === 'native' ? 'selected' : ''}>👄 保留 H3 原生对口型人声（不盖角色 TTS）</option>
+            <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 影院级多角色配音（IndexTTS2 真人库+侧链闪避，推荐）</option>
+            <option value="native" ${ep.voiceMode === 'native' ? 'selected' : ''}>👄 保留 H3 原生对口型人声（自动响度增强）</option>
           </select>
         </label>
         <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
@@ -3426,6 +3508,7 @@ async function refreshVideoPlan() {
   vidKeyframes = r.keyframes || [];
   vidEdgeVoices = r.edgeVoices || [];
   vidVoicePresets = r.voicePresets || [];
+  vidStylePresets = r.visualStylePresets || [];
   vidVoiceSamples = r.voiceSamples || [];
   renderVideoBible();
   renderVideoModal();

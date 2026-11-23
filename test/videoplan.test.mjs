@@ -6,7 +6,8 @@ import path from 'node:path';
 import {
   extractJson, normalizeEpisodes, normalizeShots, matchCharacter, snapFrames,
   revisionOf, staleChapters, parseBibleCharacters, buildEpisodePrompt, buildStoryboardPrompt,
-  composeLockedPrompt, composeNativeDialoguePrompt, sanitizeLookPrompt, sanitizeScenePrompt,
+  composeLockedPrompt, composeNativeDialoguePrompt, composeDubbedSpeakingPrompt, sanitizeLookPrompt,
+  sanitizeScenePrompt, isAnimeStyle, VISUAL_STYLE_PRESETS, DEFAULT_VISUAL_STYLE,
   inferVoicePreset, resolveSpeakerVoice, saveBible, loadBible,
 } from '../src/videoplan.mjs';
 
@@ -255,4 +256,37 @@ test('saveBible / loadBible 保留旁白音色与角色 edgeVoice/voiceRefAudio'
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('VISUAL_STYLE_PRESETS 默认 2.5D 国风厚涂动画，isAnimeStyle 与 sanitizeScenePrompt 锁定动画风格不漂回真人', () => {
+  assert.strictEqual(VISUAL_STYLE_PRESETS[0].id, 'anime_25d');
+  assert.strictEqual(DEFAULT_VISUAL_STYLE, VISUAL_STYLE_PRESETS[0].prompt);
+  assert.strictEqual(isAnimeStyle(DEFAULT_VISUAL_STYLE), true);
+  assert.strictEqual(isAnimeStyle('Cinematic 1930s period drama, 35mm film'), false);
+
+  const animePrompt = sanitizeScenePrompt('Xu Wan smiles at the snowy clinic window.', {
+    visualStyle: `${DEFAULT_VISUAL_STYLE}, 1930s Republic of China hutong`,
+  });
+  assert.match(animePrompt, /Consistent stylized animated art style/);
+  assert.match(animePrompt, /no live-action photorealism/);
+  assert.match(animePrompt, /no modern ceiling electric lamps/);
+  assert.doesNotMatch(animePrompt, /Grounded realistic human posture/);
+
+  // 后期多角色配音模式：既保留角色动画张嘴表演，又禁止 H3 底噪乱说话
+  const dubbed = composeDubbedSpeakingPrompt(
+    { speaker: '徐晚', narration: '早利索了，懒得拆。', emotion: '倔强温和' },
+    { characters: [{ name: '徐晚', role: '女主', lookPrompt: '22-year-old woman' }] },
+    'Xu Wan speaks softly.'
+  );
+  assert.match(dubbed, /animated mouth movement/);
+  assert.match(dubbed, /no spoken dialogue or background voices/);
+
+  // 旁白无手动参考音频时，自动匹配音色库的 narrator 样本
+  const autoNarr = resolveSpeakerVoice(
+    { speaker: 'narrator' },
+    { narratorVoice: '', characters: [] },
+    {},
+    [{ path: 'C:/voices/narrator.wav', preset: 'narrator' }]
+  );
+  assert.strictEqual(autoNarr.refAudio, 'C:/voices/narrator.wav');
 });

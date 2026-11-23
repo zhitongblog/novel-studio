@@ -12,8 +12,8 @@ import { listSessions, sendToBook, stopBook, streamBook } from './attach.mjs';
 import { loadUsage, bookUsage } from './usage.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadPlan, savePlan, loadBible, saveBible, planEpisodes, generateStoryboard, extractCharacterBible, composeLockedPrompt, composeNativeDialoguePrompt, generatePublishCopy, resolveSpeakerVoice, videoDir } from './videoplan.mjs';
-import { renderShot, synthesizeTts, composeEpisode, aspectDimensions, prepareShotRenderInputs, computeClipTrimDuration, probeMedia, resolveKeyframePath, listVoiceSamples } from './videorender.mjs';
+import { loadPlan, savePlan, loadBible, saveBible, planEpisodes, generateStoryboard, extractCharacterBible, composeLockedPrompt, composeNativeDialoguePrompt, composeDubbedSpeakingPrompt, generatePublishCopy, resolveSpeakerVoice, videoDir } from './videoplan.mjs';
+import { renderShot, synthesizeTts, synthesizeTtsBatch, composeEpisode, aspectDimensions, prepareShotRenderInputs, computeClipTrimDuration, probeMedia, resolveKeyframePath, listVoiceSamples } from './videorender.mjs';
 import { auditShotPromptRealism, inspectImageRealism } from './videoqa.mjs';
 import { buildEpisodeSubtitles, exportJianyingDraft } from './videopost.mjs';
 
@@ -166,6 +166,7 @@ async function dispatch(name, args) {
       });
       let lockedPrompt = composeLockedPrompt(s, bible, charRefTags);
       if (voiceMode === 'native') lockedPrompt = composeNativeDialoguePrompt(s, bible, lockedPrompt, cfg);
+      else lockedPrompt = composeDubbedSpeakingPrompt(s, bible, lockedPrompt, cfg);
       const r = await renderShot(book, cfg, { episodeIndex: ep.index, shot: s, keyframePath, refImagePaths, lockedPrompt, aspect: ep.aspect || '9:16', voiceMode, force: !!args.force });
       s.render = {
         mode: r.mode,
@@ -194,23 +195,46 @@ async function dispatch(name, args) {
     const epDir = path.join(vroot, `ep-${String(ep.index).padStart(2, '0')}`);
     const trimToTts = args.trimToTts !== false;
     const shotClips = [], narrationFiles = [];
-    let offsetSec = 0;
-    for (const s of ep.shots) {
+    const ttsTasks = [];
+    const shotMeta = ep.shots.map((s) => {
       if (!s.render?.fileRel) throw new Error(`第 ${s.index} 镜未渲染`);
-      const f = path.join(vroot, s.render.fileRel);
-      const origDur = Number(s.render.duration) || Number(s.seconds) || 5;
-      let ttsDur = 0;
       const sp = resolveSpeakerVoice(s, bible, cfg, voiceSamples);
       const needTts = !!(args.useTts !== false && s.narration?.trim() && !(voiceMode === 'native' && sp.isCharacter));
       if (needTts) {
-        const wav = path.join(epDir, 'tts', `shot-${String(s.index).padStart(2, '0')}.wav`);
-        const t = await synthesizeTts(cfg, { text: s.narration.trim(), outWav: wav, refAudio: sp.refAudio, voice: sp.edgeVoice, emotion: sp.emotion });
-        ttsDur = Number(t.duration) || 0;
-        s.render.ttsRel = path.relative(vroot, t.file).replace(/\\/g, '/');
+        ttsTasks.push({
+          key: s.index,
+          text: s.narration.trim(),
+          outWav: path.join(epDir, 'tts', `shot-${String(s.index).padStart(2, '0')}.wav`),
+          refAudio: sp.refAudio,
+          voice: sp.edgeVoice,
+          emotion: sp.emotion,
+          label: `第 ${s.index} 镜 · ${sp.label}`,
+        });
+      }
+      return { s, sp, needTts };
+    });
+    const ttsMap = ttsTasks.length ? await synthesizeTtsBatch(cfg, ttsTasks) : new Map();
+    let offsetSec = 0;
+    for (const { s, sp, needTts } of shotMeta) {
+      const f = path.join(vroot, s.render.fileRel);
+      const origDur = Number(s.render.duration) || Number(s.seconds) || 5;
+      let ttsDur = 0;
+      let ttsFile = '';
+      if (needTts) {
+        const t = ttsMap.get(s.index);
+        ttsDur = Number(t?.duration) || 0;
+        ttsFile = t?.file || '';
+        s.render.ttsRel = ttsFile ? path.relative(vroot, ttsFile).replace(/\\/g, '/') : '';
         s.render.ttsDuration = ttsDur;
-        narrationFiles.push({ file: t.file, offsetSec });
+      } else if (voiceMode === 'native' && sp.isCharacter) {
+        s.render.ttsRel = '';
+        s.render.ttsDuration = 0;
       }
       const clipDur = computeClipTrimDuration({ videoDuration: origDur, ttsDuration: ttsDur, hasNarration: needTts, trimToTts: trimToTts && needTts });
+      if (needTts && ttsFile) {
+        const leadIn = (clipDur - ttsDur) >= 0.35 ? 0.15 : 0;
+        narrationFiles.push({ file: ttsFile, offsetSec: offsetSec + leadIn });
+      }
       s.render.trimmedDuration = clipDur;
       shotClips.push({ file: f, trimSec: clipDur < origDur - 0.2 ? clipDur : 0 });
       offsetSec += clipDur;

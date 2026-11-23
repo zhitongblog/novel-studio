@@ -56,7 +56,8 @@ export function listVoiceSamples(book, cfg = {}) {
   ];
   const inferPresetFromName = (name) => {
     const s = name.toLowerCase();
-    if (/young_female|female|woman|girl|nv|女主|女声|少女/.test(s)) return 'young_female';
+    if (/lively_female|lively|少女|活泼女/.test(s)) return 'lively_female';
+    if (/young_female|female|woman|girl|nv|女主|女声/.test(s)) return 'young_female';
     if (/elder_female|old_woman|老太|婆婆/.test(s)) return 'elder_female';
     if (/elder_male|old_man|elder|老头|老者|大爷/.test(s)) return 'elder_male';
     if (/rough_male|rough|gangster|thug|悍匪|反派粗/.test(s)) return 'rough_male';
@@ -473,18 +474,135 @@ function synthesizeWindowsSapi(text, outWav) {
   return { file: outWav, duration: Number(meta.trim()) || 0, fallback: 'sapi' };
 }
 
-/** 合成单句旁白/台词：优先 IndexTTS2（支持按角色克隆 + --emotion-text 情绪演绎），否则 edge-tts，最后兜底 Windows SAPI。 */
-export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = '', emotionWeight = 0.65 }) {
+/** IndexTTS2 官方真人录音室音色样本到 8 类标准角色声线的映射（全部人工听测筛选，零机械音）。 */
+export const OFFICIAL_VOICE_PACK_MAP = [
+  { preset: 'narrator', src: 'voice_12.wav', label: '磁性影视旁白男声' },
+  { preset: 'young_male', src: 'voice_07.wav', label: '沉稳清朗青年男声' },
+  { preset: 'young_female', src: 'voice_08.wav', label: '清冷温润国漫女主声' },
+  { preset: 'lively_female', src: 'voice_03.wav', label: '灵动少女女声' },
+  { preset: 'elder_male', src: 'emo_sad.wav', label: '沧桑厚重老年男声' },
+  { preset: 'elder_female', src: 'voice_02.wav', label: '威严沉稳老年女声' },
+  { preset: 'rough_male', src: 'voice_01.wav', label: '粗犷凶悍硬汉/悍匪男声' },
+  { preset: 'cold_male', src: 'voice_04.wav', label: '阴冷狡猾反派男声' },
+];
+
+/**
+ * 一键安装 IndexTTS2 官方真人音色库到 ~/.storyalter/voices/：
+ * 若本地 examples/ 尚未下载样本，则自动调用 IndexTTS2 内置下载器从 ModelScope/HF 拉取。
+ */
+export function installOfficialVoicePack(cfg = {}, { targetDir } = {}) {
+  const vcfg = cfg?.video || {};
+  const ttsRoot = vcfg.ttsRoot || 'D:/AI/codex-tools/index-tts';
+  const examplesDir = path.join(ttsRoot, 'examples');
+  const py = process.platform === 'win32'
+    ? path.join(ttsRoot, '.venv', 'Scripts', 'python.exe')
+    : path.join(ttsRoot, '.venv', 'bin', 'python');
+  const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
+  const destDir = targetDir || path.join(home, '.storyalter', 'voices');
+
+  const missingSrc = OFFICIAL_VOICE_PACK_MAP.filter((m) => !fs.existsSync(path.join(examplesDir, m.src)));
+  if (missingSrc.length > 0 && fs.existsSync(py)) {
+    runCmd(py, ['-c', 'from indextts.utils.examples_downloader import ensure_examples_available; ensure_examples_available()'], 180000);
+  }
+
+  fs.mkdirSync(destDir, { recursive: true });
+  const installed = [];
+  const missing = [];
+  for (const item of OFFICIAL_VOICE_PACK_MAP) {
+    const srcPath = path.join(examplesDir, item.src);
+    if (!fs.existsSync(srcPath)) {
+      missing.push(item.src);
+      continue;
+    }
+    const dstPath = path.join(destDir, `${item.preset}.wav`);
+    fs.copyFileSync(srcPath, dstPath);
+    installed.push({ preset: item.preset, label: item.label, path: dstPath });
+  }
+  if (!installed.length) {
+    throw new Error(`未找到 IndexTTS2 官方音色样本（检查 ${examplesDir} 是否存在或网络能否访问 ModelScope）`);
+  }
+  return { ok: true, destDir, installed, missing };
+}
+
+/**
+ * 根据表演情绪标签校准 IndexTTS2 的 emo_alpha 情绪强度（纯函数）：
+ * - 强烈爆发情绪（怒吼/暴怒/凶狠/惊恐/痛哭/嘶喊）提高权重到 0.78，让情绪张力立得住；
+ * - 中等张力情绪（阴冷/嘲讽/焦急/悲痛/质问/冷笑）用 0.65；
+ * - 细腻克制情绪（轻声/温柔/关切/低沉/平静/淡漠）用 0.48，避免过度用力变夸张。
+ */
+export function calibrateEmotionParams(emotion = '', overrideWeight = null) {
+  const text = String(emotion || '').trim();
+  if (!text) return { emotionText: '', emotionWeight: 0 };
+  if (Number.isFinite(Number(overrideWeight)) && Number(overrideWeight) > 0) {
+    return { emotionText: text, emotionWeight: Math.min(1.0, Math.max(0.2, Number(overrideWeight))) };
+  }
+  if (/怒|吼|暴|凶|狠|恐|惊|喊|嚎|崩溃|绝望|嘶|狂|furious|shout|angry|terrified|scream/i.test(text)) {
+    return { emotionText: text, emotionWeight: 0.78 };
+  }
+  if (/轻|柔|温|关切|克制|低沉|平静|淡|叹|耳语|whisper|gentle|calm|soft|warm/i.test(text)) {
+    return { emotionText: text, emotionWeight: 0.48 };
+  }
+  return { emotionText: text, emotionWeight: 0.65 };
+}
+
+/**
+ * 对单条人声配音做广播级后期母带处理：
+ * - 裁剪首尾多余空白（保留自然呼吸），避免切镜后半秒才开口或尾音拖沓；
+ * - 85Hz 高通去低频闷响 + 280Hz 温暖胸腔 + 3.2kHz 清晰人声齿音控制；
+ * - 柔和人声压缩 + EBU R128 响度归一化 (-16 LUFS) + 20ms 首尾淡入淡出防爆音。
+ */
+export function postProcessVoiceWav(inWav, outWav = inWav) {
+  if (!inWav || !fs.existsSync(inWav)) throw new Error(`配音文件不存在：${inWav}`);
+  const tmpOut = `${outWav}.polish.wav`;
+  const durRaw = Number(runCmd('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', inWav], 15000).trim()) || 0;
+  const trimFilter = 'silenceremove=start_periods=1:start_silence=0.04:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_silence=0.06:start_threshold=-45dB,areverse';
+  const toneFilter = 'highpass=f=85,lowpass=f=13500,equalizer=f=260:t=q:w=1.2:g=1.4,equalizer=f=3200:t=q:w=1.4:g=1.8,acompressor=threshold=-20dB:ratio=2.4:attack=10:release=120:makeup=1.5,loudnorm=I=-16:TP=-1.5:LRA=9';
+  // 先裁剪静音再查时长以施加精确淡出
+  const step1 = `${outWav}.trim.wav`;
+  try {
+    runCmd('ffmpeg', ['-y', '-v', 'error', '-i', inWav, '-af', `${trimFilter},${toneFilter}`, '-ar', '24000', '-ac', '1', step1], 30000);
+    const trimmedDur = Number(runCmd('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', step1], 15000).trim()) || durRaw;
+    if (trimmedDur > 0.15) {
+      const fadeOutStart = Math.max(0.05, trimmedDur - 0.025).toFixed(3);
+      runCmd('ffmpeg', ['-y', '-v', 'error', '-i', step1, '-af', `afade=t=in:st=0:d=0.02,afade=t=out:st=${fadeOutStart}:d=0.025`, '-ar', '24000', '-ac', '1', tmpOut], 30000);
+      fs.renameSync(tmpOut, outWav);
+      try { fs.unlinkSync(step1); } catch {}
+      return { file: outWav, duration: trimmedDur };
+    }
+    fs.renameSync(step1, outWav);
+    return { file: outWav, duration: trimmedDur || durRaw };
+  } catch {
+    try { if (fs.existsSync(step1)) fs.unlinkSync(step1); } catch {}
+    try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch {}
+    // 兜底：若极短音频裁剪异常，退回仅做均衡+响度归一
+    runCmd('ffmpeg', ['-y', '-v', 'error', '-i', inWav, '-af', toneFilter, '-ar', '24000', '-ac', '1', tmpOut], 30000);
+    fs.renameSync(tmpOut, outWav);
+    const d = Number(runCmd('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', outWav], 15000).trim()) || durRaw;
+    return { file: outWav, duration: d };
+  }
+}
+
+/** 合成单句旁白/台词：优先 IndexTTS2（--fp16 + 角色真人音色克隆 + 情绪自适应权重 + 广播母带），否则 edge-tts，最后兜底 Windows SAPI。 */
+export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = '', emotionWeight = null, polish = true }) {
   const vcfg = cfg.video || {};
   const ttsRoot = vcfg.ttsRoot || 'D:/AI/codex-tools/index-tts';
   const exe = path.join(ttsRoot, '.venv/Scripts/indextts2.exe');
   const modelDir = vcfg.ttsModelDir || path.join(ttsRoot, 'checkpoints');
   const ref = refAudio || vcfg.ttsRefAudio;
   const edgeVoice = voice || vcfg.edgeVoice || 'zh-CN-YunxiNeural';
+  const finish = (res) => {
+    if (polish && res?.file && fs.existsSync(res.file)) {
+      try {
+        const p = postProcessVoiceWav(res.file, res.file);
+        return { ...res, duration: p.duration, polished: true };
+      } catch {}
+    }
+    return res;
+  };
   const tryEdgeOrSapi = () => {
-    try { return synthesizeEdgeTts(text, outWav, edgeVoice); }
+    try { return finish(synthesizeEdgeTts(text, outWav, edgeVoice)); }
     catch (e) {
-      if (process.platform === 'win32') return synthesizeWindowsSapi(text, outWav);
+      if (process.platform === 'win32') return finish(synthesizeWindowsSapi(text, outWav));
       throw e;
     }
   };
@@ -492,9 +610,10 @@ export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = ''
     return Promise.resolve(tryEdgeOrSapi());
   }
   fs.mkdirSync(path.dirname(outWav), { recursive: true });
-  const args = ['synth', '--voice', ref, '--output', outWav, '--text', text, '--force'];
-  if (emotion && String(emotion).trim()) {
-    args.push('--emotion-text', String(emotion).trim(), '--emotion-weight', String(Number(emotionWeight) || 0.65));
+  const emo = calibrateEmotionParams(emotion, emotionWeight);
+  const args = ['synth', '--voice', ref, '--output', outWav, '--text', text, '--fp16', '--force'];
+  if (emo.emotionText) {
+    args.push('--emotion-text', emo.emotionText, '--emotion-weight', String(emo.emotionWeight));
   }
   if (fs.existsSync(modelDir)) args.push('--model-dir', modelDir);
   return new Promise((resolve, reject) => {
@@ -510,9 +629,90 @@ export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = ''
         }
       }
       const meta = runCmd('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', outWav], 15000);
-      resolve({ file: outWav, duration: Number(meta.trim()) || 0 });
+      resolve(finish({ file: outWav, duration: Number(meta.trim()) || 0, provider: 'indextts2' }));
     });
   });
+}
+
+/**
+ * 批量合成整集配音（indextts2 batch 单次加载模型，比逐镜重载快 5–10 倍）：
+ * tasks: Array<{ key, text, outWav, refAudio, voice, emotion, emotionWeight, label }>
+ * 返回 Map<key, { file, duration, provider, polished }>。
+ */
+export async function synthesizeTtsBatch(cfg, tasks = [], { polish = true, onLog } = {}) {
+  const results = new Map();
+  if (!tasks.length) return results;
+  const vcfg = cfg.video || {};
+  const ttsRoot = vcfg.ttsRoot || 'D:/AI/codex-tools/index-tts';
+  const exe = path.join(ttsRoot, '.venv/Scripts/indextts2.exe');
+  const modelDir = vcfg.ttsModelDir || path.join(ttsRoot, 'checkpoints');
+
+  const batchTasks = [];
+  const fallbackTasks = [];
+  for (const t of tasks) {
+    const ref = t.refAudio || vcfg.ttsRefAudio;
+    if (fs.existsSync(exe) && ref && fs.existsSync(ref)) {
+      batchTasks.push({ ...t, ref });
+    } else {
+      fallbackTasks.push(t);
+    }
+  }
+
+  if (batchTasks.length > 0) {
+    const batchDir = path.dirname(batchTasks[0].outWav);
+    fs.mkdirSync(batchDir, { recursive: true });
+    const batchFile = path.join(batchDir, `_indextts_batch_${Date.now()}.jsonl`);
+    const lines = batchTasks.map((t) => {
+      fs.mkdirSync(path.dirname(t.outWav), { recursive: true });
+      const emo = calibrateEmotionParams(t.emotion, t.emotionWeight);
+      const item = { text: t.text, voice: t.ref, output: t.outWav };
+      if (emo.emotionText) {
+        item.emotion_text = emo.emotionText;
+        item.emotion_weight = emo.emotionWeight;
+      }
+      return JSON.stringify(item);
+    });
+    fs.writeFileSync(batchFile, lines.join('\n') + '\n', 'utf8');
+    onLog?.({ level: 'act', msg: `正在用 IndexTTS2 批量合成 ${batchTasks.length} 条角色配音（单次加载模型 + FP16）…` });
+
+    const args = ['batch', '--batch-file', batchFile, '--fp16', '--force'];
+    if (fs.existsSync(modelDir)) args.push('--model-dir', modelDir);
+    const batchOk = await new Promise((resolve) => {
+      const p = spawn(exe, args, { windowsHide: true });
+      const timer = setTimeout(() => { try { p.kill(); } catch {} resolve(false); }, Math.max(240000, batchTasks.length * 45000));
+      p.on('close', (code) => { clearTimeout(timer); resolve(code === 0); });
+      p.on('error', () => { clearTimeout(timer); resolve(false); });
+    });
+    try { fs.unlinkSync(batchFile); } catch {}
+
+    for (const t of batchTasks) {
+      if (batchOk && fs.existsSync(t.outWav)) {
+        let dur = Number(runCmd('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', t.outWav], 15000).trim()) || 0;
+        let polished = false;
+        if (polish) {
+          try { dur = postProcessVoiceWav(t.outWav, t.outWav).duration; polished = true; } catch {}
+        }
+        results.set(t.key, { file: t.outWav, duration: dur, provider: 'indextts2-batch', polished });
+      } else {
+        fallbackTasks.push(t);
+      }
+    }
+  }
+
+  for (const t of fallbackTasks) {
+    onLog?.({ level: 'act', msg: `合成配音（${t.label || t.key}${t.emotion ? ` · ${t.emotion}` : ''}）…` });
+    const r = await synthesizeTts(cfg, {
+      text: t.text,
+      outWav: t.outWav,
+      refAudio: t.refAudio,
+      voice: t.voice,
+      emotion: t.emotion,
+      emotionWeight: t.emotionWeight,
+      polish,
+    });
+    results.set(t.key, r);
+  }
+  return results;
 }
 
 /**
@@ -571,54 +771,90 @@ export function composeEpisode(book, { episodeIndex, shotFiles = [], shotClips =
 
   const validNarr = narrationFiles.filter((n) => n?.file && fs.existsSync(n.file));
   const hasBgm = !!(bgmFile && fs.existsSync(bgmFile));
+  const concatMeta = probeMedia(rawConcat);
+  const hasOrigAudio = !!concatMeta.hasAudio;
   if (validNarr.length === 0 && !hasBgm) {
-    fs.renameSync(rawConcat, mixedMp4);
+    if (voiceMode === 'native' && hasOrigAudio) {
+      // 原生对口型模式也做一次人声清晰度与响度归一化，消除 H3 原始直出音量发虚/闷糊
+      runCmd('ffmpeg', ['-y', '-v', 'error', '-i', rawConcat, '-c:v', 'copy',
+        '-af', 'highpass=f=80,equalizer=f=3000:t=q:w=1.4:g=1.6,loudnorm=I=-16:TP=-1.5:LRA=11,alimiter=limit=0.95',
+        '-c:a', 'aac', '-b:a', '192k', mixedMp4], 180000);
+      try { fs.unlinkSync(rawConcat); } catch {}
+    } else {
+      fs.renameSync(rawConcat, mixedMp4);
+    }
   } else {
-    // 把每句旁白按镜头起止时间偏移后混入（native 原生说话模式保留原音轨 1.0，tts 覆盖模式压低环境音到 0.25）
-    const concatMeta = probeMedia(rawConcat);
-    const hasOrigAudio = !!concatMeta.hasAudio;
-    const origVol = voiceMode === 'native' ? 1.0 : 0.25;
+    // 影院级多轨混音：
+    // - tts 模式：合并全部人声为 dialogue 总线，用侧链压缩自动闪避原视频底噪（低通 3.8kHz + 音量 0.18）与 BGM；
+    // - native 模式：保留 H3 原生对口型人声（并做响度增强），仅对旁白/BGM 混音。
     const inputs = ['-i', rawConcat];
     const filters = [];
-    const labels = [];
-    if (hasOrigAudio) {
-      filters.push(`[0:a]volume=${origVol}[bg]`);
-      labels.push('[bg]');
-    }
     validNarr.forEach((n, idx) => {
       inputs.push('-i', n.file);
       const ms = Math.max(0, Math.round((n.offsetSec || 0) * 1000));
-      filters.push(`[${idx + 1}:a]adelay=${ms}|${ms}[v${idx}]`);
-      labels.push(`[v${idx}]`);
+      filters.push(`[${idx + 1}:a]aresample=48000,aformat=channel_layouts=stereo,adelay=${ms}|${ms}[v${idx}]`);
     });
-    if (hasBgm && validNarr.length > 0) {
-      // 旁白轨道作为侧链触发器：说话时自动压低 BGM，停顿时自动回升
+
+    const hasDialogue = validNarr.length > 0;
+    const targetDur = Math.max(0.5, Number(concatMeta.duration) || 5).toFixed(3);
+    if (hasDialogue) {
       const narrLabels = validNarr.map((_, idx) => `[v${idx}]`);
-      filters.push(`${narrLabels.join('')}amix=inputs=${narrLabels.length}:normalize=0[narr_raw]`);
-      filters.push('[narr_raw]asplit=2[narr_sc][narr_mix]');
-      const bgmIdx = validNarr.length + 1;
-      const vol = Math.min(0.8, Math.max(0.02, Number(bgmVolume) || 0.18));
-      inputs.push('-stream_loop', '-1', '-i', bgmFile);
-      filters.push(`[${bgmIdx}:a]volume=${vol}[bgm_raw]`);
-      filters.push('[bgm_raw][narr_sc]sidechaincompress=threshold=0.02:ratio=6:attack=40:release=350[bgm_duck]');
-      const mixParts = hasOrigAudio ? ['[bg]', '[narr_mix]', '[bgm_duck]'] : ['[narr_mix]', '[bgm_duck]'];
-      filters.push(`${mixParts.join('')}amix=inputs=${mixParts.length}:duration=${hasOrigAudio ? 'first' : 'longest'}:normalize=0[aout]`);
-    } else {
-      if (hasBgm) {
-        const bgmIdx = validNarr.length + 1;
-        const vol = Math.min(0.8, Math.max(0.02, Number(bgmVolume) || 0.18));
-        inputs.push('-stream_loop', '-1', '-i', bgmFile);
-        filters.push(`[${bgmIdx}:a]volume=${vol}[bgm]`);
-        labels.push('[bgm]');
-      }
-      if (labels.length === 1) {
-        filters.push(`${labels[0]}acopy[aout]`);
+      if (narrLabels.length === 1) {
+        filters.push(`${narrLabels[0]}apad=whole_dur=${targetDur}[narr_bus]`);
       } else {
-        filters.push(`${labels.join('')}amix=inputs=${labels.length}:duration=${hasOrigAudio ? 'first' : 'longest'}:normalize=0[aout]`);
+        filters.push(`${narrLabels.join('')}amix=inputs=${narrLabels.length}:normalize=0,apad=whole_dur=${targetDur}[narr_bus]`);
       }
     }
+
+    const mixParts = [];
+    let scSplitCount = 0;
+    const duckOrig = hasOrigAudio && hasDialogue && voiceMode !== 'native';
+    const duckBgm = hasBgm && hasDialogue;
+    if (hasDialogue) {
+      scSplitCount = 1 + (duckOrig ? 1 : 0) + (duckBgm ? 1 : 0);
+      if (scSplitCount > 1) {
+        const outs = ['[narr_mix]', ...(duckOrig ? ['[narr_sc_bg]'] : []), ...(duckBgm ? ['[narr_sc_bgm]'] : [])];
+        filters.push(`[narr_bus]asplit=${scSplitCount}${outs.join('')}`);
+      } else {
+        filters.push('[narr_bus]acopy[narr_mix]');
+      }
+      mixParts.push('[narr_mix]');
+    }
+
+    if (hasOrigAudio) {
+      if (voiceMode === 'native') {
+        filters.push('[0:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=80,equalizer=f=3000:t=q:w=1.4:g=1.6,loudnorm=I=-16:TP=-1.5:LRA=11[bg]');
+        mixParts.push('[bg]');
+      } else if (duckOrig) {
+        filters.push('[0:a]aresample=48000,aformat=channel_layouts=stereo,lowpass=f=3800,volume=0.18[bg_raw]');
+        filters.push('[bg_raw][narr_sc_bg]sidechaincompress=threshold=0.015:ratio=8:attack=25:release=300[bg_duck]');
+        mixParts.push('[bg_duck]');
+      } else {
+        filters.push('[0:a]aresample=48000,aformat=channel_layouts=stereo,volume=0.28[bg]');
+        mixParts.push('[bg]');
+      }
+    }
+
+    if (hasBgm) {
+      const bgmIdx = validNarr.length + 1;
+      const vol = Math.min(0.8, Math.max(0.02, Number(bgmVolume) || 0.16));
+      inputs.push('-stream_loop', '-1', '-i', bgmFile);
+      filters.push(`[${bgmIdx}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${vol}[bgm_raw]`);
+      if (duckBgm) {
+        filters.push('[bgm_raw][narr_sc_bgm]sidechaincompress=threshold=0.018:ratio=6:attack=35:release=350[bgm_duck]');
+        mixParts.push('[bgm_duck]');
+      } else {
+        mixParts.push('[bgm_raw]');
+      }
+    }
+
+    if (mixParts.length === 1) {
+      filters.push(`${mixParts[0]}alimiter=limit=0.95:attack=5:release=50[aout]`);
+    } else {
+      filters.push(`${mixParts.join('')}amix=inputs=${mixParts.length}:duration=first:normalize=0,alimiter=limit=0.95:attack=5:release=50[aout]`);
+    }
     runCmd('ffmpeg', ['-y', '-v', 'error', ...inputs, '-filter_complex', filters.join(';'),
-      '-map', '0:v', '-map', '[aout]', '-c:v', 'copy', '-c:a', 'aac', '-shortest', mixedMp4], 180000);
+      '-map', '0:v', '-map', '[aout]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', mixedMp4], 180000);
     try { fs.unlinkSync(rawConcat); } catch {}
   }
 

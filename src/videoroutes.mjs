@@ -4,13 +4,14 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
   loadPlan, savePlan, loadBible, saveBible, composeLockedPrompt, composeNativeDialoguePrompt,
-  extractCharacterBible, currentRevisions, staleChapters, planEpisodes, generateStoryboard,
-  generatePublishCopy, resolveSpeakerVoice, EDGE_VOICES, VOICE_PRESETS, videoDir,
+  composeDubbedSpeakingPrompt, extractCharacterBible, currentRevisions, staleChapters,
+  planEpisodes, generateStoryboard, generatePublishCopy, resolveSpeakerVoice, isAnimeStyle,
+  EDGE_VOICES, VOICE_PRESETS, VISUAL_STYLE_PRESETS, DEFAULT_VISUAL_STYLE, videoDir,
 } from './videoplan.mjs';
 import {
-  renderShot, synthesizeTts, composeEpisode, probeVideoEngine, hasRef2VModels,
+  renderShot, synthesizeTts, synthesizeTtsBatch, composeEpisode, probeVideoEngine, hasRef2VModels,
   aspectDimensions, prepareShotRenderInputs, computeClipTrimDuration, probeMedia,
-  resolveKeyframePath, listVoiceSamples,
+  resolveKeyframePath, listVoiceSamples, installOfficialVoicePack,
 } from './videorender.mjs';
 import { auditShotPromptRealism, inspectImageRealism } from './videoqa.mjs';
 import { buildEpisodeSubtitles, exportJianyingDraft } from './videopost.mjs';
@@ -124,8 +125,49 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       keyframes: listKeyframes(book),
       edgeVoices: EDGE_VOICES,
       voicePresets: VOICE_PRESETS,
+      visualStylePresets: VISUAL_STYLE_PRESETS,
       voiceSamples: listVoiceSamples(book, cfg),
     });
+    return true;
+  }
+
+  if (p === '/api/book/video/voices/install-pack') {
+    try {
+      const r = installOfficialVoicePack(cfg);
+      json(res, 200, { ...r, voiceSamples: listVoiceSamples(book, cfg) });
+    } catch (e) {
+      json(res, 500, { error: e?.message || String(e) });
+    }
+    return true;
+  }
+
+  if (p === '/api/book/video/voice/preview') {
+    const bible = loadBible(book);
+    const voiceSamples = listVoiceSamples(book, cfg);
+    const speaker = String(body.speaker || 'narrator').trim();
+    const emotion = String(body.emotion || '').trim();
+    const text = String(body.text || '').trim() || (speaker === 'narrator' ? '风雪夜归人，一盏孤灯照亮半条旧巷。' : '别动，听我说完这一句。');
+    const sp = resolveSpeakerVoice({ speaker, emotion }, bible, cfg, voiceSamples);
+    const refAudio = String(body.refAudio || sp.refAudio || '').trim();
+    const edgeVoice = String(body.edgeVoice || sp.edgeVoice || '').trim();
+    const safeName = speaker.replace(/[^A-Za-z0-9_\u4e00-\u9fa5-]/g, '_').slice(0, 20) || 'voice';
+    const fileName = `_preview_${safeName}_${Date.now()}.wav`;
+    const outWav = path.join(videoDir(book), 'voices', fileName);
+    try {
+      const r = await synthesizeTts(cfg, { text, outWav, refAudio, voice: edgeVoice, emotion: sp.emotion });
+      const rel = `voices/${fileName}`;
+      json(res, 200, {
+        ok: true,
+        rel,
+        url: `/api/book/video/file?book=${encodeURIComponent(slug)}&rel=${encodeURIComponent(rel)}`,
+        duration: r.duration,
+        provider: r.provider || r.fallback || 'tts',
+        speaker: sp.label,
+        refAudio,
+      });
+    } catch (e) {
+      json(res, 500, { error: e?.message || String(e) });
+    }
     return true;
   }
 
@@ -170,9 +212,10 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
     const resObj = startVideoJob(videoJobs, slug, 'portrait', `正在生成角色「${charName}」定妆照…`, pushLog, async (onLog) => {
       const bible = loadBible(book);
       const ch = (bible.characters || []).find((c) => c.name === charName);
-      const style = String(body.visualStyle || bible.visualStyle || '电影感国风短剧写实').trim();
+      const style = String(body.visualStyle || bible.visualStyle || DEFAULT_VISUAL_STYLE).trim();
       const lookPrompt = String(body.lookPrompt || body.look || ch?.lookPrompt || '').trim();
-      const prompt = [style, `character portrait of ${charName}`, lookPrompt, 'solo, clean background, centered upper body, high detail, no text, no watermark'].filter(Boolean).join(', ');
+      const animeCue = isAnimeStyle(style) ? 'stylized animated character design sheet, crisp outlines, no live-action photo' : '';
+      const prompt = [style, `character portrait of ${charName}`, lookPrompt, animeCue, 'solo, clean background, centered upper body, high detail, no text, no watermark'].filter(Boolean).join(', ');
       const safe = charName.replace(/[^A-Za-z0-9_\u4e00-\u9fa5-]/g, '_').slice(0, 24) || 'char';
       const fileName = `char_${safe}_${Date.now()}.png`;
       const outFile = path.join(videoDir(book), 'keyframes', fileName);
@@ -208,7 +251,11 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       let generated = 0;
       for (const s of targets) {
         onLog({ level: 'act', msg: `生成第 ${s.index} 镜关键帧…` });
-        const prompt = `${composeLockedPrompt(s, bible)}, cinematic keyframe still, high detail, no text, no subtitles`;
+        const effectiveBible = bible.visualStyle ? bible : { ...bible, visualStyle: DEFAULT_VISUAL_STYLE };
+        const styleTail = isAnimeStyle(effectiveBible.visualStyle)
+          ? 'stylized animated film keyframe still, crisp art direction, no live-action photo, high detail, no text, no subtitles'
+          : 'cinematic keyframe still, high detail, no text, no subtitles';
+        const prompt = `${composeLockedPrompt(s, effectiveBible)}, ${styleTail}`;
         const fileName = `shot_ep${epIdx}_s${s.index}_${Date.now()}.png`;
         const outFile = path.join(videoDir(book), 'keyframes', fileName);
         await generateImageWithFallback(book, { prompt, outFile, aspectRatio: aspect, cfg, onLog });
@@ -425,6 +472,8 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
         let lockedPrompt = composeLockedPrompt(s, bible, charRefTags);
         if (voiceMode === 'native') {
           lockedPrompt = composeNativeDialoguePrompt(s, bible, lockedPrompt, cfg);
+        } else {
+          lockedPrompt = composeDubbedSpeakingPrompt(s, bible, lockedPrompt, cfg);
         }
         const r = await renderShot(book, cfg, {
           episodeIndex: epIdx, shot: s, keyframePath, refImagePaths, lockedPrompt, aspect, voiceMode, force, onLog,
@@ -468,29 +517,39 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       fs.mkdirSync(epDir, { recursive: true });
       const shotClips = [];
       const narrationFiles = [];
-      let offsetSec = 0;
-      for (const s of ep.shots) {
+      // 先收集全集需要配音的镜头，用 synthesizeTtsBatch 一次加载模型批量合成（比逐镜重载快 5–10 倍）
+      const ttsTasks = [];
+      const shotPlanMeta = ep.shots.map((s) => {
         if (!s.render?.fileRel) throw new Error(`第 ${s.index} 镜还没有渲染，先全部渲染后再合成`);
-        const f = path.join(vroot, s.render.fileRel);
-        const origDur = Number(s.render.duration) || Number(s.seconds) || 5;
-        let ttsDur = 0;
         const sp = resolveSpeakerVoice(s, bible, cfg, voiceSamples);
-        // native 模式下：角色台词保留 H3 原生对口型人声（跳过 TTS 覆盖），仅旁白才按需走 TTS
         const needTtsForShot = !!(useTts && s.narration?.trim() && !(voiceMode === 'native' && sp.isCharacter));
         if (needTtsForShot) {
-          const wav = path.join(epDir, 'tts', `shot-${String(s.index).padStart(2, '0')}.wav`);
-          onLog({ level: 'act', msg: `合成第 ${s.index} 镜配音（${sp.label}${sp.emotion ? ` · ${sp.emotion}` : ''}）…` });
-          const t = await synthesizeTts(cfg, {
+          ttsTasks.push({
+            key: s.index,
             text: s.narration.trim(),
-            outWav: wav,
+            outWav: path.join(epDir, 'tts', `shot-${String(s.index).padStart(2, '0')}.wav`),
             refAudio: sp.refAudio,
             voice: sp.edgeVoice,
             emotion: sp.emotion,
+            label: `第 ${s.index} 镜 · ${sp.label}`,
           });
-          ttsDur = Number(t.duration) || 0;
-          s.render.ttsRel = toVideoRel(book, t.file);
+        }
+        return { s, sp, needTtsForShot };
+      });
+      const ttsMap = ttsTasks.length ? await synthesizeTtsBatch(cfg, ttsTasks, { onLog }) : new Map();
+
+      let offsetSec = 0;
+      for (const { s, sp, needTtsForShot } of shotPlanMeta) {
+        const f = path.join(vroot, s.render.fileRel);
+        const origDur = Number(s.render.duration) || Number(s.seconds) || 5;
+        let ttsDur = 0;
+        let ttsFile = '';
+        if (needTtsForShot) {
+          const t = ttsMap.get(s.index);
+          ttsDur = Number(t?.duration) || 0;
+          ttsFile = t?.file || '';
+          s.render.ttsRel = ttsFile ? toVideoRel(book, ttsFile) : '';
           s.render.ttsDuration = ttsDur;
-          narrationFiles.push({ file: t.file, offsetSec });
         } else if (voiceMode === 'native' && sp.isCharacter) {
           s.render.ttsRel = '';
           s.render.ttsDuration = 0;
@@ -501,6 +560,11 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
           hasNarration: needTtsForShot,
           trimToTts: trimToTts && needTtsForShot,
         });
+        if (needTtsForShot && ttsFile) {
+          // 画面切入后留 0.15s 自然起口呼吸，避免切镜第 0 帧直接撞嘴
+          const leadIn = (clipDur - ttsDur) >= 0.35 ? 0.15 : 0;
+          narrationFiles.push({ file: ttsFile, offsetSec: offsetSec + leadIn });
+        }
         s.render.trimmedDuration = clipDur;
         shotClips.push({ file: f, trimSec: clipDur < origDur - 0.2 ? clipDur : 0 });
         offsetSec += clipDur;

@@ -286,11 +286,41 @@ export function saveBible(book, bible) {
   }, null, 1), 'utf8');
 }
 
+export const VISUAL_STYLE_PRESETS = [
+  {
+    id: 'anime_25d',
+    label: '🎨 国风电影厚涂 2.5D（推荐）',
+    short: '2.5D厚涂国漫',
+    prompt: 'High-budget 2.5D Chinese donghua animated feature film style, rich painterly brushwork, subtle crisp ink outlines, dramatic warm lantern rim lighting vs cold atmospheric shadows, expressive stylized anime characters, cinematic depth of field, no live-action photorealism',
+  },
+  {
+    id: 'anime_2d_cel',
+    label: '✒️ 2D 精品赛璐璐番剧',
+    short: '2D赛璐璐',
+    prompt: 'High-budget 2D cel-shaded Chinese anime series style, crisp clean black ink linework, dramatic cel shading, expressive anime eyes, hand-painted atmospheric background, no live-action photorealism',
+  },
+  {
+    id: 'donghua_3d',
+    label: '🧊 3D 电影级国漫 CG',
+    short: '3D国漫CG',
+    prompt: 'High-end 3D Chinese donghua CG animated film style, Unreal Engine 5 cinematic stylized rendering, detailed cloth physics, volumetric atmospheric lighting, refined stylized Asian CG faces',
+  },
+  {
+    id: 'live_action',
+    label: '🎬 电影写实真人',
+    short: '写实真人',
+    prompt: 'Cinematic Chinese period drama, realistic 35mm film grain, natural moody lighting, authentic textures',
+  },
+];
+
+export const DEFAULT_VISUAL_STYLE = VISUAL_STYLE_PRESETS[0].prompt;
+
 export const VOICE_PRESETS = [
   { id: 'young_male', label: '沉稳青年男声', defaultDesc: 'low, calm young Chinese male voice', defaultEdge: 'zh-CN-YunxiNeural' },
   { id: 'young_female', label: '清冷/温柔青年女声', defaultDesc: 'clear, gentle young Chinese female voice', defaultEdge: 'zh-CN-XiaoxiaoNeural' },
+  { id: 'lively_female', label: '灵动少女女声', defaultDesc: 'bright, lively young Chinese girl voice', defaultEdge: 'zh-CN-XiaoyiNeural' },
   { id: 'elder_male', label: '沧桑/慈祥老年男声', defaultDesc: 'warm, weathered elderly Chinese male voice', defaultEdge: 'zh-CN-YunyangNeural' },
-  { id: 'elder_female', label: '沉稳老年女声', defaultDesc: 'calm elderly Chinese female voice', defaultEdge: 'zh-CN-XiaoyiNeural' },
+  { id: 'elder_female', label: '沉稳老年女声', defaultDesc: 'calm, authoritative elderly Chinese female voice', defaultEdge: 'zh-CN-XiaoyiNeural' },
   { id: 'rough_male', label: '粗犷悍匪/硬汉男声', defaultDesc: 'rough, gruff, intimidating Chinese male voice', defaultEdge: 'zh-CN-YunjianNeural' },
   { id: 'cold_male', label: '阴冷/狡猾反派男声', defaultDesc: 'sharp, cold, arrogant Chinese male voice', defaultEdge: 'zh-CN-YunxiNeural' },
 ];
@@ -322,7 +352,10 @@ export function resolveSpeakerVoice(shot, bible, cfg = {}, voiceSamples = []) {
   const vcfg = cfg?.video || {};
   const speaker = str(shot?.speaker, 'narrator');
   const emotion = str(shot?.emotion);
-  const defaultRef = str(bible?.narratorVoice) || str(vcfg.ttsRefAudio);
+  const autoNarrator = Array.isArray(voiceSamples)
+    ? voiceSamples.find((vs) => vs.preset === 'narrator' && vs.path)
+    : null;
+  const defaultRef = str(bible?.narratorVoice) || str(vcfg.ttsRefAudio) || str(autoNarrator?.path);
   const defaultEdge = str(bible?.narratorEdgeVoice) || str(vcfg.edgeVoice) || 'zh-CN-YunxiNeural';
   if (!speaker || speaker.toLowerCase() === 'narrator' || speaker === '旁白') {
     return {
@@ -370,6 +403,21 @@ export function composeNativeDialoguePrompt(shot, bible, basePrompt, cfg = {}) {
 }
 
 /**
+ * 为后期配音模式（voiceMode === 'tts'，推荐）注入画面口型动作与静音环境约束（纯函数）：
+ * - 人物台词镜头：保留动画/影视口型动作与表情表演，同时禁止 H3 视频模型在底噪里胡乱生成人声杂音；
+ * - 无台词或纯旁白镜头：要求 H3 仅生成干净环境音，不混入多余说话声。
+ */
+export function composeDubbedSpeakingPrompt(shot, bible, basePrompt, cfg = {}) {
+  const prompt = str(basePrompt || shot?.prompt);
+  const line = str(shot?.narration);
+  const sp = line ? resolveSpeakerVoice(shot, bible, cfg) : null;
+  const cue = sp?.isCharacter
+    ? `${sp.speaker} speaks expressively with natural animated mouth movement and ${sp.emotion || 'vivid'} facial expression. Audio: subtle atmospheric ambient foley only, no spoken dialogue or background voices.`
+    : 'Audio: subtle atmospheric ambient foley only, no spoken dialogue or background voices.';
+  return prompt ? `${prompt} ${cue}` : cue;
+}
+
+/**
  * 清洗角色固定外貌卡中的手持/随身道具从句（纯函数）：
  * 防止如 "carries a small wooden case" 写死在全书外貌卡里，导致半身/窗内镜头凭空多长出一只提箱手穿帮。
  * 手持道具应由具体分镜 shot.prompt 按需描写，而不是每镜强塞。
@@ -390,11 +438,16 @@ export function isPeriodStyle(text) {
   return /\b(period\s+drama|19[0-4]\d|1930s|1920s|republic\s+of\s+china|ancient|dynasty|hutong|qing|ming|tang|song|han\s+dynasty|wuxia|xianxia)\b|民国|古装|古代|胡同|长衫|旗袍/i.test(String(text || ''));
 }
 
+/** 判断画风是否属于 2.5D/2D/3D 动画/国漫路线，用于全程锁定动画画风、防止漂回写实恐怖谷。 */
+export function isAnimeStyle(text) {
+  return /\b(2\.5d|2d|3d|anime|donghua|cel[-\s]?shaded|painterly|animated|illustration|cartoon)\b|国漫|动画|厚涂|赛璐璐|番剧/i.test(String(text || ''));
+}
+
 /**
  * 渲染前场景提示词常识消毒（纯函数）：
  * - 替换英文视频模型极易按字面曲解的直译词（如 bone-setting → traditional Chinese herbal medicine）；
  * - 拆分混写的 window and doorway，防止门窗融合成齐腰半截框导致踩窗台；
- * - 年代剧自动补齐写实物理与防现代穿帮尾注。
+ * - 动画画风自动附加风格锁定尾注（绝不漂回真人写实）；年代剧自动补齐防现代穿帮尾注。
  */
 export function sanitizeScenePrompt(prompt, bible = {}) {
   let s = String(prompt || '').trim();
@@ -405,7 +458,14 @@ export function sanitizeScenePrompt(prompt, bible = {}) {
   s = s.replace(/\bwindow\s+and\s+doorway\b/gi, 'wooden doorway');
   s = s.replace(/\bdoorway\s+and\s+window\b/gi, 'wooden doorway');
   s = s.replace(/\s{2,}/g, ' ').trim();
-  if (isPeriodStyle(`${bible?.visualStyle || ''} ${s}`) && !/no modern ceiling/i.test(s)) {
+  const combined = `${bible?.visualStyle || ''} ${s}`;
+  const anime = isAnimeStyle(combined);
+  const period = isPeriodStyle(combined);
+  if (anime && !/consistent stylized animated/i.test(s)) {
+    s += period
+      ? ' Consistent stylized animated art style throughout motion, crisp character design, grounded natural posture, authentic period architecture, no modern ceiling electric lamps, no modern glossy riding boots, no live-action photorealism, no extra limbs.'
+      : ' Consistent stylized animated art style throughout motion, crisp character design, grounded natural posture, no live-action photorealism, no extra limbs.';
+  } else if (period && !/no modern ceiling/i.test(s)) {
     s += ' Grounded realistic human posture, authentic period architecture, no modern ceiling electric lamps, no modern glossy riding boots, no extra limbs.';
   }
   return s;
@@ -455,7 +515,7 @@ ${ledger ? `\n【人物现状】\n${ledger.slice(0, 3000)}` : ''}
 
 输出：
 \`\`\`json
-{"visualStyle":"Cinematic Chinese period drama, realistic film grain, natural moody lighting","characters":[{"name":"角色名","role":"主角/女主/反派/配角","voicePreset":"young_male","voiceDesc":"low, calm 24-year-old Chinese male voice","lookPrompt":"25-year-old Chinese man, ..."}]}
+{"visualStyle":"${DEFAULT_VISUAL_STYLE}","characters":[{"name":"角色名","role":"主角/女主/反派/配角","voicePreset":"young_male","voiceDesc":"low, calm 24-year-old Chinese male voice","lookPrompt":"25-year-old Chinese man, ..."}]}
 \`\`\``;
 
   const text = await askModel(book, cfg, sys, user, { maxTokens: 4000, temperature: 0.4, onLog });
@@ -487,7 +547,7 @@ ${ledger ? `\n【人物现状】\n${ledger.slice(0, 3000)}` : ''}
     if (!merged.some((m) => m.name === old.name)) merged.push(old);
   }
   const next = {
-    visualStyle: prev.visualStyle || str(parsed.visualStyle),
+    visualStyle: prev.visualStyle || str(parsed.visualStyle) || DEFAULT_VISUAL_STYLE,
     narratorVoice: prev.narratorVoice || '',
     narratorEdgeVoice: prev.narratorEdgeVoice || '',
     characters: merged,

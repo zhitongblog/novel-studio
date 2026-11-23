@@ -7,6 +7,7 @@ import {
   assertLoopbackUrl, computeShotInputHash, buildH3I2VGraph, buildH3Ref2VGraph,
   aspectDimensions, computeClipTrimDuration, evaluateHardware, probeVideoEngine,
   prepareShotRenderInputs, shouldRelayPrevFrame, startLocalComfyUI,
+  calibrateEmotionParams, installOfficialVoicePack,
 } from '../src/videorender.mjs';
 
 const vcfg = {
@@ -174,4 +175,22 @@ test('startLocalComfyUI 拒绝非 loopback 地址且在缺失安装目录时给�
     () => startLocalComfyUI({ video: { comfyUrl: 'http://127.0.0.1:59998', comfyRoot: 'Z:/nonexistent-comfy' } }),
     /找不到本机 ComfyUI/
   );
+});
+
+test('calibrateEmotionParams 按情绪强度自动校准 emo_alpha，installOfficialVoicePack 校验缺失目录', () => {
+  assert.deepStrictEqual(calibrateEmotionParams(''), { emotionText: '', emotionWeight: 0 });
+  assert.strictEqual(calibrateEmotionParams('凶狠怒吼').emotionWeight, 0.78);
+  assert.strictEqual(calibrateEmotionParams('轻声关切').emotionWeight, 0.48);
+  assert.strictEqual(calibrateEmotionParams('阴冷嘲讽').emotionWeight, 0.65);
+  assert.strictEqual(calibrateEmotionParams('怒吼', 0.9).emotionWeight, 0.9);
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vid-vpack-'));
+  try {
+    assert.throws(
+      () => installOfficialVoicePack({ video: { ttsRoot: path.join(tmp, 'none') } }, { targetDir: path.join(tmp, 'out') }),
+      /未找到 IndexTTS2 官方音色样本/
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
