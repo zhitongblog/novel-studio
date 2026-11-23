@@ -1,6 +1,6 @@
 [package]
 name = "storyalter-desktop"
-version = "2.1.0"
+version = "2.1.1"
 description = "StoryAlter - AI 故事工作室桌面端"
 edition = "2021"
 
