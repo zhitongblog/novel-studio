@@ -15,6 +15,14 @@ const CR = '\r';
 // 作者看到的是"莫名其妙撞了额度"。同理其它信号也必须带上英文语境，不能只认一个词。
 // 判据只看【英文报错措辞】和【明确的中文额度用语】，不看孤立数字。
 const LIMIT_RE = /(usage limit|rate[\s_-]?limit|too many requests|(?:http|status(?: code)?)\s*429\b|429\s*(?:too many|rate|error)|quota (?:reached|exceeded|exhausted)|insufficient[_\s]quota|out of (credits|tokens)|reached your (usage )?limit|you'?ve hit your (usage )?limit|plan limit|monthly limit|limit will reset|resets? (?:at|in)\s*\d|try again later|请求过于频繁|额度.{0,6}(用完|耗尽|不足)|用量.{0,4}上限|配额.{0,4}(用完|耗尽|不足)|速率限制|稍后(再|重)试)/i;
+// 别的插件的额度≠模型的额度（2026-10-04 修仙）：claude-mem 的 SessionStart hook 让 agent 开场就说一句
+// 「…额度用完…这次会话的内容不会被记住…我不会重启它的 worker」——那是记忆插件的观察者没额度了，
+// 模型本身好好的。整行命中额度判据 → autopilot 当场终止，书一开就停，每次重开都一样。
+// 所以这类说的是记忆/插件的行不算数。
+// 另一类：claude 开场横幅「You've been granted a $250 bonus credit … on top of your plan limits · /claim-credit」
+// 是广告，不是撞额度（2026-10-05 天皇/修仙 一开即停）。
+const LIMIT_IGNORE_RE = /(claude-mem|observer|worker|不会被记住|记忆|bonus credit|claim-credit|granted)/i;
+const limitHit = (l) => LIMIT_RE.test(l) && !LIMIT_IGNORE_RE.test(l);
 
 export class Autopilot {
   constructor(mcp, paneId, opts = {}) {
@@ -223,12 +231,12 @@ export class Autopilot {
     const tail = screen.split(/\r?\n/).filter(l => l.trim()).slice(-40).join('\n');
 
     // 模型用量/速率上限 → 立即停止，不再重试（要去抖一次，避免误判）
-    if (this.opt.stopOnLimit !== false && LIMIT_RE.test(tail)) {
+    if (this.opt.stopOnLimit !== false && tail.split('\n').some(limitHit)) {
       this._limitStreak = (this._limitStreak || 0) + 1;
       if (this._limitStreak >= 2) {
         // 【把屏幕上那句原话带出去】上层要靠它算"什么时候恢复"（claude 写 reset at 10pm、agy 写 Resets in 6m8s）。
         // 2026-09-21 实测：不带出去的话，等上层想去读屏幕时窗口早关了，只能盲目退避、每次白开一个窗口。
-        const raw = (tail.split('\n').filter(l => LIMIT_RE.test(l)).pop() || '').trim().replace(/\s+/g, ' ').slice(0, 160);
+        const raw = (tail.split('\n').filter(limitHit).pop() || '').trim().replace(/\s+/g, ' ').slice(0, 160);
         this.stop(`检测到模型用量/速率上限，已停止（不再重试，等额度恢复后手动继续）${raw ? '｜窗口原话：' + raw : ''}`);
         return;
       }
