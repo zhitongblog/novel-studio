@@ -7,8 +7,8 @@ import {
   extractJson, normalizeEpisodes, normalizeShots, matchCharacter, snapFrames,
   revisionOf, staleChapters, parseBibleCharacters, buildEpisodePrompt, buildStoryboardPrompt,
   composeLockedPrompt, composeNativeDialoguePrompt, composeDubbedSpeakingPrompt, sanitizeLookPrompt,
-  sanitizeScenePrompt, isAnimeStyle, VISUAL_STYLE_PRESETS, DEFAULT_VISUAL_STYLE,
-  inferVoicePreset, resolveSpeakerVoice, saveBible, loadBible,
+  sanitizeScenePrompt, isAnimeStyle, VISUAL_STYLE_PRESETS, AUDIO_STYLE_PRESETS, getAudioStylePreset,
+  DEFAULT_VISUAL_STYLE, inferVoicePreset, resolveSpeakerVoice, saveBible, loadBible,
 } from '../src/videoplan.mjs';
 
 const chapters = Array.from({ length: 10 }, (_, i) => ({ num: i + 1, revision: `r${i + 1}` }));
@@ -258,11 +258,15 @@ test('saveBible / loadBible 保留旁白音色与角色 edgeVoice/voiceRefAudio'
   }
 });
 
-test('VISUAL_STYLE_PRESETS 默认 2.5D 国风厚涂动画，isAnimeStyle 与 sanitizeScenePrompt 锁定动画风格不漂回真人', () => {
-  assert.strictEqual(VISUAL_STYLE_PRESETS[0].id, 'anime_25d');
+test('VISUAL_STYLE_PRESETS 默认 2D 赛璐璐暗黑番剧，AUDIO_STYLE_PRESETS 提供三套网络声音流派', () => {
+  assert.strictEqual(VISUAL_STYLE_PRESETS[0].id, 'anime_2d_cel');
   assert.strictEqual(DEFAULT_VISUAL_STYLE, VISUAL_STYLE_PRESETS[0].prompt);
   assert.strictEqual(isAnimeStyle(DEFAULT_VISUAL_STYLE), true);
   assert.strictEqual(isAnimeStyle('Cinematic 1930s period drama, 35mm film'), false);
+  assert.strictEqual(AUDIO_STYLE_PRESETS.length, 3);
+  assert.strictEqual(getAudioStylePreset('donghua_noir').spatialReverb, true);
+  assert.ok(getAudioStylePreset('douyin_fast').voiceTempo > getAudioStylePreset('donghua_noir').voiceTempo);
+  assert.strictEqual(getAudioStylePreset('unknown').id, 'donghua_noir');
 
   const animePrompt = sanitizeScenePrompt('Xu Wan smiles at the snowy clinic window.', {
     visualStyle: `${DEFAULT_VISUAL_STYLE}, 1930s Republic of China hutong`,

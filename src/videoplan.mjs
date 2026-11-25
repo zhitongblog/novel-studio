@@ -288,16 +288,16 @@ export function saveBible(book, bible) {
 
 export const VISUAL_STYLE_PRESETS = [
   {
-    id: 'anime_25d',
-    label: '🎨 国风电影厚涂 2.5D（推荐）',
-    short: '2.5D厚涂国漫',
-    prompt: 'High-budget 2.5D Chinese donghua animated feature film style, rich painterly brushwork, subtle crisp ink outlines, dramatic warm lantern rim lighting vs cold atmospheric shadows, expressive stylized anime characters, cinematic depth of field, no live-action photorealism',
+    id: 'anime_2d_cel',
+    label: '✒️ 2D 精品赛璐璐暗黑番剧（推荐）',
+    short: '2D赛璐璐',
+    prompt: 'High-budget 2D cel-shaded dark noir seinen Chinese anime series style, razor-sharp fine black ink linework, crisp flat two-tone cel shading, realistic adult anime proportions, dramatic warm amber lantern rim light vs cold midnight-blue shadows, no 3D blur, no painterly smudge, no live-action photorealism',
   },
   {
-    id: 'anime_2d_cel',
-    label: '✒️ 2D 精品赛璐璐番剧',
-    short: '2D赛璐璐',
-    prompt: 'High-budget 2D cel-shaded Chinese anime series style, crisp clean black ink linework, dramatic cel shading, expressive anime eyes, hand-painted atmospheric background, no live-action photorealism',
+    id: 'anime_25d',
+    label: '🎨 国风电影厚涂 2.5D 动画',
+    short: '2.5D厚涂国漫',
+    prompt: 'High-budget 2.5D Chinese donghua animated feature film style, rich painterly brushwork, subtle crisp ink outlines, dramatic warm lantern rim lighting vs cold atmospheric shadows, expressive stylized anime characters, cinematic depth of field, no live-action photorealism',
   },
   {
     id: 'donghua_3d',
@@ -314,6 +314,46 @@ export const VISUAL_STYLE_PRESETS = [
 ];
 
 export const DEFAULT_VISUAL_STYLE = VISUAL_STYLE_PRESETS[0].prompt;
+
+export const AUDIO_STYLE_PRESETS = [
+  {
+    id: 'donghua_noir',
+    label: '🎬 国漫暗黑悬疑电影派（推荐 · B站/精品番剧）',
+    voiceTempo: 1.07,
+    narratorTempo: 1.24,
+    spatialReverb: true,
+    bgmVolume: 0.34,
+    leadInSec: 0.14,
+    tailPadSec: 0.60,
+    minShotSec: 2.8,
+  },
+  {
+    id: 'douyin_fast',
+    label: '🔥 抖音/红果强情绪快节奏派（高完播/强卡点）',
+    voiceTempo: 1.13,
+    narratorTempo: 1.28,
+    spatialReverb: false,
+    bgmVolume: 0.38,
+    leadInSec: 0.08,
+    tailPadSec: 0.35,
+    minShotSec: 2.4,
+  },
+  {
+    id: 'storyteller',
+    label: '📖 网文说书/爽文解说漫剧派（强钩子旁白）',
+    voiceTempo: 1.15,
+    narratorTempo: 1.24,
+    spatialReverb: false,
+    bgmVolume: 0.30,
+    leadInSec: 0.06,
+    tailPadSec: 0.30,
+    minShotSec: 2.4,
+  },
+];
+
+export function getAudioStylePreset(id) {
+  return AUDIO_STYLE_PRESETS.find((p) => p.id === id) || AUDIO_STYLE_PRESETS[0];
+}
 
 export const VOICE_PRESETS = [
   { id: 'young_male', label: '沉稳青年男声', defaultDesc: 'low, calm young Chinese male voice', defaultEdge: 'zh-CN-YunxiNeural' },

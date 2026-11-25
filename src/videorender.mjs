@@ -11,9 +11,13 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { explainComfyError } from './imagelocal.mjs';
 import { detectGpu } from './localai.mjs';
-import { snapFrames, videoDir } from './videoplan.mjs';
+import { snapFrames, videoDir, getAudioStylePreset } from './videoplan.mjs';
+
+const __DIR = path.dirname(fileURLToPath(import.meta.url));
+const VIDEO_TOOLS_DIR = path.resolve(__DIR, '../tools/video');
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
@@ -261,13 +265,64 @@ export function buildH3I2VGraph({ imageName, prompt, seed, width, height, frames
   };
 }
 
-/** 画幅映射到 H3 兼容的 32 倍数分辨率（9:16 精确竖屏 416×736 → 2× 放大 832×1472；4:5 保留 480×608）。 */
-export function aspectDimensions(aspect, base = { width: 416, height: 736 }) {
-  if (aspect === '16:9') return { width: 640, height: 352 };
-  if (aspect === '3:4') return { width: 480, height: 640 };
-  if (aspect === '4:5') return { width: 480, height: 608 };
-  if (aspect === '9:16') return { width: 416, height: 736 };
-  return { width: Number(base?.width) || 416, height: Number(base?.height) || 736 };
+/** 画幅映射到 H3 兼容的 32 倍数分辨率（standard: 9:16=416×736；hd: 9:16=544×960 供 2D 番剧 + 1080P AI 超分）。 */
+export function aspectDimensions(aspect, base = { width: 416, height: 736 }, { quality = 'standard' } = {}) {
+  const hd = quality === 'hd';
+  if (aspect === '16:9') return hd ? { width: 960, height: 544 } : { width: 640, height: 352 };
+  if (aspect === '3:4') return hd ? { width: 640, height: 864 } : { width: 480, height: 640 };
+  if (aspect === '4:5') return hd ? { width: 640, height: 800 } : { width: 480, height: 608 };
+  if (aspect === '9:16') return hd ? { width: 544, height: 960 } : { width: 416, height: 736 };
+  return { width: Number(base?.width) || (hd ? 544 : 416), height: Number(base?.height) || (hd ? 960 : 736) };
+}
+
+/** 探测本机是否已安装 2D 动画专用超分模型 RealESRGAN_x4plus_anime_6B.pth。 */
+export function hasAnimeUpscaler(cfg = {}) {
+  const comfyRoot = cfg?.video?.comfyRoot || 'C:/AI/StoryAlter/ComfyUI';
+  const model = cfg?.video?.animeUpscaleModel || path.join(comfyRoot, 'models', 'upscale_models', 'RealESRGAN_x4plus_anime_6B.pth');
+  const py = process.platform === 'win32'
+    ? path.join(comfyRoot, '.venv', 'Scripts', 'python.exe')
+    : path.join(comfyRoot, '.venv', 'bin', 'python');
+  return fs.existsSync(model) && fs.existsSync(py) && fs.existsSync(path.join(VIDEO_TOOLS_DIR, 'upscale_anime.py'));
+}
+
+/** 用 RealESRGAN_x4plus_anime_6B 将视频 GPU AI 超分至 1080×1920（或 1920×1080）全高清。 */
+export function upscaleAnime1080p(inMp4, outMp4, cfg = {}, { width = 1080, height = 1920, onLog } = {}) {
+  const comfyRoot = cfg?.video?.comfyRoot || 'C:/AI/StoryAlter/ComfyUI';
+  const model = cfg?.video?.animeUpscaleModel || path.join(comfyRoot, 'models', 'upscale_models', 'RealESRGAN_x4plus_anime_6B.pth');
+  const py = process.platform === 'win32'
+    ? path.join(comfyRoot, '.venv', 'Scripts', 'python.exe')
+    : path.join(comfyRoot, '.venv', 'bin', 'python');
+  const script = path.join(VIDEO_TOOLS_DIR, 'upscale_anime.py');
+  if (!fs.existsSync(model) || !fs.existsSync(py) || !fs.existsSync(script)) {
+    throw new Error('缺少 RealESRGAN_x4plus_anime_6B 超分环境或模型');
+  }
+  onLog?.({ level: 'act', msg: `正在用 RealESRGAN 2D 动画超分至 ${width}×${height} 全高清…` });
+  runCmd(py, [script, inMp4, outMp4, String(width), String(height), model], 1800000);
+  if (!fs.existsSync(outMp4)) throw new Error('RealESRGAN 1080P 超分未生成输出文件');
+  return probeMedia(outMp4);
+}
+
+/** 根据整集镜头时间轴与声音流派自动生成三段式暗黑悬疑电影配乐与卡点音效 (48kHz Stereo WAV)。 */
+export function generateEpisodeScoreAndSfx({ shots = [], totalSeconds = 60, audioStyle = 'donghua_noir', distantScreamWav = '', outWav, cfg = {}, onLog }) {
+  const comfyRoot = cfg?.video?.comfyRoot || 'C:/AI/StoryAlter/ComfyUI';
+  const ttsRoot = cfg?.video?.ttsRoot || 'D:/AI/codex-tools/index-tts';
+  const pyCandidates = process.platform === 'win32'
+    ? [path.join(comfyRoot, '.venv', 'Scripts', 'python.exe'), path.join(ttsRoot, '.venv', 'Scripts', 'python.exe'), 'python']
+    : [path.join(comfyRoot, '.venv', 'bin', 'python'), path.join(ttsRoot, '.venv', 'bin', 'python'), 'python3'];
+  const py = pyCandidates.find((p) => p === 'python' || p === 'python3' || fs.existsSync(p));
+  const script = path.join(VIDEO_TOOLS_DIR, 'gen_noir_score.py');
+  if (!py || !fs.existsSync(script)) throw new Error('找不到配乐生成脚本 gen_noir_score.py');
+  fs.mkdirSync(path.dirname(outWav), { recursive: true });
+  const metaFile = `${outWav}.timeline.json`;
+  fs.writeFileSync(metaFile, JSON.stringify({ totalSeconds, audioStyle, shots, distantScreamWav }, null, 1), 'utf8');
+  onLog?.({ level: 'act', msg: `正在按「${getAudioStylePreset(audioStyle).label}」合成三段式配乐与戏剧卡点音效…` });
+  try {
+    runCmd(py, [script, metaFile, outWav], 120000);
+  } finally {
+    try { fs.unlinkSync(metaFile); } catch {}
+  }
+  if (!fs.existsSync(outWav)) throw new Error('三段式配乐生成失败');
+  return { file: outWav };
 }
 
 /**
@@ -379,8 +434,8 @@ async function submitAndWaitComfy(base, graph, timeoutMs, onLog) {
   throw new Error(`ComfyUI 渲染超时（>${Math.round(timeoutMs / 1000)} 秒）`);
 }
 
-/** 渲染单个镜头：有专属关键帧优先走 fl2va (I2V)，无专属关键帧且 ref2va 就绪走多图锁脸 (ref2va)；支持 native 对口型说话模式。 */
-export async function renderShot(book, cfg, { episodeIndex, shot, keyframePath, refImagePaths = [], lockedPrompt, aspect = '9:16', voiceMode = 'tts', force = false, onLog }) {
+/** 渲染单个镜头：有专属关键帧优先走 fl2va (I2V)，无专属关键帧且 ref2va 就绪走多图锁脸 (ref2va)；支持 hd (544×960) 与 native 对口型。 */
+export async function renderShot(book, cfg, { episodeIndex, shot, keyframePath, refImagePaths = [], lockedPrompt, aspect = '9:16', quality = 'standard', voiceMode = 'tts', force = false, onLog }) {
   const vcfg = cfg.video || {};
   const base = assertLoopbackUrl(vcfg.comfyUrl || 'http://127.0.0.1:8188');
   const validRefs = (refImagePaths || []).filter((p) => p && fs.existsSync(p));
@@ -388,7 +443,7 @@ export async function renderShot(book, cfg, { episodeIndex, shot, keyframePath, 
   if (!useRef2V && (!keyframePath || !fs.existsSync(keyframePath))) {
     throw new Error('缺少关键帧图片：先选一张封面底图或上传参考图');
   }
-  const { width, height } = aspectDimensions(aspect, vcfg);
+  const { width, height } = aspectDimensions(aspect, vcfg, { quality });
   const fps = Number(vcfg.fps) || 24;
   const steps = Number(vcfg.steps) || 4;
   const frames = snapFrames(shot.seconds || 5, fps);
@@ -546,25 +601,41 @@ export function calibrateEmotionParams(emotion = '', overrideWeight = null) {
 }
 
 /**
- * 对单条人声配音做广播级后期母带处理：
+ * 对单条人声配音做广播级后期母带处理 + 声音流派语速 + 场景空间混响：
  * - 裁剪首尾多余空白（保留自然呼吸），避免切镜后半秒才开口或尾音拖沓；
- * - 85Hz 高通去低频闷响 + 280Hz 温暖胸腔 + 3.2kHz 清晰人声齿音控制；
- * - 柔和人声压缩 + EBU R128 响度归一化 (-16 LUFS) + 20ms 首尾淡入淡出防爆音。
+ * - 可选保音高变速（atempo，用于流派节奏如 1.07x 电影番剧 / 1.13x 抖音快节奏）；
+ * - 85Hz 高通 + 胸腔/人声清晰度 EQ + 压缩 + EBU R128 响度归一化 (-16 LUFS)；
+ * - 可选场景空间混响：室内木屋温暖早反射 / 室外雪夜空旷空气感 / 怒吼胡同回声；
+ * - 20ms 首尾淡入淡出防爆音。
  */
-export function postProcessVoiceWav(inWav, outWav = inWav) {
+export function postProcessVoiceWav(inWav, outWav = inWav, { tempo = 1.0, settingType = '', spatialReverb = false, shouting = false } = {}) {
   if (!inWav || !fs.existsSync(inWav)) throw new Error(`配音文件不存在：${inWav}`);
   const tmpOut = `${outWav}.polish.wav`;
   const durRaw = Number(runCmd('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', inWav], 15000).trim()) || 0;
+  const safeTempo = Math.min(1.35, Math.max(0.85, Number(tempo) || 1.0));
+  const tempoPart = Math.abs(safeTempo - 1.0) >= 0.015 ? `atempo=${safeTempo.toFixed(3)},` : '';
   const trimFilter = 'silenceremove=start_periods=1:start_silence=0.04:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_silence=0.06:start_threshold=-45dB,areverse';
-  const toneFilter = 'highpass=f=85,lowpass=f=13500,equalizer=f=260:t=q:w=1.2:g=1.4,equalizer=f=3200:t=q:w=1.4:g=1.8,acompressor=threshold=-20dB:ratio=2.4:attack=10:release=120:makeup=1.5,loudnorm=I=-16:TP=-1.5:LRA=9';
-  // 先裁剪静音再查时长以施加精确淡出
+  let spacePart = '';
+  if (spatialReverb) {
+    const st = String(settingType || '').toLowerCase();
+    if (st === 'interior') {
+      // 室内木屋近场温暖早反射
+      spacePart = ',equalizer=f=220:t=q:w=1.2:g=1.2,aecho=0.82:0.88:18|36:0.13|0.07';
+    } else if (st === 'exterior') {
+      // 室外雪夜砖墙胡同空气感；怒吼/反派威吓带更明显砖墙回声
+      spacePart = shouting
+        ? ',highpass=f=95,equalizer=f=3500:t=q:w=1.4:g=1.5,aecho=0.80:0.86:58|118:0.16|0.08'
+        : ',highpass=f=95,equalizer=f=3500:t=q:w=1.5:g=1.2,aecho=0.82:0.86:44|88:0.09|0.04';
+    }
+  }
+  const toneFilter = `${tempoPart}highpass=f=85,lowpass=f=13500,equalizer=f=260:t=q:w=1.2:g=1.4,equalizer=f=3200:t=q:w=1.4:g=1.8,acompressor=threshold=-20dB:ratio=2.4:attack=10:release=120:makeup=1.5${spacePart},loudnorm=I=-16:TP=-1.5:LRA=9`;
   const step1 = `${outWav}.trim.wav`;
   try {
-    runCmd('ffmpeg', ['-y', '-v', 'error', '-i', inWav, '-af', `${trimFilter},${toneFilter}`, '-ar', '24000', '-ac', '1', step1], 30000);
+    runCmd('ffmpeg', ['-y', '-v', 'error', '-i', inWav, '-af', `${trimFilter},${toneFilter}`, '-ar', '48000', '-ac', '1', step1], 30000);
     const trimmedDur = Number(runCmd('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', step1], 15000).trim()) || durRaw;
     if (trimmedDur > 0.15) {
       const fadeOutStart = Math.max(0.05, trimmedDur - 0.025).toFixed(3);
-      runCmd('ffmpeg', ['-y', '-v', 'error', '-i', step1, '-af', `afade=t=in:st=0:d=0.02,afade=t=out:st=${fadeOutStart}:d=0.025`, '-ar', '24000', '-ac', '1', tmpOut], 30000);
+      runCmd('ffmpeg', ['-y', '-v', 'error', '-i', step1, '-af', `afade=t=in:st=0:d=0.02,afade=t=out:st=${fadeOutStart}:d=0.025`, '-ar', '48000', '-ac', '1', tmpOut], 30000);
       fs.renameSync(tmpOut, outWav);
       try { fs.unlinkSync(step1); } catch {}
       return { file: outWav, duration: trimmedDur };
@@ -574,8 +645,7 @@ export function postProcessVoiceWav(inWav, outWav = inWav) {
   } catch {
     try { if (fs.existsSync(step1)) fs.unlinkSync(step1); } catch {}
     try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch {}
-    // 兜底：若极短音频裁剪异常，退回仅做均衡+响度归一
-    runCmd('ffmpeg', ['-y', '-v', 'error', '-i', inWav, '-af', toneFilter, '-ar', '24000', '-ac', '1', tmpOut], 30000);
+    runCmd('ffmpeg', ['-y', '-v', 'error', '-i', inWav, '-af', toneFilter, '-ar', '48000', '-ac', '1', tmpOut], 30000);
     fs.renameSync(tmpOut, outWav);
     const d = Number(runCmd('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', outWav], 15000).trim()) || durRaw;
     return { file: outWav, duration: d };
@@ -583,7 +653,7 @@ export function postProcessVoiceWav(inWav, outWav = inWav) {
 }
 
 /** 合成单句旁白/台词：优先 IndexTTS2（--fp16 + 角色真人音色克隆 + 情绪自适应权重 + 广播母带），否则 edge-tts，最后兜底 Windows SAPI。 */
-export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = '', emotionWeight = null, polish = true }) {
+export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = '', emotionWeight = null, polish = true, tempo = 1.0, settingType = '', spatialReverb = false, shouting = false }) {
   const vcfg = cfg.video || {};
   const ttsRoot = vcfg.ttsRoot || 'D:/AI/codex-tools/index-tts';
   const exe = path.join(ttsRoot, '.venv/Scripts/indextts2.exe');
@@ -593,7 +663,7 @@ export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = ''
   const finish = (res) => {
     if (polish && res?.file && fs.existsSync(res.file)) {
       try {
-        const p = postProcessVoiceWav(res.file, res.file);
+        const p = postProcessVoiceWav(res.file, res.file, { tempo, settingType, spatialReverb, shouting });
         return { ...res, duration: p.duration, polished: true };
       } catch {}
     }
@@ -690,7 +760,15 @@ export async function synthesizeTtsBatch(cfg, tasks = [], { polish = true, onLog
         let dur = Number(runCmd('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', t.outWav], 15000).trim()) || 0;
         let polished = false;
         if (polish) {
-          try { dur = postProcessVoiceWav(t.outWav, t.outWav).duration; polished = true; } catch {}
+          try {
+            dur = postProcessVoiceWav(t.outWav, t.outWav, {
+              tempo: t.tempo || 1.0,
+              settingType: t.settingType || '',
+              spatialReverb: !!t.spatialReverb,
+              shouting: !!t.shouting,
+            }).duration;
+            polished = true;
+          } catch {}
         }
         results.set(t.key, { file: t.outWav, duration: dur, provider: 'indextts2-batch', polished });
       } else {
@@ -708,6 +786,10 @@ export async function synthesizeTtsBatch(cfg, tasks = [], { polish = true, onLog
       voice: t.voice,
       emotion: t.emotion,
       emotionWeight: t.emotionWeight,
+      tempo: t.tempo || 1.0,
+      settingType: t.settingType || '',
+      spatialReverb: !!t.spatialReverb,
+      shouting: !!t.shouting,
       polish,
     });
     results.set(t.key, r);

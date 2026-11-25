@@ -2848,7 +2848,7 @@ $('#cvDownload').addEventListener('click', async () => {
   } catch (e) { $('#cvErr').textContent = e.message; }
 });
 // ===== 改编视频工作台（全屏 4 步 AI 导演工作台） =====
-let vidPlan = { episodes: [] }, vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] }, vidRef2V = false, vidKeyframes = [], vidEdgeVoices = [], vidVoicePresets = [], vidStylePresets = [], vidVoiceSamples = [], vidCurEp = 1, vidPoll = null, vidStep = 'assets';
+let vidPlan = { episodes: [] }, vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] }, vidRef2V = false, vidAnimeUpscaler = false, vidKeyframes = [], vidEdgeVoices = [], vidVoicePresets = [], vidStylePresets = [], vidAudioPresets = [], vidVoiceSamples = [], vidCurEp = 1, vidPoll = null, vidStep = 'assets';
 function vidFileUrl(rel) {
   return `${API}/api/book/video/file?book=${encodeURIComponent(CUR.slug)}&rel=${encodeURIComponent(rel)}&t=${Date.now()}`;
 }
@@ -2883,8 +2883,8 @@ function renderVideoBible() {
     vidKeyframes.map((k) => `<option value="${esc(k.ref)}" ${k.ref === sel ? 'selected' : ''}>${esc(k.label)}</option>`).join('');
   const chars = vidBible.characters || [];
   const stylePresets = vidStylePresets.length ? vidStylePresets : [
-    { id: 'anime_25d', label: '🎨 国风电影厚涂 2.5D（推荐）', prompt: 'High-budget 2.5D Chinese donghua animated feature film style, rich painterly brushwork, subtle crisp ink outlines, dramatic warm lantern rim lighting vs cold atmospheric shadows, expressive stylized anime characters, cinematic depth of field, no live-action photorealism' },
-    { id: 'anime_2d_cel', label: '✒️ 2D 精品赛璐璐番剧', prompt: 'High-budget 2D cel-shaded Chinese anime series style, crisp clean black ink linework, dramatic cel shading, expressive anime eyes, hand-painted atmospheric background, no live-action photorealism' },
+    { id: 'anime_2d_cel', label: '✒️ 2D 精品赛璐璐暗黑番剧（推荐）', prompt: 'High-budget 2D cel-shaded dark noir seinen Chinese anime series style, razor-sharp fine black ink linework, crisp flat two-tone cel shading, realistic adult anime proportions, dramatic warm amber lantern rim light vs cold midnight-blue shadows, no 3D blur, no painterly smudge, no live-action photorealism' },
+    { id: 'anime_25d', label: '🎨 国风电影厚涂 2.5D 动画', prompt: 'High-budget 2.5D Chinese donghua animated feature film style, rich painterly brushwork, subtle crisp ink outlines, dramatic warm lantern rim lighting vs cold atmospheric shadows, expressive stylized anime characters, cinematic depth of field, no live-action photorealism' },
     { id: 'donghua_3d', label: '🧊 3D 电影级国漫 CG', prompt: 'High-end 3D Chinese donghua CG animated film style, Unreal Engine 5 cinematic stylized rendering, detailed cloth physics, volumetric atmospheric lighting, refined stylized Asian CG faces' },
     { id: 'live_action', label: '🎬 电影写实真人', prompt: 'Cinematic Chinese period drama, realistic 35mm film grain, natural moody lighting, authentic textures' },
   ];
@@ -2904,7 +2904,7 @@ function renderVideoBible() {
       </div>
     </div>
     <div style="margin-bottom:10px;padding:10px;border:1px solid var(--border,#2c2a3a);border-radius:8px;background:rgba(125,139,255,.05)">
-      <div style="font-size:12px;margin-bottom:6px;opacity:.9"><b>一键画风预设</b>（推荐 2.5D 国风厚涂动画：告别写实恐怖谷，画风稳定、出片更快）</div>
+      <div style="font-size:12px;margin-bottom:6px;opacity:.9"><b>一键画风预设</b>（推荐 2D 精品赛璐璐暗黑番剧：线条极锐利、搭 1080P 动画 AI 超分接近蓝光番剧）</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
         ${stylePresets.map((sp) => {
           const active = curStyle && curStyle.toLowerCase().includes(sp.prompt.slice(0, 28).toLowerCase());
@@ -3229,6 +3229,10 @@ function renderVideoModal() {
           <option value="drama" ${(ep.dialogueMode || 'drama') === 'drama' ? 'selected' : ''}>🎬 纯影视对白（去解说旁白）</option>
           <option value="narration" ${ep.dialogueMode === 'narration' ? 'selected' : ''}>📖 漫剧旁白解说</option>
         </select>
+        <select id="vidRenderQuality" style="font-size:12px" title="单镜原生渲染分辨率">
+          <option value="hd" ${(ep.quality || 'hd') === 'hd' ? 'selected' : ''}>🔥 高清 544×960（推荐 2D 番剧）</option>
+          <option value="standard" ${ep.quality === 'standard' ? 'selected' : ''}>⚡ 标准 416×736（速度快）</option>
+        </select>
         <select id="vidVoiceMode" style="font-size:12px" title="人物发声方案">
           <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 影院级多角色配音（IndexTTS2 真人库+混音，推荐）</option>
           <option value="native" ${ep.voiceMode === 'native' ? 'selected' : ''}>👄 H3 原生对口型直出（自动人声增强）</option>
@@ -3317,6 +3321,7 @@ function renderVideoModal() {
   }));
   $('#vidRenderAllBtn')?.addEventListener('click', () => startVidJob('/api/book/video/shot/render', {
     book: CUR.slug, episodeIndex: ep.index, defaultKeyframeRef: vidKeyframes[0]?.ref || 'cover_bg',
+    quality: $('#vidRenderQuality')?.value || ep.quality || 'hd',
     voiceMode: $('#vidVoiceMode')?.value || ep.voiceMode || 'tts',
   }));
   $('#vidToExportBtn')?.addEventListener('click', () => setVidStep('export'));
@@ -3366,6 +3371,7 @@ function renderVideoModal() {
         await startVidJob('/api/book/video/shot/render', {
           book: CUR.slug, episodeIndex: ep.index, shotIndex: idx, force: true,
           defaultKeyframeRef: vidKeyframes[0]?.ref || 'cover_bg',
+          quality: $('#vidRenderQuality')?.value || ep.quality || 'hd',
           voiceMode: $('#vidVoiceMode')?.value || ep.voiceMode || 'tts',
         });
       } catch (e) { $('#vidErr').textContent = e.message; }
@@ -3379,6 +3385,7 @@ function renderVideoModal() {
         await startVidJob('/api/book/video/shot/render', {
           book: CUR.slug, episodeIndex: ep.index, shotIndex: idx, force: true,
           defaultKeyframeRef: vidKeyframes[0]?.ref || 'cover_bg',
+          quality: $('#vidRenderQuality')?.value || ep.quality || 'hd',
           voiceMode: $('#vidVoiceMode')?.value || ep.voiceMode || 'tts',
         });
       } catch (e) { $('#vidErr').textContent = e.message; }
@@ -3404,6 +3411,21 @@ function renderVideoModal() {
             <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 影院级多角色配音（IndexTTS2 真人库+侧链闪避，推荐）</option>
             <option value="native" ${ep.voiceMode === 'native' ? 'selected' : ''}>👄 保留 H3 原生对口型人声（自动响度增强）</option>
           </select>
+        </label>
+        <label class="field" style="margin:0"><span style="font-size:12px">网络声音流派预设（语速 / 空间混响 / 三段配乐节奏）</span>
+          <select id="vidAudioStyle">
+            ${(vidAudioPresets.length ? vidAudioPresets : [
+              { id: 'donghua_noir', label: '🎬 国漫暗黑悬疑电影派（推荐 · B站/精品番剧）' },
+              { id: 'douyin_fast', label: '🔥 抖音/红果强情绪快节奏派（高完播/强卡点）' },
+              { id: 'storyteller', label: '📖 网文说书/爽文解说漫剧派（强钩子旁白）' },
+            ]).map((ap) => `<option value="${esc(ap.id)}" ${(ep.audioStyle || 'donghua_noir') === ap.id ? 'selected' : ''}>${esc(ap.label)}</option>`).join('')}
+          </select>
+        </label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="vidAutoScore" checked /> <span>🎵 自动生成三段式情绪配乐 + 惊变/结尾卡点音效</span>
+        </label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="vidUpscaleAnime" ${vidAnimeUpscaler ? 'checked' : ''} ${vidAnimeUpscaler ? '' : 'disabled'} /> <span>✨ RealESRGAN 2D 动画 AI 超分至 1080×1920${vidAnimeUpscaler ? '（已就绪）' : '（未装模型）'}</span>
         </label>
         <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
           <input type="checkbox" id="vidBurnSub" checked /> <span>自动烧录短剧字幕 (ASS，自动分片防劈词)</span>
@@ -3449,11 +3471,14 @@ function renderVideoModal() {
       book: CUR.slug,
       episodeIndex: ep.index,
       voiceMode: $('#vidComposeVoiceMode')?.value || ep.voiceMode || 'tts',
+      audioStyle: $('#vidAudioStyle')?.value || ep.audioStyle || 'donghua_noir',
+      autoScore: !!$('#vidAutoScore')?.checked,
+      upscaleAnime: !!$('#vidUpscaleAnime')?.checked,
       useTts: !!$('#vidUseTts')?.checked,
       burnSubtitles: !!$('#vidBurnSub')?.checked,
       trimToTts: !!$('#vidTrimTts')?.checked,
       bgmPath: $('#vidBgmPath')?.value.trim() || '',
-      bgmVolume: Number($('#vidBgmVol')?.value) || 0.16,
+      bgmVolume: Number($('#vidBgmVol')?.value) || 0.34,
     }));
     $('#vidGenPublishCopyBtn')?.addEventListener('click', () => startVidJob('/api/book/video/episode/publish-copy', {
       book: CUR.slug, episodeIndex: ep.index,
@@ -3505,10 +3530,12 @@ async function refreshVideoPlan() {
   vidPlan = r.plan || { episodes: [] };
   vidBible = r.bible || { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] };
   vidRef2V = !!r.ref2vaReady;
+  vidAnimeUpscaler = !!r.animeUpscalerReady;
   vidKeyframes = r.keyframes || [];
   vidEdgeVoices = r.edgeVoices || [];
   vidVoicePresets = r.voicePresets || [];
   vidStylePresets = r.visualStylePresets || [];
+  vidAudioPresets = r.audioStylePresets || [];
   vidVoiceSamples = r.voiceSamples || [];
   renderVideoBible();
   renderVideoModal();

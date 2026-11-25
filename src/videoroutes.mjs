@@ -6,12 +6,14 @@ import {
   loadPlan, savePlan, loadBible, saveBible, composeLockedPrompt, composeNativeDialoguePrompt,
   composeDubbedSpeakingPrompt, extractCharacterBible, currentRevisions, staleChapters,
   planEpisodes, generateStoryboard, generatePublishCopy, resolveSpeakerVoice, isAnimeStyle,
-  EDGE_VOICES, VOICE_PRESETS, VISUAL_STYLE_PRESETS, DEFAULT_VISUAL_STYLE, videoDir,
+  getAudioStylePreset, EDGE_VOICES, VOICE_PRESETS, VISUAL_STYLE_PRESETS, AUDIO_STYLE_PRESETS,
+  DEFAULT_VISUAL_STYLE, videoDir,
 } from './videoplan.mjs';
 import {
   renderShot, synthesizeTts, synthesizeTtsBatch, composeEpisode, probeVideoEngine, hasRef2VModels,
   aspectDimensions, prepareShotRenderInputs, computeClipTrimDuration, probeMedia,
-  resolveKeyframePath, listVoiceSamples, installOfficialVoicePack,
+  resolveKeyframePath, listVoiceSamples, installOfficialVoicePack, hasAnimeUpscaler,
+  upscaleAnime1080p, generateEpisodeScoreAndSfx,
 } from './videorender.mjs';
 import { auditShotPromptRealism, inspectImageRealism } from './videoqa.mjs';
 import { buildEpisodeSubtitles, exportJianyingDraft } from './videopost.mjs';
@@ -126,6 +128,8 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       edgeVoices: EDGE_VOICES,
       voicePresets: VOICE_PRESETS,
       visualStylePresets: VISUAL_STYLE_PRESETS,
+      audioStylePresets: AUDIO_STYLE_PRESETS,
+      animeUpscalerReady: hasAnimeUpscaler(cfg),
       voiceSamples: listVoiceSamples(book, cfg),
     });
     return true;
@@ -460,6 +464,8 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       const targets = shotIdx ? ep.shots.filter((s) => s.index === shotIdx) : ep.shots;
       if (!targets.length) throw new Error(`找不到第 ${shotIdx} 镜`);
       const aspect = ep.aspect || cfg.video?.aspect || '9:16';
+      const quality = body.quality === 'hd' ? 'hd' : (ep.quality === 'hd' ? 'hd' : 'standard');
+      ep.quality = quality;
       const voiceMode = body.voiceMode === 'native' || body.voiceMode === 'tts'
         ? body.voiceMode
         : (ep.voiceMode === 'native' ? 'native' : 'tts');
@@ -476,7 +482,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
           lockedPrompt = composeDubbedSpeakingPrompt(s, bible, lockedPrompt, cfg);
         }
         const r = await renderShot(book, cfg, {
-          episodeIndex: epIdx, shot: s, keyframePath, refImagePaths, lockedPrompt, aspect, voiceMode, force, onLog,
+          episodeIndex: epIdx, shot: s, keyframePath, refImagePaths, lockedPrompt, aspect, quality, voiceMode, force, onLog,
         });
         s.render = {
           mode: r.mode,
@@ -500,9 +506,13 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
     const useTts = body.useTts !== false;
     const burnSubtitles = body.burnSubtitles !== false;
     const trimToTts = body.trimToTts !== false;
-    const bgmFile = String(body.bgmPath || '').trim();
-    const bgmVolume = body.bgmVolume !== undefined ? Number(body.bgmVolume) : 0.16;
-    const resObj = startVideoJob(videoJobs, slug, 'compose', `正在合成第 ${epIdx} 集成片…`, pushLog, async (onLog) => {
+    const autoScore = body.autoScore !== false;
+    const upscaleAnime = !!body.upscaleAnime;
+    const audioStyleId = String(body.audioStyle || 'donghua_noir').trim();
+    const audioPreset = getAudioStylePreset(audioStyleId);
+    let bgmFile = String(body.bgmPath || '').trim();
+    const bgmVolume = body.bgmVolume !== undefined ? Number(body.bgmVolume) : (audioPreset.bgmVolume || 0.24);
+    const resObj = startVideoJob(videoJobs, slug, 'compose', `正在合成第 ${epIdx} 集成片（${audioPreset.id}）…`, pushLog, async (onLog) => {
       const cur = loadPlan(book);
       const ep = (cur.episodes || []).find((e) => e.index === epIdx);
       if (!ep?.shots?.length) throw new Error('这一集还没有分镜');
@@ -510,6 +520,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
         ? body.voiceMode
         : (ep.voiceMode === 'native' ? 'native' : 'tts');
       ep.voiceMode = voiceMode;
+      ep.audioStyle = audioPreset.id;
       const bible = loadBible(book);
       const voiceSamples = listVoiceSamples(book, cfg);
       const vroot = videoDir(book);
@@ -517,13 +528,14 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       fs.mkdirSync(epDir, { recursive: true });
       const shotClips = [];
       const narrationFiles = [];
-      // 先收集全集需要配音的镜头，用 synthesizeTtsBatch 一次加载模型批量合成（比逐镜重载快 5–10 倍）
+      // 先收集全集需要配音的镜头，按声音流派注入语速与场景空间混响
       const ttsTasks = [];
       const shotPlanMeta = ep.shots.map((s) => {
         if (!s.render?.fileRel) throw new Error(`第 ${s.index} 镜还没有渲染，先全部渲染后再合成`);
         const sp = resolveSpeakerVoice(s, bible, cfg, voiceSamples);
         const needTtsForShot = !!(useTts && s.narration?.trim() && !(voiceMode === 'native' && sp.isCharacter));
         if (needTtsForShot) {
+          const shouting = /怒|吼|暴|凶|狠|喝|喊|furious|shout|angry/i.test(`${s.emotion || ''} ${s.action || ''}`);
           ttsTasks.push({
             key: s.index,
             text: s.narration.trim(),
@@ -531,6 +543,10 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
             refAudio: sp.refAudio,
             voice: sp.edgeVoice,
             emotion: sp.emotion,
+            tempo: sp.isCharacter ? audioPreset.voiceTempo : audioPreset.narratorTempo,
+            settingType: s.settingType || '',
+            spatialReverb: !!audioPreset.spatialReverb,
+            shouting,
             label: `第 ${s.index} 镜 · ${sp.label}`,
           });
         }
@@ -539,6 +555,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       const ttsMap = ttsTasks.length ? await synthesizeTtsBatch(cfg, ttsTasks, { onLog }) : new Map();
 
       let offsetSec = 0;
+      const scoreTimeline = [];
       for (const { s, sp, needTtsForShot } of shotPlanMeta) {
         const f = path.join(vroot, s.render.fileRel);
         const origDur = Number(s.render.duration) || Number(s.seconds) || 5;
@@ -558,31 +575,65 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
           videoDuration: origDur,
           ttsDuration: ttsDur,
           hasNarration: needTtsForShot,
+          minShotSec: audioPreset.minShotSec || 2.6,
+          tailPadSec: audioPreset.tailPadSec || 0.6,
           trimToTts: trimToTts && needTtsForShot,
         });
+        const leadIn = (needTtsForShot && ttsFile && (clipDur - ttsDur) >= 0.30) ? (audioPreset.leadInSec || 0.14) : 0;
         if (needTtsForShot && ttsFile) {
-          // 画面切入后留 0.15s 自然起口呼吸，避免切镜第 0 帧直接撞嘴
-          const leadIn = (clipDur - ttsDur) >= 0.35 ? 0.15 : 0;
           narrationFiles.push({ file: ttsFile, offsetSec: offsetSec + leadIn });
         }
+        scoreTimeline.push({
+          index: s.index,
+          startSec: offsetSec,
+          durationSec: clipDur,
+          settingType: s.settingType || '',
+          emotion: s.emotion || '',
+          action: s.action || '',
+          narration: s.narration || '',
+          leadInSec: leadIn,
+        });
         s.render.trimmedDuration = clipDur;
         shotClips.push({ file: f, trimSec: clipDur < origDur - 0.2 ? clipDur : 0 });
         offsetSec += clipDur;
       }
 
+      // 若未手动上传 BGM 且启用自动三段式配乐，按分镜情绪时间轴自动生成影院级悬疑配乐与卡点音效
+      if (!bgmFile && autoScore) {
+        try {
+          const scoreOut = path.join(epDir, `score_${audioPreset.id}.wav`);
+          generateEpisodeScoreAndSfx({
+            shots: scoreTimeline,
+            totalSeconds: offsetSec,
+            audioStyle: audioPreset.id,
+            outWav: scoreOut,
+            cfg,
+            onLog,
+          });
+          bgmFile = scoreOut;
+        } catch (scoreErr) {
+          onLog({ level: 'warn', msg: `自动配乐跳过（${scoreErr.message}），继续纯人声合成` });
+        }
+      }
+
+      const canAiUpscale = upscaleAnime && hasAnimeUpscaler(cfg);
+      const firstMeta = probeMedia(shotClips[0].file);
+      const rawDims = (firstMeta.width && firstMeta.height)
+        ? { width: firstMeta.width, height: firstMeta.height }
+        : aspectDimensions(ep.aspect || cfg.video?.aspect || '9:16');
+      const finalDims = canAiUpscale
+        ? (rawDims.width >= rawDims.height ? { width: 1920, height: 1080 } : { width: 1080, height: 1920 })
+        : rawDims;
+
       let assSubtitleFile = '';
       if (burnSubtitles) {
-        const firstMeta = probeMedia(shotClips[0].file);
-        const dims = (firstMeta.width && firstMeta.height)
-          ? { width: firstMeta.width, height: firstMeta.height }
-          : aspectDimensions(ep.aspect || cfg.video?.aspect || '9:16');
         const subs = buildEpisodeSubtitles(
           ep.shots.map((s) => ({
             ...s,
             actualSeconds: s.render?.trimmedDuration || s.render?.duration || s.seconds,
             ttsDurationSec: s.render?.ttsDuration || 0,
           })),
-          dims
+          finalDims
         );
         if (subs.count > 0) {
           assSubtitleFile = path.join(epDir, `episode-${String(epIdx).padStart(2, '0')}.ass`);
@@ -591,11 +642,37 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
         }
       }
 
-      const out = composeEpisode(book, { episodeIndex: epIdx, shotClips, narrationFiles, assSubtitleFile, bgmFile, bgmVolume, voiceMode, onLog });
+      let out;
+      if (canAiUpscale) {
+        // 先合成无字幕混音母带 → GPU RealESRGAN 1080P 超分 → 再在 1080P 原生分辨率烧录锐利字幕
+        const rawMixed = composeEpisode(book, {
+          episodeIndex: epIdx, shotClips, narrationFiles, assSubtitleFile: '', bgmFile, bgmVolume, voiceMode, onLog,
+        });
+        const srNoSub = path.join(epDir, `_sr1080_ep${epIdx}.mp4`);
+        upscaleAnime1080p(rawMixed.file, srNoSub, cfg, { width: finalDims.width, height: finalDims.height, onLog });
+        if (assSubtitleFile && fs.existsSync(assSubtitleFile)) {
+          onLog({ level: 'act', msg: '正在 1080P 原生分辨率烧录高清字幕…' });
+          const escAss = assSubtitleFile.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+          const { spawnSync } = await import('node:child_process');
+          const rBurn = spawnSync('ffmpeg', [
+            '-y', '-v', 'error', '-i', srNoSub, '-vf', `ass='${escAss}'`,
+            '-c:v', 'libx264', '-preset', 'medium', '-crf', '16', '-pix_fmt', 'yuv420p', '-c:a', 'copy',
+            rawMixed.file,
+          ], { encoding: 'utf8', windowsHide: true });
+          try { fs.unlinkSync(srNoSub); } catch {}
+          if (rBurn.status !== 0) throw new Error(`1080P 字幕烧录失败：${rBurn.stderr}`);
+        } else {
+          fs.renameSync(srNoSub, rawMixed.file);
+        }
+        const m = probeMedia(rawMixed.file);
+        out = { file: rawMixed.file, duration: m.duration, width: m.width, height: m.height };
+      } else {
+        out = composeEpisode(book, { episodeIndex: epIdx, shotClips, narrationFiles, assSubtitleFile, bgmFile, bgmVolume, voiceMode, onLog });
+      }
       ep.outputRel = toVideoRel(book, out.file);
       ep.outputDuration = out.duration;
       savePlan(book, cur);
-      return { episodeIndex: epIdx, outputRel: ep.outputRel, duration: out.duration, voiceMode };
+      return { episodeIndex: epIdx, outputRel: ep.outputRel, duration: out.duration, voiceMode, audioStyle: audioPreset.id, width: out.width, height: out.height };
     });
     json(res, 200, resObj);
     return true;

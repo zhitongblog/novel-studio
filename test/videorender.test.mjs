@@ -63,8 +63,9 @@ test('buildH3Ref2VGraph 绑定多张角色定妆图到 MiniMaxH3ReferenceToVideo
   assert.strictEqual(g['21'].inputs.image, 'heroine.png');
 });
 
-test('aspectDimensions 映射常用画幅（均为 32 倍数）', () => {
+test('aspectDimensions 映射常用画幅（均为 32 倍数，支持 standard 与 hd 档位）', () => {
   assert.deepStrictEqual(aspectDimensions('9:16'), { width: 416, height: 736 });
+  assert.deepStrictEqual(aspectDimensions('9:16', undefined, { quality: 'hd' }), { width: 544, height: 960 });
   assert.deepStrictEqual(aspectDimensions('4:5'), { width: 480, height: 608 });
   assert.deepStrictEqual(aspectDimensions('16:9'), { width: 640, height: 352 });
   assert.deepStrictEqual(aspectDimensions('3:4'), { width: 480, height: 640 });

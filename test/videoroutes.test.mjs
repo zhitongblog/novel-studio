@@ -118,7 +118,8 @@ test('videoroutes: 定妆保存、资源上传、分镜增删改全流程', asyn
     const planRes = await env.call('/api/book/video/plan');
     assert.equal(planRes.status, 200);
     assert.ok(Array.isArray(planRes.data.edgeVoices) && planRes.data.edgeVoices.length >= 4);
-    assert.ok(Array.isArray(planRes.data.visualStylePresets) && planRes.data.visualStylePresets[0].id === 'anime_25d');
+    assert.ok(Array.isArray(planRes.data.visualStylePresets) && planRes.data.visualStylePresets[0].id === 'anime_2d_cel');
+    assert.ok(Array.isArray(planRes.data.audioStylePresets) && planRes.data.audioStylePresets[0].id === 'donghua_noir');
     assert.equal(planRes.data.keyframes.length, 1);
 
     // 4. 分镜增删改
