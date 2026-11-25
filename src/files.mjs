@@ -11,6 +11,7 @@ function safeAbs(book, rel) {
   return abs;
 }
 function kbOf(p) { try { return Math.round(fs.statSync(p).size / 1024 * 10) / 10; } catch { return 0; } }
+function charsOf(p) { try { return fs.readFileSync(p, 'utf8').replace(/\s+/g, '').length; } catch { return 0; } }
 function mtimeOf(p) { try { return Math.floor(fs.statSync(p).mtimeMs); } catch { return 0; } }
 
 // 文件树：设定/大纲/台账/索引/简介 + 各卷章节 + 审稿复检报告 + 进度。
@@ -41,11 +42,13 @@ export function listBookFiles(book) {
         for (const f of fs.readdirSync(path.join(cdir, v)).filter(f => /\.txt$/i.test(f))) {
           const full = f.replace(/\.txt$/i, '');
           const stripped = full.replace(/^\d+[_\-\s]?/, '').trim();
+          const fp = path.join(cdir, v, f);
           chs.push({
             name: stripped || full,
             rel: 'chapters/' + v + '/' + f,
             num: parseInt((f.match(/^\d+/) || [])[0] || '0', 10),
-            kb: kbOf(path.join(cdir, v, f)),
+            kb: kbOf(fp),
+            chars: charsOf(fp),
           });
         }
       } catch {}

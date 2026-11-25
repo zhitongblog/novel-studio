@@ -176,13 +176,28 @@ document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', 
 function showView(name) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === name));
   document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
-  const map = { shelf: 'view-shelf', usage: 'view-usage', settings: 'view-settings', env: 'view-env', video: 'view-video' };
+  const map = { shelf: 'view-shelf', corpus: 'view-corpus', usage: 'view-usage', settings: 'view-settings', env: 'view-env', video: 'view-video' };
   $('#' + (map[name] || 'view-shelf')).classList.remove('hidden');
+  document.body.classList.toggle('in-reader', name === 'read');
+  if (name === 'corpus') renderCorpusView();
   if (name === 'usage') renderUsage();
   if (name === 'settings') renderSettings();
   if (name === 'env') renderEnv();
   if (name === 'shelf') closeStream();
 }
+
+// ---------- 全局深浅外观切换 ----------
+function applyAppTheme(t = localStorage.getItem('ns_app_theme') || 'dark') {
+  document.body.dataset.appTheme = t;
+  const btn = $('#btnAppTheme');
+  if (btn) btn.textContent = t === 'light' ? '🌙 切换深色外观' : '☀️ 切换浅色外观';
+}
+applyAppTheme();
+$('#btnAppTheme')?.addEventListener('click', () => {
+  const next = document.body.dataset.appTheme === 'light' ? 'dark' : 'light';
+  localStorage.setItem('ns_app_theme', next);
+  applyAppTheme(next);
+});
 
 // ---------- 启动 ----------
 async function boot() {
@@ -211,51 +226,108 @@ function fillStyles() {
 }
 
 // ---------- 书架 ----------
+let SHELF_FILTER = 'all';
+let SHELF_QUERY = '';
+
+function renderShelfHero(books, running) {
+  const hero = $('#shelfHero');
+  if (!hero) return;
+  const totalBooks = books.length;
+  let totalChaps = 0;
+  let totalKb = 0;
+  let doneBooks = 0;
+  for (const b of books) {
+    totalChaps += (b.stats?.chapters || 0);
+    totalKb += (b.stats?.kb || 0);
+    if (b.status === '已完本') doneBooks++;
+  }
+  const totalWan = ((totalKb * 1024) / 3 / 10000).toFixed(1);
+  hero.innerHTML = `
+    <div class="sh-stats">
+      <div class="sh-stat"><b>${totalBooks}</b><span>部作品</span></div>
+      <div class="sh-stat"><b>${totalChaps.toLocaleString()}</b><span>累计已写章数</span></div>
+      <div class="sh-stat"><b>${totalWan} 万</b><span>累计创作总字数</span></div>
+      <div class="sh-stat"><b>${running.size}</b><span>正在写作会话</span></div>
+    </div>
+    <div class="sh-controls">
+      <input type="search" class="sh-search" id="shSearchInput" placeholder="🔍 搜索书名 / 题材…" value="${esc(SHELF_QUERY)}" />
+      <div class="sh-tabs">
+        <button type="button" class="sh-tab ${SHELF_FILTER === 'all' ? 'active' : ''}" data-sh-filter="all">全部 (${totalBooks})</button>
+        <button type="button" class="sh-tab ${SHELF_FILTER === 'serial' ? 'active' : ''}" data-sh-filter="serial">连载中 (${totalBooks - doneBooks})</button>
+        <button type="button" class="sh-tab ${SHELF_FILTER === 'done' ? 'active' : ''}" data-sh-filter="done">已完本 (${doneBooks})</button>
+      </div>
+    </div>`;
+  hero.querySelectorAll('[data-sh-filter]').forEach(btn => {
+    btn.addEventListener('click', () => { SHELF_FILTER = btn.dataset.shFilter; renderShelf(); });
+  });
+  const sIn = $('#shSearchInput');
+  if (sIn) {
+    sIn.addEventListener('input', () => {
+      SHELF_QUERY = sIn.value;
+      const q = SHELF_QUERY.trim().toLowerCase();
+      document.querySelectorAll('#shelf .book-card:not(.new)').forEach(card => {
+        const match = !q || card.textContent.toLowerCase().includes(q);
+        card.classList.toggle('hidden', !match);
+      });
+    });
+  }
+}
+
 function renderShelf() {
   const shelf = $('#shelf'); shelf.innerHTML = '';
   const running = new Set(STATE.sessions.filter(s => s.running !== false).map(s => s.slug));
-  for (const b of STATE.books) {
+  renderShelfHero(STATE.books || [], running);
+  const filtered = (STATE.books || []).filter(b => {
+    if (SHELF_FILTER === 'done' && b.status !== '已完本') return false;
+    if (SHELF_FILTER === 'serial' && b.status === '已完本') return false;
+    if (SHELF_QUERY.trim()) {
+      const q = SHELF_QUERY.trim().toLowerCase();
+      const hay = ((b.title || '') + ' ' + (b.genre || '')).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  for (const b of filtered) {
     const card = el('div', 'book-card');
     const coverImg = b.stats?.cover
       ? `<img class="card-cover" src="${API}/api/book/cover?book=${encodeURIComponent(b.slug)}&t=${b.stats.coverMtime || 0}" alt="封面">`
-      : `<div class="card-cover none">无<br>封面</div>`;
-    // 进度合成一句人话。原来是三个 pill：「523 章」「4245 KB」「tokens 15.7M」——
-    // 三个孤立数字，其中 tokens 是运维信息，作者在书架上根本用不着（要看在「此刻」卡里有）。
+      : `<div class="card-cover none">暂无<br>封面</div>`;
     const ch = b.stats?.chapters || 0;
-    // KB→字数：中文在 UTF-8 下是【3 字节/字】。第一版按 2 折算，东京那本就从 117.9 万
-    // 变成了 177 万——比看板多出六十万字。数字对不上比没有数字更糟：它会让人不再信这块面板。
     const wan = ((b.stats?.kb || 0) * 1024) / 3 / 10000;
-    const progress = ch ? `写到第 ${ch} 章${wan >= 1 ? ' · 约 ' + wan.toFixed(0) + ' 万字' : ''}` : '还没开写';
+    const targetCh = Number(b.targetChapters) || (Number(b.volumes || 0) * Number(b.chaptersPerVolume || 0)) || 0;
+    const pct = targetCh > 0 ? Math.min(100, Math.round((ch / targetCh) * 100)) : (ch > 0 ? Math.min(100, Math.round((ch / 500) * 100)) : 0);
+    const progress = ch ? `已写 ${ch}${targetCh ? '/' + targetCh : ''} 章 · ${wan >= 0.1 ? wan.toFixed(1) + ' 万字' : Math.round(wan * 10000) + ' 字'}` : '尚未开写';
     card.innerHTML = `
       ${running.has(b.slug) ? '<div class="running-tag"><span class="dot live"></span>写作中</div>' : ''}
-      <button class="card-del" data-act="del" title="删除这本书">🗑</button>
+      <button class="card-del" data-act="del" title="删除这本书">✕</button>
       <div class="card-top">
         ${coverImg}
         <div class="card-info">
-          <h3>《${esc(b.title)}》</h3>
-          <div class="genre">${esc(b.genre || '—')}</div>
+          <h3>${esc(b.title)}</h3>
+          <div class="genre">${esc(b.genre || '未设题材标签')}</div>
+          <div class="card-prog-wrap">
+            <div class="card-progress">${esc(progress)}</div>
+            <div class="card-prog-bar"><i style="width:${pct}%"></i></div>
+          </div>
         </div>
       </div>
-      <div class="card-progress">${esc(progress)}</div>
       <div class="meta">
         <span class="pill model">${esc(modelName(b.model))}</span>
-        ${b.status === '已完本' ? '<span class="pill done">✅ 已完本</span>' : b.status === '收尾中' ? '<span class="pill finale">🏁 收尾中</span>' : b.status === '已放弃' ? '<span class="pill warn">🚫 已放弃</span>' : ''}
+        ${b.status === '已完本' ? '<span class="pill done">✅ 已完本</span>' : b.status === '收尾中' ? '<span class="pill finale">🏁 收尾中</span>' : b.status === '已放弃' ? '<span class="pill warn">🚫 已放弃</span>' : '<span class="pill">连载中</span>'}
         ${b.fanqie?.status ? `<span class="pill ${b.fanqie.status === '已完结' ? 'done' : (b.status === '已完本' && b.fanqie.status !== '已完结' ? 'warn' : '')}" title="番茄平台状态">番茄·${esc(b.fanqie.status)}</span>` : ''}
         ${PUBLISHING.has(b.slug) ? '<span class="pill publishing" data-act="pubbadge" title="正在发布到番茄，点我看进度">📤 发布中</span>' : ''}
         <span class="pill cadence hidden" data-act="cadence" title="番茄满 7 天没有新章上线就暂停推荐"></span>
         <span class="pill issues hidden" data-act="issues" title="点开看这本书要处理什么"></span>
       </div>
       <div class="card-actions">
-        <button class="card-btn primary" data-act="write">✍️ 写作</button>
-        <span class="card-more">
-          <button class="card-btn icon" data-act="read" title="阅读已写章节">📖</button>
-          <button class="card-btn icon" data-act="review" title="复检已写内容">🔍</button>
-          <button class="card-btn icon" data-act="nameexp" title="书名实验">🧪</button>
-        </span>
+        <button class="card-btn primary" data-act="write">✍️ 创作台</button>
+        <button class="card-btn" data-act="read" title="沉浸阅读已写章节">📖 阅读</button>
+        <button class="card-btn" data-act="publish" title="发布章节到番茄">📤 发布</button>
+        <button class="card-btn icon" data-act="nameexp" title="多书名与多封面实验">🧪</button>
       </div>`;
     card.querySelector('[data-act="write"]').addEventListener('click', (e) => { e.stopPropagation(); openWrite(b); });
     card.querySelector('[data-act="read"]').addEventListener('click', (e) => { e.stopPropagation(); openReader(b); });
-    card.querySelector('[data-act="review"]').addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openReview(); });
+    card.querySelector('[data-act="publish"]').addEventListener('click', (e) => { e.stopPropagation(); CUR = b; openPublish(b); });
     card.querySelector('[data-act="nameexp"]').addEventListener('click', (e) => { e.stopPropagation(); openNameExp(b); });
     card.querySelector('[data-act="del"]').addEventListener('click', (e) => { e.stopPropagation(); openDelete(b); });
     card.querySelector('[data-act="issues"]').addEventListener('click', (e) => { e.stopPropagation(); openWrite(b); });
@@ -266,11 +338,11 @@ function renderShelf() {
     card.dataset.slug = b.slug;
     shelf.appendChild(card);
   }
-  const add = el('div', 'book-card new', '＋ 新建书');
+  const add = el('div', 'book-card new', '＋ 新建作品');
   add.addEventListener('click', openModal);
   shelf.appendChild(add);
   renderCompanionBanner();
-  paintShelfStatus();   // 卡片先出来，状态随后补——别让开屏等最慢的那本书
+  paintShelfStatus();
 }
 
 let _companionBannerDismissed = false;
@@ -416,6 +488,7 @@ $('#writeCoverNone')?.addEventListener('click', () => openCover());
 
 function openWrite(book) {
   CUR = book; showWriteView();
+  document.body.classList.remove('in-reader');
   $('#writeTitle').textContent = '《' + book.title + '》';
   renderHeadCover(book);
   $('#writeModel').value = book.model || STATE.config.defaultModel;
@@ -4669,13 +4742,135 @@ function mdToHtml(md) {
   }
   return html;
 }
-function chapterToHtml(txt) { return String(txt || '').split(/\n\s*\n|\n/).filter(p => p.trim()).map(p => '<p>' + esc(p) + '</p>').join('') || '<div class="rd-empty">（空）</div>'; }
+let RD_FLAT_CHAPS = []; // 扁平化全书章节列表 [{rel, num, name, vol, chars, kb}]
+let RD_TREE = null;
 
-async function openReader(book) {
-  RD_BOOK = book; RD_REL = null; RD_RAW = '';
+function loadReaderPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem('ns_reader_prefs') || '{}') || {};
+  } catch { return {}; }
+}
+function saveReaderPrefs(patch) {
+  try {
+    const cur = { ...loadReaderPrefs(), ...patch };
+    localStorage.setItem('ns_reader_prefs', JSON.stringify(cur));
+    applyReaderPrefs(cur);
+  } catch {}
+}
+function applyReaderPrefs(prefs = loadReaderPrefs()) {
+  const viewRead = $('#view-read');
+  const main = $('#rdMain') || document.querySelector('#view-read .rd-main');
+  const content = $('#rdContent');
+  if (!main) return;
+  const theme = prefs.theme || 'sepia';
+  const font = prefs.font || 'sans';
+  const size = Math.min(30, Math.max(13, Number(prefs.size) || 19));
+  const width = prefs.width || 'full';
+  if (viewRead) viewRead.dataset.theme = theme;
+  main.dataset.theme = theme;
+  main.dataset.font = font;
+  main.dataset.width = width;
+  if (content) content.style.setProperty('--rd-font-size', size + 'px');
+  const lbl = $('#rdFontSizeLabel'); if (lbl) lbl.textContent = size + 'px';
+  const fontNames = { sans: '雅黑', kaiti: '楷书', serif: '宋刻' };
+  const fBtn = $('#rdFontBtn'); if (fBtn) fBtn.textContent = '字体：' + (fontNames[font] || '雅黑');
+  document.querySelectorAll('.rd-theme-pill').forEach(b => b.classList.toggle('active', b.dataset.rdTheme === theme));
+  document.querySelectorAll('.rd-layout-pill[data-rd-width]').forEach(b => b.classList.toggle('active', b.dataset.rdWidth === width));
+}
+
+function getBookReadMemory(slug) {
+  try { return JSON.parse(localStorage.getItem('ns_read_mem_' + slug) || '{}') || {}; } catch { return {}; }
+}
+function setBookReadMemory(slug, patch) {
+  if (!slug) return;
+  try {
+    const cur = { ...getBookReadMemory(slug), ...patch, t: Date.now() };
+    localStorage.setItem('ns_read_mem_' + slug, JSON.stringify(cur));
+  } catch {}
+}
+
+function chapterToHtml(txt, rel = RD_REL) {
+  const raw = String(txt || '').trim();
+  if (!raw) return '<div class="rd-empty">（空）</div>';
+  const paras = raw.split(/\n\s*\n|\n/).map(p => p.trim()).filter(Boolean);
+  const chMeta = RD_FLAT_CHAPS.find(c => c.rel === rel);
+  let titleText = '';
+  let volText = '';
+  if (chMeta) {
+    titleText = (chMeta.num ? `第 ${chMeta.num} 章 ` : '') + (chMeta.name || '');
+    volText = chMeta.vol || '';
+  } else if (rel && /^chapters\//.test(rel)) {
+    const parts = rel.split('/');
+    volText = parts[1] || '';
+    const base = (parts[2] || '').replace(/\.txt$/i, '');
+    const m = base.match(/^(\d+)[_\-\s]*(.*)$/);
+    titleText = m ? `第 ${parseInt(m[1], 10)} 章 ${m[2]}` : base;
+  }
+  // 如果正文第一段刚好重复了章节标题，剥掉以免出现两次标题
+  if (paras.length > 1 && /^第\s*[0-9零一二三四五六七八九十百千万]+\s*章/.test(paras[0]) && paras[0].length < 42) {
+    if (!titleText) titleText = paras[0];
+    paras.shift();
+  }
+  const charCount = raw.replace(/\s+/g, '').length;
+  const readMins = Math.max(1, Math.round(charCount / 450));
+  const idx = RD_FLAT_CHAPS.findIndex(c => c.rel === rel);
+  const prevCh = idx > 0 ? RD_FLAT_CHAPS[idx - 1] : null;
+  const nextCh = (idx >= 0 && idx < RD_FLAT_CHAPS.length - 1) ? RD_FLAT_CHAPS[idx + 1] : null;
+
+  let headerHtml = '';
+  if (titleText) {
+    headerHtml = `<header class="rd-chap-head">`
+      + `<h1 class="rd-chap-title">${esc(titleText)}</h1>`
+      + `<div class="rd-chap-meta">`
+      + (volText ? `<span>📚 ${esc(volText)}</span>` : '')
+      + `<span>🖋️ ${charCount.toLocaleString()} 字</span>`
+      + `<span>⏱️ 约 ${readMins} 分钟</span>`
+      + (RD_FLAT_CHAPS.length ? `<span>📍 ${idx + 1} / ${RD_FLAT_CHAPS.length} 章</span>` : '')
+      + `</div></header>`;
+  }
+
+  const bodyHtml = paras.map(p => {
+    const isDlg = /^[“"「『]/.test(p);
+    return `<p class="${isDlg ? 'rd-dlg' : ''}">${esc(p)}</p>`;
+  }).join('');
+
+  let footHtml = '';
+  if (idx >= 0) {
+    const prevLbl = prevCh ? `← 上一章：第${prevCh.num || ''}章 ${prevCh.name}` : '已是第一章';
+    const nextLbl = nextCh ? `下一章：第${nextCh.num || ''}章 ${nextCh.name} →` : '已是最新章';
+    footHtml = `<footer class="rd-chap-foot">`
+      + `<button type="button" class="rd-turn-btn" data-turn-rel="${prevCh ? esc(prevCh.rel) : ''}" ${prevCh ? '' : 'disabled'}>${esc(prevLbl)}</button>`
+      + `<button type="button" class="rd-turn-btn rd-turn-toc" data-turn-toc="1">📑 目录</button>`
+      + `<button type="button" class="rd-turn-btn primary" data-turn-rel="${nextCh ? esc(nextCh.rel) : ''}" ${nextCh ? '' : 'disabled'}>${esc(nextLbl)}</button>`
+      + `</footer>`;
+  }
+
+  return headerHtml + bodyHtml + footHtml;
+}
+
+function updateChapterTurnButtons() {
+  const idx = RD_FLAT_CHAPS.findIndex(c => c.rel === RD_REL);
+  const prevCh = idx > 0 ? RD_FLAT_CHAPS[idx - 1] : null;
+  const nextCh = (idx >= 0 && idx < RD_FLAT_CHAPS.length - 1) ? RD_FLAT_CHAPS[idx + 1] : null;
+  const prevBtn = $('#rdPrevChap');
+  const nextBtn = $('#rdNextChap');
+  if (prevBtn) {
+    prevBtn.disabled = !prevCh;
+    prevBtn.title = prevCh ? `上一章：第${prevCh.num}章 ${prevCh.name} (快捷键 ←)` : '已是第一章';
+  }
+  if (nextBtn) {
+    nextBtn.disabled = !nextCh;
+    nextBtn.title = nextCh ? `下一章：第${nextCh.num}章 ${nextCh.name} (快捷键 →)` : '已是最新章';
+  }
+}
+
+async function openReader(book, { autoLoad = true } = {}) {
+  RD_BOOK = book; RD_REL = null; RD_RAW = ''; RD_FLAT_CHAPS = []; RD_TREE = null;
   document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   $('#view-read').classList.remove('hidden');
+  document.body.classList.add('in-reader');
+  applyReaderPrefs();
   $('#rdTitle').textContent = '《' + book.title + '》';
   $('#rdFileName').textContent = '加载中…'; $('#rdContent').innerHTML = '<div class="rd-empty">加载中…</div>'; $('#rdNav').innerHTML = '';
   exitEdit(); $('#rdEdit').classList.add('hidden');
@@ -4684,37 +4879,110 @@ async function openReader(book) {
   $('#rdDelete') && $('#rdDelete').classList.add('hidden');
   $('#rdDelReview') && $('#rdDelReview').classList.add('hidden');
   $('#rdDelReviewAll') && $('#rdDelReviewAll').classList.add('hidden');
+  updateChapterTurnButtons();
   try {
     const t = await api('/api/book/files?book=' + encodeURIComponent(book.slug));
+    RD_TREE = t;
+    RD_FLAT_CHAPS = [];
+    for (const v of (t.volumes || [])) {
+      for (const c of (v.chapters || [])) {
+        RD_FLAT_CHAPS.push({ ...c, vol: v.vol });
+      }
+    }
     renderReaderNav(t);
     const pg = t.progress || {};
     $('#rdProgress').textContent = `${pg.status || '连载中'} · 卷${pg.vol || '?'}${pg.totalVol ? '/' + pg.totalVol : ''} · ${pg.chapters || 0}${pg.target ? '/' + pg.target : ''}章${pg.pct ? ' · ' + pg.pct + '%' : ''} · ${pg.kb || 0}KB${pg.dupCount ? ' · ⚠️' + pg.dupCount + '处重名' : ''}`;
-    $('#rdFileName').textContent = '选择左侧任意文件阅读';
-    $('#rdContent').innerHTML = '<div class="rd-empty">📖 从左侧选 设定圣经 / 大纲 / 章节 / 审稿报告 来读</div>';
+    if (autoLoad) {
+      const mem = getBookReadMemory(book.slug);
+      const allRels = new Set([
+        ...RD_FLAT_CHAPS.map(c => c.rel),
+        ...(t.meta || []).map(m => m.rel),
+        ...(t.outlines || []).map(o => o.rel),
+        ...(t.reviews || []).map(r => r.rel),
+      ]);
+      const targetRel = (mem.rel && allRels.has(mem.rel))
+        ? mem.rel
+        : (RD_FLAT_CHAPS[0]?.rel || t.meta?.[0]?.rel || t.outlines?.[0]?.rel || null);
+      if (targetRel) {
+        await loadReaderFile(targetRel, { restoreScroll: mem.rel === targetRel ? mem.scroll : 0 });
+      } else {
+        $('#rdFileName').textContent = '选择左侧任意文件阅读';
+        $('#rdContent').innerHTML = '<div class="rd-empty">📖 从左侧选 设定圣经 / 大纲 / 章节 / 审稿报告 来读</div>';
+      }
+    }
   } catch (e) { $('#rdContent').innerHTML = '<div class="rd-empty">加载失败：' + esc(e.message) + '</div>'; }
 }
-function rdNavItem(rel, label, kb) { return `<a class="rd-item" data-rel="${esc(rel)}" title="${esc(label)}"><span class="rd-lbl">${esc(label)}</span><span class="rd-kb">${kb || 0}K</span></a>`; }
+function fmtWordBadge(chars, kb) {
+  if (chars && chars > 0) {
+    return chars >= 1000 ? (chars / 1000).toFixed(1) + 'k字' : chars + '字';
+  }
+  return (kb || 0) + 'K';
+}
+function rdNavItem(rel, label, kb, chars = 0) {
+  return `<a class="rd-item" data-rel="${esc(rel)}" title="${esc(label)}"><span class="rd-lbl">${esc(label)}</span><span class="rd-kb">${esc(fmtWordBadge(chars, kb))}</span></a>`;
+}
 function renderReaderNav(t) {
-  let h = '';
+  let h = `<div class="rd-nav-tools">`
+    + `<input type="search" class="rd-search" id="rdSearchInput" placeholder="🔍 搜章号 / 章名 / 设定…" />`
+    + `<div class="rd-quick-jumps">`
+    + (RD_FLAT_CHAPS.length ? `<span class="rd-qbtn" data-qjump="${esc(RD_FLAT_CHAPS[0].rel)}" title="跳到第一章">首章</span>` : '')
+    + (RD_FLAT_CHAPS.length > 1 ? `<span class="rd-qbtn" data-qjump="${esc(RD_FLAT_CHAPS[RD_FLAT_CHAPS.length - 1].rel)}" title="跳到最新一章">最新章(${RD_FLAT_CHAPS.length})</span>` : '')
+    + (t.meta?.length ? `<span class="rd-qbtn" data-qjump="${esc(t.meta[0].rel)}" title="查看设定圣经">圣经</span>` : '')
+    + (t.outlines?.length ? `<span class="rd-qbtn" data-qjump="${esc(t.outlines[t.outlines.length - 1].rel)}" title="查看最新分章大纲">大纲</span>` : '')
+    + `</div></div><div id="rdNavList">`;
   if (t.dups?.length) {
     h += `<div class="rd-dup"><div class="rd-dup-t">⚠️ ${t.dups.length} 个重复章名（应全书唯一）</div>` +
       t.dups.map(d => `<div class="rd-dup-row"><b>${esc(d.name)}</b>${d.files.map(f => `<a class="rd-item dup" data-rel="${esc('chapters/' + f)}">${esc(f)}</a>`).join('')}</div>`).join('') +
       '</div>';
   }
-  if (t.meta?.length) h += '<div class="rd-gtitle">设定</div>' + t.meta.map(m => rdNavItem(m.rel, m.label, m.kb)).join('');
-  if (t.outlines?.length) h += '<div class="rd-gtitle">大纲</div>' + t.outlines.map(o => rdNavItem(o.rel, o.name, o.kb)).join('');
+  if (t.meta?.length) h += '<div class="rd-gtitle">设定</div>' + t.meta.map(m => rdNavItem(m.rel, m.label, m.kb, m.chars)).join('');
+  if (t.outlines?.length) h += '<div class="rd-gtitle">大纲</div>' + t.outlines.map(o => rdNavItem(o.rel, o.name, o.kb, o.chars)).join('');
   if (t.volumes?.length) {
     h += '<div class="rd-gtitle">章节</div>';
-    for (const v of t.volumes) h += `<details class="rd-vol"${t.volumes.length <= 2 ? ' open' : ''}><summary>${esc(v.vol)} (${v.chapters.length})</summary>${v.chapters.map(c => rdNavItem(c.rel, (c.num ? '第' + c.num + '章 ' : '') + c.name, c.kb)).join('')}</details>`;
+    for (const v of t.volumes) h += `<details class="rd-vol"${t.volumes.length <= 3 ? ' open' : ''}><summary>${esc(v.vol)} (${v.chapters.length})</summary>${v.chapters.map(c => rdNavItem(c.rel, (c.num ? '第' + c.num + '章 ' : '') + c.name, c.kb, c.chars)).join('')}</details>`;
   }
-  if (t.reviews?.length) h += '<div class="rd-gtitle">审稿 / 复检</div>' + t.reviews.map(r => rdNavItem(r.rel, r.name, r.kb)).join('');
+  if (t.reviews?.length) h += '<div class="rd-gtitle">审稿 / 复检</div>' + t.reviews.map(r => rdNavItem(r.rel, r.name, r.kb, r.chars)).join('');
+  h += '</div>';
   $('#rdNav').innerHTML = h || '<div class="rd-empty">（暂无内容）</div>';
   $('#rdNav').querySelectorAll('[data-rel]').forEach(el => el.addEventListener('click', () => loadReaderFile(el.dataset.rel)));
+  $('#rdNav').querySelectorAll('[data-qjump]').forEach(el => el.addEventListener('click', () => loadReaderFile(el.dataset.qjump)));
+  const sInput = $('#rdSearchInput');
+  if (sInput) {
+    sInput.addEventListener('input', () => {
+      const q = sInput.value.trim().toLowerCase();
+      $('#rdNav').querySelectorAll('.rd-item').forEach(item => {
+        const match = !q || item.textContent.toLowerCase().includes(q) || (item.dataset.rel || '').toLowerCase().includes(q);
+        item.classList.toggle('hidden', !match);
+      });
+      if (q) {
+        $('#rdNav').querySelectorAll('details.rd-vol').forEach(d => {
+          const hasVisible = d.querySelector('.rd-item:not(.hidden)');
+          d.classList.toggle('hidden', !hasVisible);
+          if (hasVisible) d.open = true;
+        });
+      } else {
+        $('#rdNav').querySelectorAll('details.rd-vol').forEach(d => d.classList.remove('hidden'));
+      }
+    });
+  }
 }
-async function loadReaderFile(rel) {
+async function loadReaderFile(rel, { restoreScroll = 0 } = {}) {
   RD_REL = rel; exitEdit();
-  $('#rdNav').querySelectorAll('.rd-item').forEach(el => el.classList.toggle('active', el.dataset.rel === rel));
-  $('#rdFileName').textContent = rel; $('#rdContent').innerHTML = '<div class="rd-empty">加载中…</div>';
+  let activeEl = null;
+  $('#rdNav').querySelectorAll('.rd-item').forEach(el => {
+    const isAct = el.dataset.rel === rel;
+    el.classList.toggle('active', isAct);
+    if (isAct) activeEl = el;
+  });
+  if (activeEl) {
+    const parentVol = activeEl.closest('details.rd-vol');
+    if (parentVol) parentVol.open = true;
+    try { activeEl.scrollIntoView({ block: 'nearest' }); } catch {}
+  }
+  updateChapterTurnButtons();
+  const chMeta = RD_FLAT_CHAPS.find(c => c.rel === rel);
+  $('#rdFileName').textContent = chMeta ? `${chMeta.vol} · 第${chMeta.num}章 ${chMeta.name}` : rel;
+  $('#rdContent').innerHTML = '<div class="rd-empty">加载中…</div>';
   $('#rdEdit').classList.remove('hidden');
   // 只有【章节正文】能重写；设定圣经/大纲/审稿报告走「编辑」就行
   $('#rdRewrite') && $('#rdRewrite').classList.toggle('hidden', !rdIsChapter(rel));
@@ -4725,10 +4993,73 @@ async function loadReaderFile(rel) {
   try {
     const r = await api('/api/book/read?book=' + encodeURIComponent(RD_BOOK.slug) + '&rel=' + encodeURIComponent(rel));
     RD_RAW = r.content || '';
-    $('#rdContent').innerHTML = /\.md$/i.test(rel) ? mdToHtml(RD_RAW) : chapterToHtml(RD_RAW);
-    $('#rdContent').scrollTop = 0;
+    $('#rdContent').innerHTML = /\.md$/i.test(rel) ? mdToHtml(RD_RAW) : chapterToHtml(RD_RAW, rel);
+    $('#rdContent').querySelectorAll('[data-turn-rel]').forEach(btn => {
+      btn.addEventListener('click', () => { if (btn.dataset.turnRel) loadReaderFile(btn.dataset.turnRel); });
+    });
+    $('#rdContent').querySelectorAll('[data-turn-toc]').forEach(btn => {
+      btn.addEventListener('click', () => $('#reader')?.classList.toggle('nav-collapsed'));
+    });
+    const cBox = $('#rdContent');
+    if (restoreScroll && restoreScroll > 0 && cBox.scrollHeight > cBox.clientHeight) {
+      cBox.scrollTop = Math.round(restoreScroll * (cBox.scrollHeight - cBox.clientHeight));
+    } else {
+      cBox.scrollTop = 0;
+    }
+    setBookReadMemory(RD_BOOK?.slug, { rel, scroll: 0 });
+    updateReaderScrollProgress();
   } catch (e) { $('#rdContent').innerHTML = '<div class="rd-empty">读取失败：' + esc(e.message) + '</div>'; }
 }
+
+function updateReaderScrollProgress() {
+  const cBox = $('#rdContent');
+  const fill = $('#rdScrollFill');
+  if (!cBox || !fill) return;
+  const max = cBox.scrollHeight - cBox.clientHeight;
+  const ratio = max > 0 ? Math.min(1, Math.max(0, cBox.scrollTop / max)) : 1;
+  fill.style.width = Math.round(ratio * 100) + '%';
+  if (RD_BOOK && RD_REL) setBookReadMemory(RD_BOOK.slug, { rel: RD_REL, scroll: Math.round(ratio * 1000) / 1000 });
+}
+
+$('#rdContent')?.addEventListener('scroll', updateReaderScrollProgress, { passive: true });
+$('#rdPrevChap')?.addEventListener('click', () => {
+  const idx = RD_FLAT_CHAPS.findIndex(c => c.rel === RD_REL);
+  if (idx > 0) loadReaderFile(RD_FLAT_CHAPS[idx - 1].rel);
+});
+$('#rdNextChap')?.addEventListener('click', () => {
+  const idx = RD_FLAT_CHAPS.findIndex(c => c.rel === RD_REL);
+  if (idx >= 0 && idx < RD_FLAT_CHAPS.length - 1) loadReaderFile(RD_FLAT_CHAPS[idx + 1].rel);
+});
+document.querySelectorAll('.rd-theme-pill').forEach(btn => {
+  btn.addEventListener('click', () => saveReaderPrefs({ theme: btn.dataset.rdTheme }));
+});
+document.querySelectorAll('.rd-layout-pill[data-rd-width]').forEach(btn => {
+  btn.addEventListener('click', () => saveReaderPrefs({ width: btn.dataset.rdWidth }));
+});
+$('#rdFontBtn')?.addEventListener('click', () => {
+  const cur = loadReaderPrefs().font || 'sans';
+  const order = ['sans', 'kaiti', 'serif'];
+  const next = order[(order.indexOf(cur) + 1) % order.length];
+  saveReaderPrefs({ font: next });
+});
+$('#rdFontDec')?.addEventListener('click', () => {
+  const cur = Number(loadReaderPrefs().size) || 19;
+  saveReaderPrefs({ size: Math.max(13, cur - 1) });
+});
+$('#rdFontInc')?.addEventListener('click', () => {
+  const cur = Number(loadReaderPrefs().size) || 19;
+  saveReaderPrefs({ size: Math.min(30, cur + 1) });
+});
+document.addEventListener('keydown', (e) => {
+  const viewRead = $('#view-read');
+  if (!viewRead || viewRead.classList.contains('hidden')) return;
+  const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target?.isContentEditable) return;
+  if (document.querySelector('.modal:not(.hidden)')) return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); $('#rdPrevChap')?.click(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); $('#rdNextChap')?.click(); }
+  else if (e.key === 'b' || e.key === 'B') { e.preventDefault(); $('#rdNavToggle')?.click(); }
+});
 function enterEdit() {
   if (!RD_REL) return;
   $('#rdEditor').value = RD_RAW;
@@ -5108,7 +5439,7 @@ $('#crGo') && $('#crGo').addEventListener('click', async () => {
 });
 
 async function openReaderAt(book, rel) {
-  await openReader(book);
+  await openReader(book, { autoLoad: !rel });
   if (rel) { try { await loadReaderFile(rel); } catch {} }
 }
 
@@ -5909,4 +6240,570 @@ $('#authTermSend')?.addEventListener('click', () => {
 });
 $('#authTermInput')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); $('#authTermSend')?.click(); }
+});
+
+// ── Unzoo 样书 TXT 采集与写作分身训练库（Corpus & StoryAlter） ──────────────────
+let CORPUS_STATE = { root: '', items: [], alters: {}, filter: 'all', previewFile: '' };
+
+$('#btnCorpusCenter')?.addEventListener('click', () => showView('corpus'));
+$('#btnCorpusFromWrite')?.addEventListener('click', () => {
+  showView('corpus');
+  setTimeout(() => {
+    const sel = $('#cpTargetBook');
+    if (sel && CUR?.slug) sel.value = CUR.slug;
+  }, 100);
+});
+$('#cpRefreshBtn')?.addEventListener('click', () => renderCorpusView());
+
+document.querySelectorAll('#cpFilterSeg [data-cp-filter]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    CORPUS_STATE.filter = btn.dataset.cpFilter || 'all';
+    document.querySelectorAll('#cpFilterSeg [data-cp-filter]').forEach(b => b.classList.toggle('on', b === btn));
+    renderCorpusList();
+  });
+});
+
+async function renderCorpusView() {
+  try {
+    const r = await api('/api/corpus/list');
+    CORPUS_STATE.root = r.root || '';
+    CORPUS_STATE.items = r.items || [];
+    CORPUS_STATE.alters = r.alters || {};
+    const badge = $('#cpRootBadge');
+    if (badge && CORPUS_STATE.root) badge.textContent = CORPUS_STATE.root;
+
+    const sel = $('#cpTargetBook');
+    if (sel) {
+      const prev = sel.value || (CUR && CUR.slug) || '';
+      sel.innerHTML = (STATE.books || []).map(b =>
+        `<option value="${esc(b.slug)}">《${esc(b.title)}》(${b.stats?.chapters || 0}章)</option>`
+      ).join('');
+      if (prev && (STATE.books || []).some(b => b.slug === prev)) sel.value = prev;
+    }
+    if (r.service) updateCorpusServiceUI(r.service);
+    renderCorpusList();
+    renderGlobalAltersGrid();
+  } catch (e) {
+    toast('加载语料库失败：' + e.message);
+  }
+}
+
+let CORPUS_SVC_TIMER = null;
+
+function updateCorpusServiceUI(svc) {
+  const badge = $('#cpSvcBadge');
+  const wrap = $('#cpSvcProgressWrap');
+  const stopBtn = $('#cpBtnStopSvc');
+  const startBtn = $('#cpBtnStartSvc');
+  if (!svc) return;
+
+  if (badge) {
+    badge.textContent = svc.running ? `🟢 正在百度采集中 (${svc.completed}/${svc.total})` : (svc.total > 0 ? `✅ 上轮已采集 ${svc.downloaded?.length || 0} 本` : '服务空闲');
+  }
+  if (stopBtn) stopBtn.classList.toggle('hidden', !svc.running);
+  if (startBtn) startBtn.disabled = !!svc.running;
+
+  if (wrap) {
+    const hasLogs = (svc.logs && svc.logs.length > 0) || svc.running;
+    wrap.classList.toggle('hidden', !hasLogs);
+    if (hasLogs) {
+      $('#cpSvcTaskText').textContent = svc.running ? (svc.currentTask || '正在通过 Unzoo 百度搜集样书…') : `采集完成（本次入库 ${svc.downloaded?.length || 0} 本 TXT 样书）`;
+      $('#cpSvcCountText').textContent = `${svc.completed || 0} / ${svc.total || 0}`;
+      const pct = svc.total ? Math.min(100, Math.round((svc.completed / svc.total) * 100)) : 0;
+      $('#cpSvcBarFill').style.width = pct + '%';
+      const logBox = $('#cpSvcLogBox');
+      if (logBox && Array.isArray(svc.logs)) {
+        logBox.textContent = svc.logs.slice(-25).map(l => `[${l.time}] ${l.msg}`).join('\n');
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+    }
+  }
+
+  if (svc.running && !CORPUS_SVC_TIMER) {
+    CORPUS_SVC_TIMER = setInterval(async () => {
+      try {
+        const sr = await api('/api/corpus/service-status');
+        if (sr.items) {
+          CORPUS_STATE.items = sr.items;
+          renderCorpusList();
+        }
+        if (sr.service) {
+          updateCorpusServiceUI(sr.service);
+          if (!sr.service.running) {
+            clearInterval(CORPUS_SVC_TIMER);
+            CORPUS_SVC_TIMER = null;
+            toast(`🎉 自动样书采集服务已完成：新增 ${sr.service.downloaded?.length || 0} 本 TXT 样书！`);
+          }
+        }
+      } catch {}
+    }, 2000);
+  }
+}
+
+document.querySelectorAll('#cpGenrePackBtns [data-cp-pack]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const pack = btn.dataset.cpPack;
+    const chaptersPerBook = Number($('#cpSvcChaps')?.value || 6);
+    try {
+      const body = pack === 'ALL'
+        ? { genres: [], booksPerQuery: 1, chaptersPerBook }
+        : { genres: [pack], booksPerQuery: 3, chaptersPerBook };
+      const r = await api('/api/corpus/service-start', 'POST', body);
+      updateCorpusServiceUI(r.status);
+      toast(`🚀 已启动【${pack === 'ALL' ? '全题材代表作' : pack}】百度自动寻书下载服务！`);
+    } catch (e) { toast(e.message); }
+  });
+});
+
+$('#cpBtnStartSvc')?.addEventListener('click', async () => {
+  const kw = ($('#cpSvcKeywords')?.value || '').trim();
+  const chaptersPerBook = Number($('#cpSvcChaps')?.value || 6);
+  try {
+    const r = await api('/api/corpus/service-start', 'POST', {
+      keyword: kw,
+      booksPerQuery: 2,
+      chaptersPerBook,
+    });
+    updateCorpusServiceUI(r.status);
+    toast('🚀 百度自动寻书下载服务已启动！');
+  } catch (e) { toast(e.message); }
+});
+
+$('#cpBtnStopSvc')?.addEventListener('click', async () => {
+  try {
+    const r = await api('/api/corpus/service-stop', 'POST', {});
+    updateCorpusServiceUI(r.service);
+    toast('⏹ 已发送停止信号');
+  } catch (e) { toast(e.message); }
+});
+
+function renderCorpusList() {
+  const box = $('#cpList');
+  if (!box) return;
+  const all = CORPUS_STATE.items || [];
+  const appCount = all.filter(x => x.approved).length;
+  const info = $('#cpCountInfo');
+  if (info) info.textContent = `共 ${all.length} 本 TXT 样书 · 已选定 ${appCount} 本作为学习对象`;
+
+  const list = all.filter(x => {
+    if (CORPUS_STATE.filter === 'approved') return !!x.approved;
+    if (CORPUS_STATE.filter === 'pending') return !x.approved;
+    return true;
+  });
+
+  if (!list.length) {
+    box.innerHTML = `<div class="rd-empty" style="grid-column:1/-1;padding:36px">📭 当前筛选下还没有 TXT 样书语料。<br>请在上方输入小说链接或关键词通过 <b>Unzoo 浏览器</b>一键采集，或导入本地 <code>.txt</code> 小说文件！</div>`;
+    return;
+  }
+
+  box.innerHTML = list.map(item => {
+    const m = item.metrics || {};
+    const wan = m.chars >= 10000 ? (m.chars / 10000).toFixed(1) + ' 万字' : (m.chars || 0) + ' 字';
+    const isFull = !!m.isFullBook || (m.chars || 0) >= 80000;
+    const mbTag = m.sizeMb ? `${m.sizeMb} MB` : '';
+    return `
+      <div class="book-card" style="display:flex;flex-direction:column;gap:8px;padding:14px;border-color:${item.approved ? 'var(--accent)' : 'var(--line)'}">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+          <div>
+            <div style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <span>${item.approved ? '⭐' : '📦'} 《${esc(item.title)}》</span>
+              ${isFull ? `<span class="badge" style="background:rgba(31,209,178,.15);color:#1fd1b2">全本TXT${mbTag ? ' · ' + mbTag : ''}</span>` : ''}
+              ${item.genre ? `<span class="badge">${esc(item.genre)}</span>` : ''}
+            </div>
+            <div class="dim-note" style="font-size:11px;margin-top:2px">文件：<code>${esc(item.file)}</code> · 来源：${esc((item.sourceUrl || '本地').slice(0, 48))}</div>
+          </div>
+          <button class="btn tiny ${item.approved ? 'primary' : ''}" data-cp-approve="${esc(item.file)}" title="由你决定是否将这本小说列入风格学习对象">
+            ${item.approved ? '⭐ 已选为学习对象' : '☆ 选为学习对象'}
+          </button>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:11px">
+          <span class="badge">总字数 ${wan}</span>
+          <span class="badge">约 ${m.chapterCount || 1} 章</span>
+          <span class="badge" title="平均每句汉字数">均句长 ${m.meanSent || '-'} 字</span>
+          <span class="badge" title="平均每段汉字数">段长 ${m.avgPara || '-'} 字/段</span>
+          <span class="badge" title="含对白的段落占比">对话率 ${Math.round((m.dlgRatio || 0) * 100)}%</span>
+        </div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.55;background:rgba(127,127,127,.06);padding:8px 10px;border-radius:6px;max-height:66px;overflow:hidden">
+          ${esc(item.preview || '')}…
+        </div>
+        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:auto;padding-top:4px;flex-wrap:wrap">
+          <button class="btn tiny ghost" data-cp-preview="${esc(item.file)}">📖 审阅样章</button>
+          <button class="btn tiny primary" data-cp-apply="${esc(item.file)}" title="将这本全本 TXT 的精华样章挂入目标作品的 style_refs/，并自动提炼绑定【三维写作分身】">🎯 让目标书学习此风格+分身</button>
+          <button class="btn tiny ghost danger" data-cp-del="${esc(item.file)}" title="从语料库删除此 TXT">🗑️</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  box.querySelectorAll('[data-cp-approve]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        const r = await api('/api/corpus/approve', 'POST', { file: btn.dataset.cpApprove });
+        CORPUS_STATE.items = r.items || [];
+        renderCorpusList();
+        toast(r.item?.approved ? `⭐ 已将《${r.item.title}》选定为风格学习对象` : '已取消选定');
+      } catch (e) { toast(e.message); }
+    });
+  });
+
+  box.querySelectorAll('[data-cp-preview]').forEach(btn => {
+    btn.addEventListener('click', () => openCorpusPreview(btn.dataset.cpPreview));
+  });
+
+  box.querySelectorAll('[data-cp-apply]').forEach(btn => {
+    btn.addEventListener('click', () => applyCorpusItemToTarget(btn.dataset.cpApply, btn));
+  });
+
+  box.querySelectorAll('[data-cp-del]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const f = btn.dataset.cpDel;
+      if (!confirm(`确定从语料库删除 ${f} 吗？`)) return;
+      try {
+        const r = await api('/api/corpus/delete', 'POST', { file: f });
+        CORPUS_STATE.items = r.items || [];
+        renderCorpusList();
+        toast('已删除语料 ' + f);
+      } catch (e) { toast(e.message); }
+    });
+  });
+}
+
+function renderGlobalAltersGrid() {
+  const box = $('#cpGlobalAlters');
+  if (!box) return;
+  const entries = Object.values(CORPUS_STATE.alters || {});
+  if (!entries.length) {
+    box.innerHTML = `<div class="rd-empty">暂无分身</div>`;
+    return;
+  }
+  box.innerHTML = entries.map(a => `
+    <div style="padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg-elev);display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <div style="font-weight:700;font-size:14px">🎭 ${esc(a.name)}</div>
+        <span class="badge">${a.isCustom ? '样书提炼分身' : '内置流派分身'}</span>
+      </div>
+      <div style="font-size:12px;line-height:1.5;color:var(--muted)">
+        <div><b style="color:#1fd1b2">灵魂：</b>${esc(a.soul?.coreValues || '-')}（${esc(a.soul?.emotionalTone || '-')}）</div>
+        <div><b style="color:#7d8bff">大脑：</b>${esc(a.brain?.conflictPattern || a.brain?.structurePreference || '-')}</div>
+        <div><b style="color:#f59e0b">躯体：</b>${esc(a.body?.proseStyle || '-')}</div>
+      </div>
+      <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
+        <button class="btn tiny primary" data-al-bind-target="${esc(a.id)}">🔗 绑定到上方目标作品</button>
+        ${a.isCustom ? `<button class="btn tiny ghost danger" data-al-del-global="${esc(a.id)}">🗑️</button>` : ''}
+      </div>
+    </div>
+  `).join('');
+
+  box.querySelectorAll('[data-al-bind-target]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const targetSlug = $('#cpTargetBook')?.value || (CUR && CUR.slug);
+      if (!targetSlug) return toast('请先选择目标作品');
+      try {
+        const r = await api('/api/book/alter', 'POST', { book: targetSlug, presetId: btn.dataset.alBindTarget });
+        toast(`🎭 已将分身【${r.alter?.name}】绑定到目标作品！`);
+      } catch (e) { toast(e.message); }
+    });
+  });
+
+  box.querySelectorAll('[data-al-del-global]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        const r = await api('/api/alter/global', 'POST', { action: 'delete', id: btn.dataset.alDelGlobal });
+        CORPUS_STATE.alters = r.presets || {};
+        renderGlobalAltersGrid();
+        toast('已移除自定义分身');
+      } catch (e) { toast(e.message); }
+    });
+  });
+}
+
+async function runUnzooCorpusGrab(mode, triggerBtn) {
+  const val = ($('#cpUrlOrKw')?.value || '').trim();
+  const title = ($('#cpCustomTitle')?.value || '').trim();
+  const st = $('#cpGrabStatus');
+  if (mode === 'url' && !/^https?:\/\//i.test(val)) {
+    return toast('按链接抓取请填入以 http:// 或 https:// 开头的小说下载页或 .txt 直链 URL');
+  }
+  if (mode === 'search' && !val) {
+    return toast('请输入要搜索下载的全本小说书名');
+  }
+  if (triggerBtn) triggerBtn.disabled = true;
+  if (st) st.textContent = mode === 'tabs'
+    ? '⏳ 正在从 Unzoo 已打开的小说下载标签页提取全本 TXT…'
+    : `⏳ 正在驱动 Unzoo 前往全本 TXT 下载站检索并直链拉取《${val || '当前页'}》整本完结 TXT（数百万字，约需 10–30 秒）…`;
+  try {
+    const r = await api('/api/corpus/download-unzoo', 'POST', {
+      mode,
+      url: val,
+      keyword: val,
+      title,
+      maxBooks: 1,
+    });
+    CORPUS_STATE.items = r.items || [];
+    renderCorpusList();
+    const names = (r.downloaded || []).map(d => {
+      const m = d.metrics || {};
+      const wan = m.chars >= 10000 ? (m.chars / 10000).toFixed(1) + '万字' : (m.chars || 0) + '字';
+      const mb = m.sizeMb ? `${m.sizeMb}MB / ` : '';
+      return `《${d.title}》(${mb}${wan})`;
+    }).join('、');
+    if (st) st.textContent = `✅ 全本 TXT 下载完成：${names}。请在下方列表审阅后决定是否选为学习对象！`;
+    toast('📥 全本 TXT 下载成功：' + names);
+  } catch (e) {
+    if (st) st.textContent = '❌ 采集失败：' + e.message;
+    toast('采集失败：' + e.message);
+  } finally {
+    if (triggerBtn) triggerBtn.disabled = false;
+  }
+}
+
+$('#cpBtnGrabUrl')?.addEventListener('click', (e) => runUnzooCorpusGrab('url', e.currentTarget));
+$('#cpBtnSearch')?.addEventListener('click', (e) => runUnzooCorpusGrab('search', e.currentTarget));
+$('#cpBtnGrabTabs')?.addEventListener('click', (e) => runUnzooCorpusGrab('tabs', e.currentTarget));
+
+$('#cpBtnImportLocal')?.addEventListener('click', async () => {
+  const inp = $('#cpLocalFile');
+  const files = inp?.files;
+  if (!files || !files.length) return toast('请先选择本地 .txt 小说文件');
+  const genre = ($('#cpLocalGenre')?.value || '').trim();
+  let count = 0;
+  for (const f of files) {
+    const content = await f.text();
+    const title = f.name.replace(/\.(txt|md)$/i, '');
+    await api('/api/corpus/import', 'POST', { title, genre, content, sourceUrl: '本地TXT导入' });
+    count++;
+  }
+  inp.value = '';
+  await renderCorpusView();
+  toast(`✅ 已成功导入 ${count} 本本地 TXT 样书到语料库`);
+});
+
+async function openCorpusPreview(file) {
+  try {
+    const r = await api('/api/corpus/read?file=' + encodeURIComponent(file));
+    const item = (CORPUS_STATE.items || []).find(x => x.file === file) || { title: file };
+    CORPUS_STATE.previewFile = file;
+    $('#cppTitle').textContent = `📖 《${item.title}》 (${file})`;
+    const m = item.metrics || {};
+    $('#cppMeta').textContent = `总字数：${m.chars || r.totalLength} 字 ｜ 约 ${m.chapterCount || 1} 章 ｜ 均句长：${m.meanSent || '-'} 字 ｜ 段长：${m.avgPara || '-'} 字/段 ｜ 对话率：${Math.round((m.dlgRatio || 0) * 100)}%`;
+    $('#cppContent').textContent = r.content || '';
+    const btnApp = $('#cppBtnToggleApprove');
+    if (btnApp) btnApp.textContent = item.approved ? '⭐ 已选为学习对象（点击取消）' : '☆ 选定为风格学习对象';
+    $('#corpusPreviewModal')?.classList.remove('hidden');
+  } catch (e) { toast(e.message); }
+}
+
+$('#cppClose')?.addEventListener('click', () => $('#corpusPreviewModal')?.classList.add('hidden'));
+$('#cppBtnClose')?.addEventListener('click', () => $('#corpusPreviewModal')?.classList.add('hidden'));
+$('#cppBtnToggleApprove')?.addEventListener('click', async () => {
+  if (!CORPUS_STATE.previewFile) return;
+  try {
+    const r = await api('/api/corpus/approve', 'POST', { file: CORPUS_STATE.previewFile });
+    CORPUS_STATE.items = r.items || [];
+    renderCorpusList();
+    $('#cppBtnToggleApprove').textContent = r.item?.approved ? '⭐ 已选为学习对象（点击取消）' : '☆ 选定为风格学习对象';
+    toast(r.item?.approved ? '⭐ 已标记为学习对象' : '已取消标记');
+  } catch (e) { toast(e.message); }
+});
+$('#cppBtnApply')?.addEventListener('click', async (e) => {
+  if (!CORPUS_STATE.previewFile) return;
+  await applyCorpusItemToTarget(CORPUS_STATE.previewFile, e.currentTarget);
+  $('#corpusPreviewModal')?.classList.add('hidden');
+});
+
+async function applyCorpusItemToTarget(file, btn) {
+  const targetSlug = $('#cpTargetBook')?.value || (CUR && CUR.slug);
+  if (!targetSlug) return toast('请先在右上方选择要应用到的目标作品');
+  const origText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 正在挂范本并提炼写作分身…'; }
+  try {
+    const r = await api('/api/corpus/apply', 'POST', {
+      file,
+      book: targetSlug,
+      extractCard: true,
+      extractAlter: true,
+    });
+    CORPUS_STATE.items = r.items || CORPUS_STATE.items;
+    CORPUS_STATE.alters = r.alters || CORPUS_STATE.alters;
+    renderCorpusList();
+    renderGlobalAltersGrid();
+    const alterName = r.alterPersona?.name ? ` + 写作分身【${r.alterPersona.name}】` : '';
+    toast(`✅ 已将《${r.corpusTitle}》设为文风范本${alterName}！`);
+  } catch (e) {
+    toast('学习应用失败：' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+// ── 写作分身（StoryAlter Modal）绑定与三维编辑 ──────────────────────────────
+let ALTER_MODAL_PRESETS = {};
+
+async function openAlterModal() {
+  if (!CUR) return toast('请先进入一本书的工作台');
+  $('#alBookTitle').textContent = `《${CUR.title}》`;
+  $('#alErr').textContent = '';
+  $('#alExtractStatus').textContent = '';
+  $('#alterModal')?.classList.remove('hidden');
+  try {
+    const r = await api('/api/book/alter?book=' + encodeURIComponent(CUR.slug));
+    ALTER_MODAL_PRESETS = r.presets || {};
+    const sel = $('#alPresetSelect');
+    if (sel) {
+      sel.innerHTML = Object.values(ALTER_MODAL_PRESETS).map(p =>
+        `<option value="${esc(p.id)}">${p.isCustom ? '⭐ ' : '🎭 '}${esc(p.name)}${p.sourceBook ? `（源自《${esc(p.sourceBook)}》）` : ''}</option>`
+      ).join('');
+    }
+    const curAlter = r.alter || Object.values(ALTER_MODAL_PRESETS)[0] || {};
+    if (r.alter?.id && sel && ALTER_MODAL_PRESETS[r.alter.id]) sel.value = r.alter.id;
+    fillAlterForm(curAlter, !!r.alter);
+  } catch (e) {
+    $('#alErr').textContent = e.message;
+  }
+}
+
+function fillAlterForm(a, isBound = true) {
+  const soul = a?.soul || {};
+  const brain = a?.brain || {};
+  const body = a?.body || {};
+  const exp = a?.experience || {};
+  $('#alName').value = a?.name || '';
+  $('#alThemes').value = Array.isArray(soul.themes) ? soul.themes.join('、') : (soul.themes || '');
+  $('#alSoulValues').value = soul.coreValues || '';
+  $('#alSoulTone').value = soul.emotionalTone || '';
+  $('#alBrainStruct').value = brain.structurePreference || '';
+  $('#alBrainConflict').value = brain.conflictPattern || '';
+  $('#alBrainPayoff').value = brain.satisfactionDesign || '';
+  $('#alBodyProse').value = body.proseStyle || '';
+  $('#alBodyDialogue').value = body.dialogueHabit || '';
+  $('#alBodyDesc').value = body.descriptionPreference || '';
+
+  const statsEl = $('#alExpStats');
+  if (statsEl) {
+    statsEl.textContent = isBound
+      ? `已绑定 · 累计实战 ${exp.totalChapters || 0} 章 · ${exp.totalWords || 0} 字`
+      : '尚未绑定分身（点右下角保存即绑定）';
+  }
+  const rulesBox = $('#alRulesList');
+  if (rulesBox) {
+    const rules = exp.learnedRules || [];
+    rulesBox.innerHTML = rules.length
+      ? rules.map(r => `<div style="padding:3px 0">· ${esc(r)}</div>`).join('')
+      : '（暂无额外习得经验，可在下方随时补充）';
+  }
+}
+
+$('#btnAlter')?.addEventListener('click', openAlterModal);
+$('#alClose')?.addEventListener('click', () => $('#alterModal')?.classList.add('hidden'));
+$('#alCancel')?.addEventListener('click', () => $('#alterModal')?.classList.add('hidden'));
+
+$('#alBtnLoadPreset')?.addEventListener('click', () => {
+  const id = $('#alPresetSelect')?.value;
+  if (id && ALTER_MODAL_PRESETS[id]) {
+    fillAlterForm(ALTER_MODAL_PRESETS[id], false);
+    toast(`已载入「${ALTER_MODAL_PRESETS[id].name}」，点右下角保存即绑定到本书`);
+  }
+});
+
+$('#alBtnGoCorpus')?.addEventListener('click', () => {
+  $('#alterModal')?.classList.add('hidden');
+  showView('corpus');
+  setTimeout(() => {
+    const sel = $('#cpTargetBook');
+    if (sel && CUR?.slug) sel.value = CUR.slug;
+  }, 100);
+});
+
+$('#alExtractFile')?.addEventListener('change', async (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  const txt = await f.text();
+  $('#alExtractSample').value = txt.slice(0, 6000);
+  if (!$('#alExtractTitle').value) $('#alExtractTitle').value = f.name.replace(/\.(txt|md)$/i, '');
+});
+
+$('#alBtnExtract')?.addEventListener('click', async () => {
+  const sampleText = ($('#alExtractSample')?.value || '').trim();
+  const sourceTitle = ($('#alExtractTitle')?.value || '').trim();
+  if (sampleText.length < 150) return toast('请先粘贴或选择至少 150 字的小说正文样本');
+  const btn = $('#alBtnExtract');
+  const st = $('#alExtractStatus');
+  btn.disabled = true;
+  if (st) st.textContent = '⏳ AI 正在深度拆解样书的灵魂(Soul)、大脑(Brain)与躯体(Body)…';
+  try {
+    const r = await api('/api/alter/extract', 'POST', {
+      book: CUR?.slug || '',
+      sampleText,
+      sourceTitle,
+      bindToBook: false,
+    });
+    ALTER_MODAL_PRESETS = r.presets || ALTER_MODAL_PRESETS;
+    if (r.alter) {
+      fillAlterForm(r.alter, false);
+      if (st) st.textContent = `✅ 已成功提炼分身【${r.alter.name}】并填入下方表单！确认无误后点右下角保存即可。`;
+    }
+  } catch (e) {
+    if (st) st.textContent = '❌ 提炼失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#alBtnAddRule')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const inp = $('#alNewRule');
+  const rule = (inp?.value || '').trim();
+  if (!rule) return toast('请输入要沉淀给分身的实战经验');
+  try {
+    const r = await api('/api/book/alter', 'POST', { book: CUR.slug, action: 'add_rule', rule });
+    inp.value = '';
+    if (r.alter) fillAlterForm(r.alter, true);
+    toast('✅ 已沉淀进分身实战经验并同步至写作规范');
+  } catch (e) { toast(e.message); }
+});
+
+$('#alBtnClear')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  if (!confirm(`确定解绑《${CUR.title}》的写作分身吗？`)) return;
+  try {
+    await api('/api/book/alter', 'POST', { book: CUR.slug, action: 'clear' });
+    toast('已解绑本书写作分身');
+    $('#alterModal')?.classList.add('hidden');
+  } catch (e) { toast(e.message); }
+});
+
+$('#alSave')?.addEventListener('click', async () => {
+  if (!CUR) return;
+  const name = ($('#alName')?.value || '').trim();
+  if (!name) return toast('请填写分身名称');
+  const alter = {
+    id: $('#alPresetSelect')?.value || 'custom_alter',
+    name,
+    soul: {
+      coreValues: ($('#alSoulValues')?.value || '').trim(),
+      emotionalTone: ($('#alSoulTone')?.value || '').trim(),
+      themes: ($('#alThemes')?.value || '').split(/[、，,]/).map(s => s.trim()).filter(Boolean),
+    },
+    brain: {
+      structurePreference: ($('#alBrainStruct')?.value || '').trim(),
+      conflictPattern: ($('#alBrainConflict')?.value || '').trim(),
+      satisfactionDesign: ($('#alBrainPayoff')?.value || '').trim(),
+    },
+    body: {
+      proseStyle: ($('#alBodyProse')?.value || '').trim(),
+      dialogueHabit: ($('#alBodyDialogue')?.value || '').trim(),
+      descriptionPreference: ($('#alBodyDesc')?.value || '').trim(),
+    },
+  };
+  try {
+    const r = await api('/api/book/alter', 'POST', {
+      book: CUR.slug,
+      alter,
+      saveGlobal: !!$('#alSaveGlobal')?.checked,
+    });
+    toast(`🎭 已为《${CUR.title}》绑定写作分身【${r.alter?.name}】并更新 AGENTS.md 写作规范！`);
+    $('#alterModal')?.classList.add('hidden');
+  } catch (e) {
+    $('#alErr').textContent = e.message;
+  }
 });

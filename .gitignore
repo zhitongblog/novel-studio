@@ -9,6 +9,7 @@ yarn-error.log
 
 # 运行时/本地状态（含用户配置与可能的 API Key，绝不入库）
 .studio/
+.cache-items-*.json
 *.log
 .DS_Store
 Thumbs.db

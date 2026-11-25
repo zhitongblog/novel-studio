@@ -905,7 +905,9 @@ class FanqiePublisher {
     const vols = Array.isArray(this.config?.fanqieVolumes) ? this.config.fanqieVolumes : [];
     const wantName = vols[volIndex - 1] || '';
 
-    const onList = await this.client.pageContains(['章节管理', '新建章节']);
+    const onList = typeof this.client.pageContains === 'function'
+      ? await this.client.pageContains(['章节管理', '新建章节'])
+      : false;
     if (!onList) {
       await this.client.navigate(`https://fanqienovel.com/main/writer/chapter-manage/${bookId}&${volIndex}`);
       await this.waitChapterRows({ maxMs: 15000 });
@@ -1186,6 +1188,7 @@ class FanqiePublisher {
           this.currentIndex++;
           consecutiveFailures = 0;
           this._consecutiveSkips = 0;   // 成功一章就清零：零散缺号不该攒够 5 次误停
+          this._consecutiveLocked = 0;  // 成功一章就清零锁定计数
           this._chapterTries = 0;
           this.log(`✅ 第 ${websiteChapterNum} 章编辑成功`);
 
@@ -1195,6 +1198,18 @@ class FanqiePublisher {
             this.log(`等待 ${interval} 秒...`);
             await this.client.sleep(interval * 1000);
           }
+        } else if (result.needsIntervention && /当前章节不可修改/.test(result.message || '')) {
+          // 单章被锁定不可修改：跳过该锁定章，继续尝试后续章节；连续 10 章都不可修改才认定整本书被锁而暂停
+          this.rejected = this.rejected || [];
+          this.rejected.push({ num: websiteChapterNum, reason: '当前章节不可修改' });
+          this._consecutiveLocked = (this._consecutiveLocked || 0) + 1;
+          this.log(`⏭ 第 ${websiteChapterNum} 章被番茄锁定（当前章节不可修改，连续 ${this._consecutiveLocked}/10）→ 跳过，继续下一章`);
+          if (this._consecutiveLocked >= 10) {
+            this.log(`⚠️ 连续 10 章均提示「当前章节不可修改」，该书处于整体锁定状态，暂停本书`);
+            this.pause(result.reason, result.message);
+            return;
+          }
+          this.currentIndex++;
         } else if (result.needsIntervention) {
           this.pause(result.reason, result.message);
           return;
@@ -1415,10 +1430,14 @@ class FanqiePublisher {
       if (ready) break;
     }
 
-    // Step 4: 注入内容
-    this.log('注入新内容...');
-    await this.injectContent(chapter);
-    await this.client.sleep(500);
+    // Step 4: 注入内容（仅改排期日期且不改正文时，跳过正文重注入，既提速又不消耗当日修改字数额度）
+    if (chapter.dateOnly && chapter.scheduleDate) {
+      this.log(`⚡ 仅调整排期至 ${chapter.scheduleDate}，跳过正文重填...`);
+    } else {
+      this.log('注入新内容...');
+      await this.injectContent(chapter);
+      await this.client.sleep(500);
+    }
 
     // Step 5: 点击保存按钮（编辑模式是保存，不是下一步）—— 坐标真实点击
     this.log('保存修改...');
@@ -1571,6 +1590,11 @@ class FanqiePublisher {
             await this.handleRiskDetection();
             const blk = await this.checkBlockingErrors();
             if (blk.hasError) {
+              if (/提交频繁|请稍后再试|操作频繁/.test(blk.message || '')) {
+                await this.client.evaluate(`document.querySelectorAll('.arco-message, .byte-message').forEach(function(m){ try { m.remove(); } catch(e){} })`).catch(() => {});
+                await this.client.sleep(2000);
+                continue;
+              }
               return {
                 success: false,
                 needsIntervention: true,
@@ -1579,7 +1603,7 @@ class FanqiePublisher {
               };
             }
             reclicked++;
-            if (reclicked === 1 || reclicked % 6 === 0) {
+            if (reclicked % 6 === 0) {
               if (!(await this.isConfirmBtnLoading())) {
                 this.log(`等待发布弹窗关闭(${Math.round((Date.now() - submitStart) / 1000)}s)，点击确认发布...`);
                 await this.client.clickButtonByText('确认发布');
@@ -1612,7 +1636,9 @@ class FanqiePublisher {
     let returnedToList = false;
     if (confirmedPublish) {
       for (let i = 0; i < 30; i++) {
-        const onList = await this.client.pageContains(['章节管理', '新建章节']);
+        const onList = typeof this.client.pageContains === 'function'
+      ? await this.client.pageContains(['章节管理', '新建章节'])
+      : false;
         if (onList) {
           returnedToList = true;
           break;
@@ -3137,6 +3163,7 @@ export async function publishBook({ profilePath, bookId, bookName, chapters, con
     volumeText: c.volumeText || '',
     itemId: c.itemId || '',
     ...(c.scheduleDate ? { scheduleDate: c.scheduleDate } : {}),   // 编辑时顺带改期（见 editChapter）
+    ...(c.dateOnly ? { dateOnly: true } : {}),
   }));
 
   const client = new UnzooClient(profilePath || null, onLog || null);
@@ -4757,6 +4784,7 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
         if (await readBack() === text) return true;
       } catch {}
       // ③ 最后兜底 setter 注入
+      log(`${what} 前两种真输入均未生效，退到原生 setter 注入（填得进框但番茄收不到/多半白填，请提交后复核）`, 'warn');
       await client.evaluate(`(function(){${SETTER}var el=${el};if(el){el.focus();__sv(el,${Q(text)});}return 1;})()`);
       await client.sleep(800);
       return await readBack() === text;

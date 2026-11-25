@@ -176,17 +176,17 @@ console.log('\n全部通过 ✅  编辑模式：不混批、按卷切卷、翻�
 }
 
 {
-  // 连着 5 个都找不到 = 系统性问题（卷选错/页面不对），必须停
+  // 连着 15 个都找不到 = 系统性问题（卷选错/页面不对），必须停
   const client = new FakeClient({ pages: { 1: [[1]] } });
   const pub = new FanqiePublisher(client);
   pub.onLog = () => {};
-  pub.chapters = [10, 11, 12, 13, 14, 15].map(n => ({ num: n, chapterNumber: n, title: `第${n}章`, content: 'x', mode: 'edit' }));
+  pub.chapters = Array.from({ length: 16 }, (_, i) => 10 + i).map(n => ({ num: n, chapterNumber: n, title: `第${n}章`, content: 'x', mode: 'edit' }));
   pub.editChapter = async (_ch, num) => ({ success: false, notFound: true, message: `未找到第 ${num} 章` });
   pub.config = { editMode: true, intervalSeconds: 0 };
   pub.status = 'running';
   pub.currentIndex = 0;
   await pub.editLoop();
-  assert.equal(pub.status, 'paused', '连着 5 章都找不到必须停下来等人看');
-  assert.ok((pub.skipped || []).length >= 5, `应记录跳过的章，实际 ${JSON.stringify(pub.skipped)}`);
-  console.log('✓ 连着 5 章找不到 → 判为卷/页面不对，停下');
+  assert.equal(pub.status, 'paused', '连着 15 章都找不到必须停下来等人看');
+  assert.ok((pub.skipped || []).length >= 15, `应记录跳过的章，实际 ${JSON.stringify(pub.skipped)}`);
+  console.log('✓ 连着 15 章找不到 → 判为卷/页面不对，停下');
 }

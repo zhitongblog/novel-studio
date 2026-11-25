@@ -94,9 +94,10 @@ test('跑不了无头的模型不进审稿候选', () => {
   const src = fs.readFileSync(new URL('../src/editor.mjs', import.meta.url), 'utf8');
   const seg = src.slice(src.indexOf('export function reviewerCandidates'));
   assert.ok(/canRunHeadless\(id\)/.test(seg.slice(0, 900)),
-    'agy 的凭据不落盘、每次都要人贴授权码，进候选的唯一结果是白等一轮再报个让人困惑的"输出无效"');
-  // agy 当作者时也不能被兜底塞回来
-  assert.ok(!reviewerCandidates('agy', { editorReview: {} }).includes('agy'));
+    '跑不了无头的模型进审稿候选只会白等一轮再报无效输出');
+  // 网页版/API 模型跑不了 CLI 无头，当作者时也不能被兜底塞回来
+  assert.ok(!reviewerCandidates('web-qwen', { editorReview: {} }).includes('web-qwen'));
+  assert.ok(!reviewerCandidates('api-zhipu', { editorReview: {} }).includes('api-zhipu'));
 });
 
 test('审稿超时不能是 180 秒', () => {

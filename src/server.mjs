@@ -64,7 +64,8 @@ import { generateNameExperiment, readNameExperiment, updateNameExperimentManifes
 import { generateCoverViaChatGPT, grabCoverFromChatGPT, buildChatGptCoverPrompt } from './covergen_web.mjs';
 import { generateCoverViaGemini, grabCoverFromGemini } from './covergen_gemini.mjs';
 import { fetchAllBooksTraffic, fetchBookTrafficDetail, readCachedTrafficOverview, readCachedBookTraffic } from './traffic.mjs';
-import { PRESET_ALTERS, loadBookAlter, saveBookAlter, recordAlterGrowth, buildBookClonePrompt, buildPlotSimulationPrompt, applySimulatedBranchToOutline } from './alter.mjs';
+import { PRESET_ALTERS, loadBookAlter, saveBookAlter, recordAlterGrowth, buildBookClonePrompt, buildPlotSimulationPrompt, applySimulatedBranchToOutline, loadGlobalAlters, saveGlobalAlter, deleteGlobalAlter, extractAlterFromSamplePrompt, parseAlterJson } from './alter.mjs';
+import { corpusRoot, listCorpusItems, saveCorpusItem, readCorpusFile, toggleCorpusApproval, deleteCorpusItem, downloadTxtFromOpenTabs, downloadNovelByUrlViaUnzoo, searchAndDownloadNovelsViaUnzoo, applyCorpusToBook, startCorpusAutoService, stopCorpusService, getCorpusServiceStatus } from './corpus.mjs';
 import { loadCanonicalState, loadStateCommits, commitStateChange, reviewStateCommit, rollbackStateCommit, loadPayoffLedger, addPayoffItem, updatePayoffItem, scanPayoffRisks, syncQualityV2ToLedger, createSnapshot, listSnapshots, restoreSnapshot, loadRepairTasks, createRepairTask, applyRepairTask, rollbackRepairTask, getBookHealthReport } from './quality_v2.mjs';
 
 const UI_DIR = path.resolve(fileURLToPath(import.meta.url), '..', '..', 'ui');
@@ -699,12 +700,25 @@ async function api(p, req, res, u) {
     }
     // —— StoryAlter × Novel Studio 融合 GET 接口 ——
     if (p === '/api/alter/presets') {
-      return json(res, 200, { ok: true, presets: PRESET_ALTERS });
+      return json(res, 200, { ok: true, presets: loadGlobalAlters() });
     }
     if (p === '/api/book/alter') {
       const book = getBook(u.searchParams.get('book') || '');
       if (!book) return json(res, 404, { error: '找不到书' });
-      return json(res, 200, { ok: true, alter: loadBookAlter(book.dir), presets: PRESET_ALTERS });
+      return json(res, 200, { ok: true, alter: loadBookAlter(book.dir), presets: loadGlobalAlters() });
+    }
+    if (p === '/api/corpus/list') {
+      return json(res, 200, { ok: true, root: corpusRoot(), items: listCorpusItems(), alters: loadGlobalAlters(), service: getCorpusServiceStatus() });
+    }
+    if (p === '/api/corpus/service-status') {
+      return json(res, 200, { ok: true, service: getCorpusServiceStatus(), items: listCorpusItems() });
+    }
+    if (p === '/api/corpus/read') {
+      try {
+        const file = u.searchParams.get('file') || '';
+        const r = readCorpusFile(file, { maxChars: Number(u.searchParams.get('max') || 60000) });
+        return json(res, 200, { ok: true, ...r });
+      } catch (e) { return json(res, 404, { error: e.message }); }
     }
     if (p === '/api/book/quality-v2') {
       const book = getBook(u.searchParams.get('book') || '');
@@ -2628,8 +2642,146 @@ async function api(p, req, res, u) {
     if (p === '/api/book/alter') {
       try {
         const book = getBook(body.book); if (!book) return json(res, 404, { error: '找不到书' });
+        if (body.action === 'clear') {
+          try { fs.unlinkSync(path.join(book.dir, '.studio', 'alter_persona.json')); } catch {}
+          try { refreshContext(book); } catch {}
+          return json(res, 200, { ok: true, alter: null, presets: loadGlobalAlters() });
+        }
+        if (body.action === 'add_rule' && body.rule) {
+          const alter = recordAlterGrowth(book.dir, { learnedRule: String(body.rule).trim() });
+          try { refreshContext(book); } catch {}
+          return json(res, 200, { ok: true, alter, presets: loadGlobalAlters() });
+        }
         const alter = saveBookAlter(book.dir, body.alter || body.presetId);
-        return json(res, 200, { ok: true, alter });
+        if (body.saveGlobal && alter) {
+          try { saveGlobalAlter(alter); } catch {}
+        }
+        try { refreshContext(book); } catch {}
+        return json(res, 200, { ok: true, alter, presets: loadGlobalAlters() });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/alter/extract') {
+      try {
+        const sampleText = String(body.sampleText || '').trim();
+        if (sampleText.length < 150) return json(res, 400, { error: '请提供至少 150 字的样书正文用于提炼写作分身' });
+        const book = body.book ? getBook(body.book) : null;
+        const useModel = resolveGenModel(body.model || book?.model || cfg.defaultModel) || 'agy';
+        const prompt = extractAlterFromSamplePrompt({
+          sampleText,
+          sourceTitle: body.sourceTitle || '',
+          genre: body.genre || book?.genre || '',
+        });
+        const out = await runCowrite(useModel, prompt, cfg, 180000);
+        const persona = parseAlterJson(out, body.sourceTitle || '样书提炼');
+        if (!persona) return json(res, 400, { error: '模型未能解析出有效的写作分身 JSON，请重试或换个模型' });
+        const globalSaved = saveGlobalAlter(persona);
+        let bookSaved = null;
+        if (book && body.bindToBook !== false) {
+          bookSaved = saveBookAlter(book.dir, globalSaved);
+          try { refreshContext(book); } catch {}
+        }
+        return json(res, 200, { ok: true, alter: bookSaved || globalSaved, presets: loadGlobalAlters() });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/alter/global') {
+      try {
+        if (body.action === 'delete' && body.id) {
+          deleteGlobalAlter(body.id);
+          return json(res, 200, { ok: true, presets: loadGlobalAlters() });
+        }
+        const saved = saveGlobalAlter(body.alter || body);
+        return json(res, 200, { ok: true, alter: saved, presets: loadGlobalAlters() });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/corpus/import') {
+      try {
+        const item = saveCorpusItem({
+          title: body.title || '导入小说语料',
+          author: body.author || '',
+          genre: body.genre || '',
+          sourceUrl: body.sourceUrl || '本地导入 TXT',
+          content: body.content || '',
+          approved: !!body.approved,
+        });
+        return json(res, 200, { ok: true, item, items: listCorpusItems() });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/corpus/service-start') {
+      try {
+        const r = startCorpusAutoService({
+          genres: Array.isArray(body.genres) ? body.genres : (body.genre ? [body.genre] : []),
+          keywords: Array.isArray(body.keywords) ? body.keywords : (body.keyword ? String(body.keyword).split(/[、，,\n]/).map(s => s.trim()).filter(Boolean) : []),
+          booksPerQuery: Number(body.booksPerQuery || 3),
+          chaptersPerBook: Number(body.chaptersPerBook || 6),
+          profilePath: body.profilePath || '',
+        });
+        return json(res, r.ok ? 200 : 400, r);
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/corpus/service-stop') {
+      return json(res, 200, { ok: true, service: stopCorpusService() });
+    }
+    if (p === '/api/corpus/download-unzoo') {
+      try {
+        const mode = body.mode || 'url';
+        const logs = [];
+        const onLog = (e) => logs.push(e.msg);
+        let downloaded = [];
+        if (mode === 'tabs') {
+          downloaded = await downloadTxtFromOpenTabs({
+            profilePath: body.profilePath || '',
+            customTitle: body.title || '',
+            onLog,
+          });
+        } else if (mode === 'search') {
+          downloaded = await searchAndDownloadNovelsViaUnzoo({
+            keyword: body.keyword || body.url || '',
+            maxBooks: Number(body.maxBooks || 2),
+            chaptersPerBook: Number(body.maxChapters || 5),
+            profilePath: body.profilePath || '',
+            onLog,
+          });
+        } else {
+          const one = await downloadNovelByUrlViaUnzoo({
+            url: body.url || '',
+            maxChapters: Number(body.maxChapters || 8),
+            customTitle: body.title || '',
+            genre: body.genre || '',
+            profilePath: body.profilePath || '',
+            onLog,
+          });
+          downloaded = [one];
+        }
+        return json(res, 200, { ok: true, downloaded, logs, items: listCorpusItems() });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/corpus/approve') {
+      try {
+        const item = toggleCorpusApproval(body.file, body.approved);
+        return json(res, 200, { ok: true, item, items: listCorpusItems() });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/corpus/delete') {
+      try {
+        deleteCorpusItem(body.file);
+        return json(res, 200, { ok: true, items: listCorpusItems() });
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/corpus/apply') {
+      try {
+        const book = body.book ? getBook(body.book) : null;
+        const r = await applyCorpusToBook({
+          file: body.file,
+          book,
+          extractCard: body.extractCard !== false,
+          extractAlter: body.extractAlter !== false,
+          saveToGlobalAlter: true,
+          model: body.model || '',
+          cfg,
+          onLog: (e) => { if (book) pushLog(book.slug, e); },
+        });
+        if (book) { try { refreshContext(book); } catch {} }
+        return json(res, 200, { ...r, items: listCorpusItems(), alters: loadGlobalAlters() });
       } catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (p === '/api/book/canonical-state') {

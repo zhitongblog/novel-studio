@@ -8,6 +8,7 @@ import { styleVoice } from './styles.mjs';
 import { romanceVoice, ROMANCE_REDLINE } from './romance.mjs';
 import { ORAL_MARKER_SETS } from './chapgate.mjs';
 import { oralPromptSection } from './oralgate.mjs';
+import { buildAlterPromptSection } from './alter.mjs';
 
 export const SKILL_NAME = 'longform-webnovel-writer';
 
@@ -178,6 +179,8 @@ ${ROMANCE_REDLINE}
   // 开了口语密度闸的书，把要求写进规范（窗口模式只读得到这份文件）
   const oralReq = oralPromptSection(b?.standards?.oral);
   const oralGateSection = oralReq ? `\n\n${oralReq}\n` : '';
+  const alterReq = b?.dir ? buildAlterPromptSection(b.dir) : '';
+  const alterGateSection = alterReq ? `\n\n${alterReq}\n` : '';
   return `# 长篇网文写作规范（${SKILL_NAME}）
 
 > 本文件由 Novel Studio 自动生成，等同 codex 的 longform-webnovel-writer skill。
@@ -191,7 +194,7 @@ ${ROMANCE_REDLINE}
 - 卷数 / 每卷章数：${freehand ? '不预设（探索式：全书无大纲，卷目录只作归档）' : `${std.volumes || '?'} 卷 / 约 ${std.chaptersPerVolume || '?'} 章`}
 - 默认批次：每次 ${batch} 章，写完自检
 - 单章目标：${tgtLo}–${tgtHi} 字；硬下限：文件 > 4KB 且正文 > ${minChars} 字
-${styleSection}${romanceSection}${oralGateSection}
+${styleSection}${alterGateSection}${romanceSection}${oralGateSection}
 ## 核心原则
 
 - 先读本地文件再动笔：开写前必须读 ${readSources}。
@@ -452,6 +455,12 @@ ${bannedSection}## 反 AI 味 / 拟人化标准（最高优先级，逐章自检
 - 神态套句：嘴角勾起(一抹)弧度、勾唇一笑、眸光/眸子/眼底闪过、眼中精光、瞳孔一缩、心中一凛/一紧/一沉、后背发凉、冷汗涔涔、嘴角抽搐、扯了扯嘴角、挑了挑眉。
 - 转场/叙述套话：闻言、顿了顿、不置可否、意味深长(地)、不动声色、云淡风轻、深吸一口气、眼神复杂、若有所思、不为人知。
 - AI 翻译/解释腔：某种程度上、不得不说、值得一提的是、显而易见、总而言之、换句话说、与此同时、然而、不知为何、莫名(地)、一丝不易察觉的、些许、有那么一瞬间。
+- 欧化从句与破折号节制（lieflat 实测校准）：
+  · 少用欧化时间状语壳「当……时，」（如「当他推开门时，」直接写「他推开门，」或「门一推开，」）；
+  · 少用段首论文连接词「然而，」「与此同时，」「因此，」「此外，」（用具体动作、声音或「可」「偏偏」「另一头」自然转场）；
+  · 少用前置话题壳「对于……来说，」与滥用翻案腔「不是A，而是B」（除非真在纠正前文误解，否则直接正面写 B）；
+  · 破折号「——」只留给**音效拖音**（如「轰——」）、**对白被打断**或**极强烈的戏剧反转**，叙述句内部的解释说明一律用逗号或句号，全章破折号密度控制在 1.5/千字以内；
+  · **严禁为刷句长变异系数（sentCV）强塞「好家伙。」「绝了。」等两三字假碎句**——自然的人类节奏靠动作短句与描写长句的真实呼吸，绝不制造机械参差。
 - 万能文艺比喻：仿佛整个世界都安静了、空气仿佛凝固、时间仿佛静止、以及 仿佛/宛如/犹如 领起的通用意象（要用比喻就用贴合人物经验的本地化比喻）。
 - 报菜名：一口气罗列设定/规则/人物履历/地名清单——拆开，边用边给，藏进动作与对话里。
 （这些词不是绝对禁用，而是【高频出现即 AI 味】：同一章里命中两三个以上就必须改写；能用一个具体动作或物件替代的，一律替代。）

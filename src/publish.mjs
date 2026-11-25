@@ -3,7 +3,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { publishBook, getFanqieMaxChapter, getFanqieVolumes, createFanqieVolumes, renameFanqieVolume, numToCn, publishShortStoryOnFanqie } from './fanqie.mjs';
+import { publishBook, getFanqieMaxChapter, getFanqieVolumes, createFanqieVolumes, renameFanqieVolume, numToCn, publishShortStoryOnFanqie, UnzooClient } from './fanqie.mjs';
 import { setBookPublish, parseTotalWords } from './books.mjs';
 import { loadBooks } from './store.mjs';
 import { assertPlatform } from './platform.mjs';
@@ -50,14 +50,15 @@ function computeScheduleStart(latestDateStr, manualStr) {
   }
   return start;
 }
-// 是否需要走"预约排期"：每日限量 / 番茄已排到未来(需接续) / 用户手动指定了日期 / 同账号当日连载作品数已满。返回 {scheduled, start, initialDailyCount, reason}。
+// 是否需要走"预约排期"：每日限量 / 番茄已排到未来(需接续) / 用户手动指定了日期。返回 {scheduled, start, initialDailyCount, reason}。
+// ⚠️ 2026-11-20 规则修正：不再按同账号下其他书的 scheduledThrough 将新书/续更书顺延 10~20 天！
+//   ① 番茄的「更新连载模式作品数超出每日上限」限制的是同一自然日内执行发章操作的书本数，而不是未来某天有定时章到点的书本数；
+//   ② 已有未来排期的书无缝接续其 latestDateStr；无未来排期的新书/续更书直接从今天起排，彻底杜绝新书断档 20 天。
 function resolveSchedule(pc, latestDateStr, latestDateCount = 0) {
   const today = startOfDay(new Date());
   const latestFuture = !!latestDateStr && (() => { const d = new Date(String(latestDateStr).replace(' ', 'T')); return !isNaN(d.getTime()) && startOfDay(d).getTime() > today.getTime(); })();
   const isDaily = pc.chaptersPerDay && pc.chaptersPerDay !== 'max';
-  const MAX_BOOKS_PER_DAY = 6;
-  const todayFull = countProfileBooksScheduledOn(pc.profilePath, pc.bookId, fmtYMD(today)) >= MAX_BOOKS_PER_DAY;
-  if (!isDaily && !latestFuture && !pc.scheduledStartDate && !todayFull) return { scheduled: false, start: '', initialDailyCount: 0, reason: 'immediate' };
+  if (!isDaily && !latestFuture && !pc.scheduledStartDate) return { scheduled: false, start: '', initialDailyCount: 0, reason: 'immediate' };
   const start = computeScheduleStart(latestDateStr, pc.scheduledStartDate);
   let initialDailyCount = 0;
   let reason = latestFuture ? `接续番茄已排期到 ${latestDateStr}` : (pc.scheduledStartDate ? '按设置' : '从今天起');
@@ -72,18 +73,6 @@ function resolveSchedule(pc, latestDateStr, latestDateCount = 0) {
         initialDailyCount = latestDateCount;
         reason = `接续番茄已排期到 ${latestDateStr}（当日已排 ${latestDateCount}/${limit} 章）`;
       }
-    }
-  }
-  // 若目标起始日同账号下已有 ≥6 本其他连载书排期，且用户未强行锁定更早日期，则自动顺延至首个未满额日期
-  if (!pc.scheduledStartDate) {
-    let guard = 0;
-    while (guard < 60 && countProfileBooksScheduledOn(pc.profilePath, pc.bookId, fmtYMD(start)) >= MAX_BOOKS_PER_DAY) {
-      start.setDate(start.getDate() + 1);
-      initialDailyCount = 0;
-      guard++;
-    }
-    if (guard > 0) {
-      reason = `同账号前序日期连载作品排期已满，自动错峰顺延至 ${fmtYMD(start)}`;
     }
   }
   return { scheduled: true, start: fmtYMD(start), initialDailyCount, reason };
@@ -470,12 +459,82 @@ export async function previewPublish(book, { onLog = () => {} } = {}) {
 // 重发修正：把番茄上【已存在】的 from..to 章，用本地(已清洗)正文【编辑替换】。修"发错内容"用。
 // limit>0 时只改前 N 章（先试1章再全改）。
 // dates：可选 { 章号: 'YYYY-MM-DD' }——编辑时顺带把这些已排期章改到指定发布日（修排期断档用）。
-export async function republishRange(book, { from, to, limit = 0, dates = null, onLog = () => {} } = {}) {
+export async function republishRange(book, { from, to, limit = 0, dates = null, dateOnly = false, onLog = () => {} } = {}) {
   const pc = book.publish || {};
   if (!pc.profilePath) throw new Error('未配置番茄账号(Unzoo profilePath)');
   if (!pc.bookId) throw new Error('未配置番茄 bookId');
+  // ⚡ 列表页直接改定时时间（POST /api/author/article/modify_timer/v0/）：不进编辑器、不占每日5本连载作品更新名额、不耗修改字数额度
+  if (dateOnly && dates) {
+    onLog({ level: 'act', msg: `⚡ 列表页直接修改番茄第 ${from}–${to} 章定时时间（不进编辑器、不占更新名额）…` });
+    const client = new UnzooClient(pc.profilePath, onLog);
+    await client.ensureTabId();
+    const key = '__ns_mod_timer_' + Date.now();
+    await client.evaluate(`(function(){
+      window[${JSON.stringify(key)}] = "PENDING";
+      function postForm(url, body) {
+        return new Promise((resolve) => {
+          var xhr = new XMLHttpRequest();
+          xhr.open("POST", url, true);
+          xhr.timeout = 8000;
+          xhr.setRequestHeader("Accept", "application/json, text/plain, */*");
+          xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8");
+          xhr.onload = function(){ try { resolve(JSON.parse(xhr.responseText)); } catch(e){ resolve({ code: -1 }); } };
+          xhr.onerror = xhr.ontimeout = function(){ resolve({ code: -2 }); };
+          xhr.send(body);
+        });
+      }
+      async function run() {
+        var api = "https://fanqienovel.com/api/author";
+        var cm = "aid=2503&app_name=muye_novel";
+        var bid = ${JSON.stringify(String(pc.bookId))};
+        var dateMap = ${JSON.stringify(dates)};
+        var vj = await fetch(api + "/volume/volume_list/v1?" + cm + "&book_id=" + bid, {credentials:"include"}).then(r=>r.json());
+        var vols = (vj && vj.data && (vj.data.volume_list || vj.data.list || vj.data.volumes)) || [];
+        var items = [];
+        if (vols.length > 0) {
+          var lists = await Promise.all(vols.map(v => fetch(api + "/chapter/chapter_list/v1?" + cm + "&book_id=" + bid + "&volume_id=" + v.volume_id + "&page_index=0&page_count=100&status=0", {credentials:"include"}).then(r=>r.json()).then(cj=>(cj&&cj.data&&cj.data.item_list)||[])));
+          lists.forEach(l => items.push(...l));
+        }
+        if (items.length === 0) {
+          var cj0 = await fetch(api + "/chapter/chapter_list/v1?" + cm + "&book_id=" + bid + "&page_index=0&page_count=100&status=0", {credentials:"include"}).then(r=>r.json());
+          items = (cj0 && cj0.data && cj0.data.item_list) || [];
+        }
+        items = items.filter(c => c.display_status === 10).map(c => {
+          var num = parseInt(String(c.title).replace(/^[^0-9]+/, ""), 10) || 0;
+          return { ...c, num: num };
+        }).filter(c => c.num >= ${Number(from)} && c.num <= ${Number(to)} && dateMap[c.num]).sort((a,b) => b.num - a.num);
+        var ok = 0, rejected = [];
+        var hhmm = ${JSON.stringify(String(pc.scheduledTime || '08:00').slice(0, 5))};
+        for (var c of items) {
+          var ymd = String(dateMap[c.num]).slice(0, 10);
+          var targetTs = Math.floor(Date.parse(ymd + "T" + hhmm + ":00+08:00") / 1000);
+          if (targetTs <= Math.floor(Date.now() / 1000) + 1800) {
+            targetTs = Math.floor((Date.now() + 2400 * 1000) / 1000);
+          }
+          if (Number(c.timer_time) === targetTs) { ok++; continue; }
+          var body = cm + "&book_id=" + bid + "&item_id=" + c.item_id + "&timer_type=1&timer_time=" + targetTs + "&preview_type=2&preview_content=%5B%5D";
+          var r = await postForm("/api/author/article/modify_timer/v0/?" + cm, body);
+          if (r && r.code === 0) ok++;
+          else rejected.push({ num: c.num, reason: (r && r.message) || ("code=" + (r && r.code)) });
+        }
+        window[${JSON.stringify(key)}] = JSON.stringify({ attempted: items.length, published: ok, rejected });
+      }
+      run().catch(e => { window[${JSON.stringify(key)}] = JSON.stringify({ error: e.message }); });
+    })()`);
+    for (let i = 0; i < 60; i++) {
+      await client.sleep(300);
+      const raw = await client.evaluate(`window[${JSON.stringify(key)}]`);
+      if (raw && raw !== 'PENDING') {
+        const res = JSON.parse(raw);
+        if (res.error) return { ok: false, published: 0, error: res.error };
+        onLog({ level: 'info', msg: `✅ 列表页改期完成：成功 ${res.published}/${res.attempted} 章` });
+        return { ok: res.rejected.length === 0, attempted: res.attempted, published: res.published, rejected: res.rejected, status: 'completed' };
+      }
+    }
+    return { ok: false, published: 0, error: '列表页改期超时' };
+  }
   let chs = loadPublishChapters(book).filter(c => c.num >= from && c.num <= to)
-    .map(c => ({ ...c, mode: 'edit', ...(dates && dates[c.num] ? { scheduleDate: dates[c.num] } : {}) }));
+    .map(c => ({ ...c, mode: 'edit', ...(dates && dates[c.num] ? { scheduleDate: dates[c.num] } : {}), ...(dateOnly ? { dateOnly: true } : {}) }));
   if (limit > 0) chs = chs.slice(0, limit);
   if (!chs.length) { onLog({ level: 'info', msg: `第 ${from}-${to} 章本地为空，无可重发` }); return { ok: true, edited: 0 }; }
   onLog({ level: 'act', msg: `编辑替换番茄第 ${chs[0].num}–${chs[chs.length - 1].num} 章（共 ${chs.length} 章，用清洗后正文）…` });
@@ -691,6 +750,61 @@ export async function publishToFanqie(book, { limit = 0, confirmRewrites = false
       chapters: newCh, config: baseConfig, onLog,
     });
     runs.push(newRes);
+    // ⚡ 番茄编辑页弹窗无时间滚轮时默认落到 15:00，发布后自动用 modify_timer 校准到 scheduledTime（默认 08:00）
+    if (baseConfig.scheduleMode && (newRes?.published || 0) > 0) {
+      try {
+        const hhmm = String(baseConfig.scheduledTime || '08:00').slice(0, 5);
+        const client = new UnzooClient(pc.profilePath, onLog);
+        await client.ensureTabId();
+        const key = '__ns_fix_hhmm_' + Date.now();
+        await client.evaluate(`(async function(){
+          window[${JSON.stringify(key)}] = "PENDING";
+          function postForm(url, body) {
+            return new Promise((resolve) => {
+              var xhr = new XMLHttpRequest();
+              xhr.open("POST", url, true);
+              xhr.timeout = 8000;
+              xhr.setRequestHeader("Accept", "application/json, text/plain, */*");
+              xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8");
+              xhr.onload = function(){ try { resolve(JSON.parse(xhr.responseText)); } catch(e){ resolve({ code: -1 }); } };
+              xhr.onerror = xhr.ontimeout = function(){ resolve({ code: -2 }); };
+              xhr.send(body);
+            });
+          }
+          try {
+            var api = "https://fanqienovel.com/api/author";
+            var cm = "aid=2503&app_name=muye_novel";
+            var bid = ${JSON.stringify(String(pc.bookId))};
+            var hhmm = ${JSON.stringify(hhmm)};
+            var r = await fetch(api + "/chapter/chapter_list/v1?" + cm + "&book_id=" + bid + "&page_index=0&page_count=100&status=0", {credentials:"include"}).then(x=>x.json());
+            var list = ((r && r.data && r.data.item_list) || []).filter(c => c.display_status === 10 && c.timer_time);
+            var fixed = 0;
+            for (var c of list) {
+              var d = new Date(Number(c.timer_time) * 1000 + 8 * 3600 * 1000);
+              var ymd = d.toISOString().slice(0, 10);
+              var targetTs = Math.floor(Date.parse(ymd + "T" + hhmm + ":00+08:00") / 1000);
+              if (targetTs <= Math.floor(Date.now() / 1000) + 1800) continue;
+              if (Number(c.timer_time) === targetTs) continue;
+              var body = cm + "&book_id=" + bid + "&item_id=" + c.item_id + "&timer_type=1&timer_time=" + targetTs + "&preview_type=2&preview_content=%5B%5D";
+              var mr = await postForm("/api/author/article/modify_timer/v0/?" + cm, body);
+              if (mr && mr.code === 0) fixed++;
+            }
+            window[${JSON.stringify(key)}] = JSON.stringify({ fixed });
+          } catch (e) {
+            window[${JSON.stringify(key)}] = JSON.stringify({ error: e.message });
+          }
+        })()`);
+        for (let i = 0; i < 20; i++) {
+          await client.sleep(300);
+          const raw = await client.evaluate(`window[${JSON.stringify(key)}]`);
+          if (raw && raw !== 'PENDING') {
+            const jr = JSON.parse(raw);
+            if (jr.fixed > 0) onLog({ level: 'info', msg: `⏰ 已将 ${jr.fixed} 章预约时间统一校准为早上 ${hhmm}` });
+            break;
+          }
+        }
+      } catch {}
+    }
   }
 
   if (editCh.length) {

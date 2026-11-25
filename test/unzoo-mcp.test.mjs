@@ -136,8 +136,19 @@ document.getElementById('e').addEventListener('input',e=>__ev.i.push({t:e.isTrus
 </script>`, 'utf8');
 
   let tab = null;
+  let skippedNoWindow = false;
   try {
-    tab = await createTab('file:///' + page.replace(/\\/g, '/'));
+    try {
+      tab = await createTab('file:///' + page.replace(/\\/g, '/'));
+    } catch (e) {
+      if (/no browser window/i.test(String(e?.message || e))) {
+        skippedNoWindow = true;
+        console.log('⏭  Unzoo 服务在线但未打开浏览器窗口，跳过联机验证（isTrusted 实测）');
+      } else {
+        throw e;
+      }
+    }
+    if (!skippedNoWindow) {
     assert.ok(tab, '应能新建标签页');
     await new Promise(r => setTimeout(r, 2000));
 
@@ -178,6 +189,7 @@ document.getElementById('e').addEventListener('input',e=>__ev.i.push({t:e.isTrus
 
     // browser_input_text 是标签页定向的，不需要前台——这正是它比 press_key 可靠的地方
     console.log('✓ 联机：page_click / browser_input_text 均 isTrusted=true 且落点正确');
+    }
   } finally {
     if (tab != null) { try { await mcpCall('tab_close', { tab_id: tab }); } catch {} }
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
