@@ -15,6 +15,9 @@ import {
   resolveKeyframePath, listVoiceSamples, installOfficialVoicePack, hasAnimeUpscaler,
   upscaleAnime1080p, generateEpisodeScoreAndSfx,
 } from './videorender.mjs';
+import {
+  TTS_PROVIDERS, PROVIDER_VOICES, resolveTtsCredentials, resolveActiveTtsProvider,
+} from './videotts.mjs';
 import { auditShotPromptRealism, inspectImageRealism } from './videoqa.mjs';
 import { buildEpisodeSubtitles, exportJianyingDraft } from './videopost.mjs';
 import { generateCoverBg } from './imagegen.mjs';
@@ -119,6 +122,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       ...ep,
       staleChapters: staleChapters(ep.sourceRevisions, revs),
     }));
+    const ttsCreds = resolveTtsCredentials(cfg);
     json(res, 200, {
       ok: true,
       plan: { ...plan, episodes },
@@ -129,6 +133,15 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       voicePresets: VOICE_PRESETS,
       visualStylePresets: VISUAL_STYLE_PRESETS,
       audioStylePresets: AUDIO_STYLE_PRESETS,
+      ttsProviders: TTS_PROVIDERS,
+      providerVoices: PROVIDER_VOICES,
+      ttsStatus: {
+        preferred: ttsCreds.preferred,
+        active: resolveActiveTtsProvider(cfg),
+        minimax: ttsCreds.minimax.configured,
+        dashscope: ttsCreds.dashscope.configured,
+        doubao: ttsCreds.doubao.configured,
+      },
       animeUpscalerReady: hasAnimeUpscaler(cfg),
       voiceSamples: listVoiceSamples(book, cfg),
     });
@@ -150,6 +163,8 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
     const voiceSamples = listVoiceSamples(book, cfg);
     const speaker = String(body.speaker || 'narrator').trim();
     const emotion = String(body.emotion || '').trim();
+    const ttsProvider = String(body.ttsProvider || '').trim();
+    const voiceId = String(body.voiceId || '').trim();
     const text = String(body.text || '').trim() || (speaker === 'narrator' ? '风雪夜归人，一盏孤灯照亮半条旧巷。' : '别动，听我说完这一句。');
     const sp = resolveSpeakerVoice({ speaker, emotion }, bible, cfg, voiceSamples);
     const refAudio = String(body.refAudio || sp.refAudio || '').trim();
@@ -158,7 +173,19 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
     const fileName = `_preview_${safeName}_${Date.now()}.wav`;
     const outWav = path.join(videoDir(book), 'voices', fileName);
     try {
-      const r = await synthesizeTts(cfg, { text, outWav, refAudio, voice: edgeVoice, emotion: sp.emotion });
+      const r = await synthesizeTts(cfg, {
+        text,
+        outWav,
+        refAudio,
+        voice: edgeVoice,
+        voiceId,
+        ttsVoices: sp.ttsVoices,
+        voicePreset: sp.voicePreset,
+        ttsProvider,
+        pronunciationMap: bible.pronunciationMap,
+        emotion: sp.emotion,
+        allowLocalFallback: !ttsProvider || ttsProvider === 'auto',
+      });
       const rel = `voices/${fileName}`;
       json(res, 200, {
         ok: true,
@@ -166,6 +193,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
         url: `/api/book/video/file?book=${encodeURIComponent(slug)}&rel=${encodeURIComponent(rel)}`,
         duration: r.duration,
         provider: r.provider || r.fallback || 'tts',
+        voice: r.voice || voiceId || '',
         speaker: sp.label,
         refAudio,
       });
@@ -188,6 +216,8 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       visualStyle: body.visualStyle,
       narratorVoice: body.narratorVoice,
       narratorEdgeVoice: body.narratorEdgeVoice,
+      narratorVoices: body.narratorVoices,
+      pronunciationMap: body.pronunciationMap,
       characters: body.characters,
     });
     json(res, 200, { ok: true, bible: loadBible(book) });
@@ -506,8 +536,9 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
     const useTts = body.useTts !== false;
     const burnSubtitles = body.burnSubtitles !== false;
     const trimToTts = body.trimToTts !== false;
-    const autoScore = body.autoScore !== false;
+    const autoScore = !!body.autoScore;
     const upscaleAnime = !!body.upscaleAnime;
+    const ttsProvider = String(body.ttsProvider || '').trim();
     const audioStyleId = String(body.audioStyle || 'donghua_noir').trim();
     const audioPreset = getAudioStylePreset(audioStyleId);
     let bgmFile = String(body.bgmPath || '').trim();
@@ -521,6 +552,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
         : (ep.voiceMode === 'native' ? 'native' : 'tts');
       ep.voiceMode = voiceMode;
       ep.audioStyle = audioPreset.id;
+      if (ttsProvider) ep.ttsProvider = ttsProvider;
       const bible = loadBible(book);
       const voiceSamples = listVoiceSamples(book, cfg);
       const vroot = videoDir(book);
@@ -528,7 +560,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
       fs.mkdirSync(epDir, { recursive: true });
       const shotClips = [];
       const narrationFiles = [];
-      // 先收集全集需要配音的镜头，按声音流派注入语速与场景空间混响
+      // 先收集全集需要配音的镜头，按用户所选引擎 + 声音流派注入语速与场景空间混响
       const ttsTasks = [];
       const shotPlanMeta = ep.shots.map((s) => {
         if (!s.render?.fileRel) throw new Error(`第 ${s.index} 镜还没有渲染，先全部渲染后再合成`);
@@ -542,6 +574,9 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
             outWav: path.join(epDir, 'tts', `shot-${String(s.index).padStart(2, '0')}.wav`),
             refAudio: sp.refAudio,
             voice: sp.edgeVoice,
+            ttsVoices: sp.ttsVoices,
+            voicePreset: sp.voicePreset,
+            pronunciationMap: bible.pronunciationMap,
             emotion: sp.emotion,
             tempo: sp.isCharacter ? audioPreset.voiceTempo : audioPreset.narratorTempo,
             settingType: s.settingType || '',
@@ -552,7 +587,7 @@ export async function handleVideoRoute({ p, body, cfg, res, json, getBook, pushL
         }
         return { s, sp, needTtsForShot };
       });
-      const ttsMap = ttsTasks.length ? await synthesizeTtsBatch(cfg, ttsTasks, { onLog }) : new Map();
+      const ttsMap = ttsTasks.length ? await synthesizeTtsBatch(cfg, ttsTasks, { ttsProvider: ttsProvider || ep.ttsProvider || '', onLog }) : new Map();
 
       let offsetSec = 0;
       const scoreTimeline = [];

@@ -269,10 +269,12 @@ export function loadBible(book) {
       visualStyle: b?.visualStyle || '',
       narratorVoice: b?.narratorVoice || '',
       narratorEdgeVoice: b?.narratorEdgeVoice || '',
+      narratorVoices: (b?.narratorVoices && typeof b.narratorVoices === 'object') ? b.narratorVoices : {},
+      pronunciationMap: (b?.pronunciationMap && typeof b.pronunciationMap === 'object') ? b.pronunciationMap : {},
       characters: Array.isArray(b?.characters) ? b.characters : [],
     };
   } catch {
-    return { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] };
+    return { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', narratorVoices: {}, pronunciationMap: {}, characters: [] };
   }
 }
 export function saveBible(book, bible) {
@@ -282,6 +284,8 @@ export function saveBible(book, bible) {
     visualStyle: bible?.visualStyle !== undefined ? String(bible.visualStyle || '').trim() : prev.visualStyle,
     narratorVoice: bible?.narratorVoice !== undefined ? String(bible.narratorVoice || '').trim() : prev.narratorVoice,
     narratorEdgeVoice: bible?.narratorEdgeVoice !== undefined ? String(bible.narratorEdgeVoice || '').trim() : prev.narratorEdgeVoice,
+    narratorVoices: bible?.narratorVoices !== undefined ? (bible.narratorVoices || {}) : prev.narratorVoices,
+    pronunciationMap: bible?.pronunciationMap !== undefined ? (bible.pronunciationMap || {}) : prev.pronunciationMap,
     characters: Array.isArray(bible?.characters) ? bible.characters : prev.characters,
   }, null, 1), 'utf8');
 }
@@ -403,6 +407,7 @@ export function resolveSpeakerVoice(shot, bible, cfg = {}, voiceSamples = []) {
       isCharacter: false,
       refAudio: defaultRef,
       edgeVoice: defaultEdge,
+      ttsVoices: (bible?.narratorVoices && typeof bible.narratorVoices === 'object') ? bible.narratorVoices : {},
       voicePreset: 'narrator',
       voiceDesc: 'calm cinematic Chinese male narrator voice',
       emotion,
@@ -420,6 +425,7 @@ export function resolveSpeakerVoice(shot, bible, cfg = {}, voiceSamples = []) {
     isCharacter: true,
     refAudio: str(ch?.voiceRefAudio) || str(autoSample?.path) || defaultRef,
     edgeVoice: str(ch?.edgeVoice) || preset.defaultEdge || defaultEdge,
+    ttsVoices: (ch?.ttsVoices && typeof ch.ttsVoices === 'object') ? ch.ttsVoices : {},
     voicePreset: presetId,
     voiceDesc: str(ch?.voiceDesc) || preset.defaultDesc,
     emotion,
@@ -576,6 +582,7 @@ ${ledger ? `\n【人物现状】\n${ledger.slice(0, 3000)}` : ''}
         refImageRef: old?.refImageRef || '',
         voiceRefAudio: old?.voiceRefAudio || '',
         edgeVoice: old?.edgeVoice || '',
+        ttsVoices: (old?.ttsVoices && typeof old.ttsVoices === 'object') ? old.ttsVoices : {},
         voicePreset: str(c?.voicePreset, old?.voicePreset || ''),
         voiceDesc: str(c?.voiceDesc, old?.voiceDesc || ''),
       };

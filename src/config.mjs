@@ -152,8 +152,15 @@ const DEFAULTS = {
     comfyRoot: 'C:/AI/StoryAlter/ComfyUI',
     modelRoot: 'D:/AI/models/minimax-h3',
     ttsRoot: 'D:/AI/codex-tools/index-tts',
-    ttsRefAudio: '',                 // IndexTTS 旁白参考音频（wav/mp3）；留空则走 edge-tts 神经网络语音
+    ttsRefAudio: '',                 // IndexTTS 旁白参考音频（wav/mp3）；留空则走音色库或云端配音
     edgeVoice: 'zh-CN-YunxiNeural',  // 默认 edge-tts 中文旁白音色
+    // 多引擎商用 + 本地配音配置：用户可自由选 minimax / dashscope / doubao / local 或 auto 自动择优
+    tts: {
+      provider: 'auto',              // 'auto' | 'minimax' | 'dashscope' | 'doubao' | 'local'
+      minimax: { apiKey: '', groupId: '', model: 'speech-02-hd', baseUrl: 'https://api.minimaxi.com/v1/t2a_v2' },
+      dashscope: { apiKey: '', model: 'qwen3-tts-flash', baseUrl: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation' },
+      doubao: { appId: '', token: '', cluster: 'volcano_tts', baseUrl: 'https://openspeech.bytedance.com/api/v1/tts' },
+    },
     timeoutMs: 900000,               // 单镜超时：RTX 3060 实测 5 秒镜头约 85–105 秒
     autoUnloadText: true,            // 12G 显存渲染前先卸载 Ollama 文本模型
     aspect: '9:16',                  // '9:16' | '4:5' | '3:4' | '16:9'

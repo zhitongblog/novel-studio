@@ -2848,7 +2848,7 @@ $('#cvDownload').addEventListener('click', async () => {
   } catch (e) { $('#cvErr').textContent = e.message; }
 });
 // ===== 改编视频工作台（全屏 4 步 AI 导演工作台） =====
-let vidPlan = { episodes: [] }, vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters: [] }, vidRef2V = false, vidAnimeUpscaler = false, vidKeyframes = [], vidEdgeVoices = [], vidVoicePresets = [], vidStylePresets = [], vidAudioPresets = [], vidVoiceSamples = [], vidCurEp = 1, vidPoll = null, vidStep = 'assets';
+let vidPlan = { episodes: [] }, vidBible = { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', narratorVoices: {}, characters: [] }, vidRef2V = false, vidAnimeUpscaler = false, vidKeyframes = [], vidEdgeVoices = [], vidVoicePresets = [], vidStylePresets = [], vidAudioPresets = [], vidTtsProviders = [], vidProviderVoices = {}, vidTtsStatus = { preferred: 'auto', active: 'local' }, vidEditTtsProv = '', vidVoiceSamples = [], vidCurEp = 1, vidPoll = null, vidStep = 'assets';
 function vidFileUrl(rel) {
   return `${API}/api/book/video/file?book=${encodeURIComponent(CUR.slug)}&rel=${encodeURIComponent(rel)}&t=${Date.now()}`;
 }
@@ -2890,13 +2890,23 @@ function renderVideoBible() {
   ];
   const curStyle = (vidBible.visualStyle || '').trim();
   const hasVoicePack = vidVoiceSamples.filter((v) => v.preset).length >= 6;
+  const activeProv = vidEditTtsProv || (vidTtsStatus.active && vidTtsStatus.active !== 'local' ? vidTtsStatus.active : 'minimax');
+  const cloudVoices = vidProviderVoices[activeProv] || [];
+  const provVoiceOpts = (sel) => '<option value="">（按角色声线自动匹配内置 CV）</option>' +
+    cloudVoices.map((v) => `<option value="${esc(v.id)}" ${v.id === sel ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
+  const ttsBadges = [
+    vidTtsStatus.minimax ? '✅MiniMax' : '',
+    vidTtsStatus.dashscope ? '✅阿里Qwen' : '',
+    vidTtsStatus.doubao ? '✅豆包' : '',
+  ].filter(Boolean).join(' · ') || '当前走本机免费 IndexTTS2（可在「设置」配置云端 CV Key）';
+  const narrCloudVoice = (vidBible.narratorVoices && vidBible.narratorVoices[activeProv]) || '';
   pane.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
       <div style="font-size:13px;opacity:.9">
-        <b>① 全书画风与角色定妆库</b> · ${vidRef2V ? '✅ 已装 ref2va' : '⏳ I2V 模式'} · ${hasVoicePack ? `🎙 真人音色库已就绪（${vidVoiceSamples.length}）` : '🎙 建议一键安装真人音色库'}
+        <b>① 全书画风与角色定妆库</b> · ${vidRef2V ? '✅ 已装 ref2va' : '⏳ I2V 模式'} · ${hasVoicePack ? `🎙 本地音色库(${vidVoiceSamples.length})` : '🎙 可装本地音色库'} · ${ttsBadges}
       </div>
       <div class="btn-row" style="gap:6px;flex-wrap:wrap">
-        <button class="btn" id="vidInstallVoicePackBtn" title="安装 IndexTTS2 官方 8 种真人配音样本到本机全局音色库">${hasVoicePack ? '🔄 刷新真人音色库' : '🎙 一键安装真人音色库'}</button>
+        <button class="btn" id="vidInstallVoicePackBtn" title="安装 IndexTTS2 官方 8 种真人配音样本到本机全局音色库">${hasVoicePack ? '🔄 刷新本地音色库' : '🎙 安装本地音色库'}</button>
         <button class="btn" id="vidBibleExtract">✨ AI 提取并分化外貌</button>
         <button class="btn" id="vidAddCharBtn">➕ 新增角色</button>
         <button class="btn primary" id="vidBibleSave">💾 保存定妆库</button>
@@ -2915,17 +2925,34 @@ function renderVideoBible() {
         <input id="vidVisualStyle" value="${esc(curStyle || stylePresets[0].prompt)}" placeholder="选择上方预设或自定义英文画风" />
       </label>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:12px">
-      <label class="field" style="margin:0"><span style="font-size:12px">默认旁白音色（离线兜底 / Edge-TTS）</span>
-        <select id="vidNarratorEdge">${vidEdgeVoiceOpts(vidBible.narratorEdgeVoice || '', '云希 · 沉稳男声（系统默认）')}</select>
-      </label>
-      <label class="field" style="margin:0"><span style="font-size:12px">旁白真人参考音色（IndexTTS2 声音克隆 .wav/.mp3）</span>
-        <div style="display:flex;gap:6px;align-items:center">
-          <input id="vidNarratorVoice" value="${esc(vidBible.narratorVoice || '')}" placeholder="留空自动用音色库 narrator.wav，或点右侧上传" style="flex:1;font-size:11px" />
-          <button type="button" class="btn tiny" id="vidPreviewNarrVoice" title="用当前旁白音色试听一句">▶ 试听</button>
-          <label class="btn tiny" style="cursor:pointer;margin:0">📤 上传<input id="vidUploadNarrVoice" type="file" accept="audio/*" hidden /></label>
-        </div>
-      </label>
+    <div style="margin-bottom:10px;padding:10px;border:1px solid var(--border,#2c2a3a);border-radius:8px;display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <div style="font-size:12px"><b>🎙 配音引擎与音色自选</b>（为下方旁白和每个角色选择当前引擎的 CV 音色，切引擎不丢原配置）</div>
+        <select id="vidEditTtsProvSel" style="font-size:12px">
+          <option value="minimax" ${activeProv === 'minimax' ? 'selected' : ''}>🎭 MiniMax 海螺语音（演技最强 · ¥2-3.5/万字）${vidTtsStatus.minimax ? ' ✅' : ' (未配Key)'}</option>
+          <option value="dashscope" ${activeProv === 'dashscope' ? 'selected' : ''}>💰 阿里云 Qwen-TTS（最便宜 · ¥0.8/万字）${vidTtsStatus.dashscope ? ' ✅' : ' (未配Key)'}</option>
+          <option value="doubao" ${activeProv === 'doubao' ? 'selected' : ''}>🔥 火山豆包语音（抖音网感 · ¥5/万字）${vidTtsStatus.doubao ? ' ✅' : ' (未配Key)'}</option>
+          <option value="local" ${activeProv === 'local' ? 'selected' : ''}>🖥️ 本机 IndexTTS2（免费离线）</option>
+        </select>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px">
+        <label class="field" style="margin:0"><span style="font-size:12px">旁白 · 云端 CV 音色（${esc(activeProv)}）</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            ${cloudVoices.length ? `<select id="vidNarratorCloudSel" style="flex:1;font-size:11px">${provVoiceOpts(narrCloudVoice)}</select>` : ''}
+            <input id="vidNarratorCloudCustom" value="${esc(narrCloudVoice)}" placeholder="${cloudVoices.length ? '或手填自定义 voice_id' : '本机模式使用右侧参考音频'}" style="width:130px;font-size:11px" />
+          </div>
+        </label>
+        <label class="field" style="margin:0"><span style="font-size:12px">旁白 · 本机参考音色（IndexTTS2 .wav/.mp3）</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input id="vidNarratorVoice" value="${esc(vidBible.narratorVoice || '')}" placeholder="留空自动用音色库 narrator.wav" style="flex:1;font-size:11px" />
+            <button type="button" class="btn tiny" id="vidPreviewNarrVoice" title="用当前选定引擎试听旁白">▶ 试听</button>
+            <label class="btn tiny" style="cursor:pointer;margin:0">📤<input id="vidUploadNarrVoice" type="file" accept="audio/*" hidden /></label>
+          </div>
+        </label>
+        <label class="field" style="margin:0"><span style="font-size:12px">备用 Edge-TTS 旁白音色</span>
+          <select id="vidNarratorEdge">${vidEdgeVoiceOpts(vidBible.narratorEdgeVoice || '', '云希 · 沉稳男声（系统默认）')}</select>
+        </label>
+      </div>
     </div>
     <audio id="vidVoicePreviewAudio" controls style="display:none;width:100%;height:34px;margin-bottom:10px"></audio>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px">
@@ -2959,6 +2986,10 @@ function renderVideoBible() {
           </select>
           <input class="vid-cast-vdesc" value="${esc(c.voiceDesc || '')}" placeholder="H3 原生说话声线描述（英文，如 clear young female voice）" style="flex:1;font-size:11px" />
         </div>
+        ${cloudVoices.length ? `<div style="display:flex;gap:6px;align-items:center">
+          <select class="vid-cast-cloud-sel" style="flex:1;font-size:11px" title="为该角色自选 ${esc(activeProv)} 云端 CV 音色">${provVoiceOpts((c.ttsVoices && c.ttsVoices[activeProv]) || '')}</select>
+          <input class="vid-cast-cloud-custom" value="${esc((c.ttsVoices && c.ttsVoices[activeProv]) || '')}" placeholder="或自定义 voice_id" style="width:118px;font-size:11px" />
+        </div>` : ''}
         <select class="vid-cast-edge" style="font-size:11px">${vidEdgeVoiceOpts(c.edgeVoice || '', 'Edge-TTS 音色（沿用预设）')}</select>
         ${vidVoiceSamples.length ? `<select class="vid-cast-vsample" style="font-size:11px" title="从本机/本书音色库一键选定参考音频">
           <option value="">🎙 从音色库快速选取参考音频…</option>
@@ -2976,6 +3007,12 @@ function renderVideoBible() {
   const collectCast = () => [...pane.querySelectorAll('.vid-cast-row')].map((row) => {
     const i = Number(row.dataset.idx);
     const base = vidBible.characters[i] || {};
+    const prevVoices = (base.ttsVoices && typeof base.ttsVoices === 'object') ? { ...base.ttsVoices } : {};
+    const customVoiceEl = row.querySelector('.vid-cast-cloud-custom');
+    const selVoiceEl = row.querySelector('.vid-cast-cloud-sel');
+    if (activeProv && activeProv !== 'local' && (customVoiceEl || selVoiceEl)) {
+      prevVoices[activeProv] = (customVoiceEl?.value.trim() || selVoiceEl?.value || '');
+    }
     return {
       ...base,
       name: row.querySelector('.vid-cast-name')?.value.trim() || base.name || '',
@@ -2986,8 +3023,19 @@ function renderVideoBible() {
       voiceDesc: row.querySelector('.vid-cast-vdesc')?.value.trim() || '',
       edgeVoice: row.querySelector('.vid-cast-edge')?.value || '',
       voiceRefAudio: row.querySelector('.vid-cast-voice')?.value.trim() || '',
+      ttsVoices: prevVoices,
     };
   }).filter((c) => c.name);
+  pane.querySelectorAll('.vid-cast-cloud-sel').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const inp = sel.closest('.vid-cast-row')?.querySelector('.vid-cast-cloud-custom');
+      if (inp) inp.value = sel.value || '';
+    });
+  });
+  $('#vidNarratorCloudSel')?.addEventListener('change', (ev) => {
+    const inp = $('#vidNarratorCloudCustom');
+    if (inp) inp.value = ev.target.value || '';
+  });
   pane.querySelectorAll('.vid-cast-vsample').forEach((sel) => {
     sel.addEventListener('change', () => {
       const row = sel.closest('.vid-cast-row');
@@ -2997,16 +3045,26 @@ function renderVideoBible() {
   });
   const saveBibleNow = async (charactersOverride) => {
     const characters = charactersOverride || collectCast();
+    const narratorVoices = { ...(vidBible.narratorVoices || {}) };
+    if (activeProv && activeProv !== 'local') {
+      narratorVoices[activeProv] = ($('#vidNarratorCloudCustom')?.value.trim() || $('#vidNarratorCloudSel')?.value || '');
+    }
     const r = await api('/api/book/video/bible/save', 'POST', {
       book: CUR.slug,
       visualStyle: $('#vidVisualStyle')?.value || '',
       narratorVoice: $('#vidNarratorVoice')?.value.trim() || '',
       narratorEdgeVoice: $('#vidNarratorEdge')?.value || '',
+      narratorVoices,
       characters,
     });
-    vidBible = r.bible || { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', characters };
+    vidBible = r.bible || { visualStyle: '', narratorVoice: '', narratorEdgeVoice: '', narratorVoices, characters };
     return vidBible;
   };
+  $('#vidEditTtsProvSel')?.addEventListener('change', async (ev) => {
+    try { await saveBibleNow(); } catch {}
+    vidEditTtsProv = ev.target.value || '';
+    renderVideoBible();
+  });
   pane.querySelectorAll('.vid-style-preset').forEach((btn) => {
     btn.addEventListener('click', () => {
       const inp = $('#vidVisualStyle');
@@ -3015,18 +3073,21 @@ function renderVideoBible() {
       toast('已切换画风预设（点「💾 保存定妆库」生效）');
     });
   });
-  const playVoicePreview = async ({ speaker, refAudio, edgeVoice, emotion, text }) => {
+  const playVoicePreview = async ({ speaker, refAudio, edgeVoice, voiceId, ttsProvider, emotion, text }) => {
     $('#vidErr').textContent = '';
-    $('#vidStatus').textContent = `⏳ 正在合成「${speaker === 'narrator' ? '旁白' : speaker}」试听配音…`;
+    const prov = ttsProvider || (activeProv && (activeProv === 'local' || vidTtsStatus[activeProv]) ? activeProv : 'auto');
+    $('#vidStatus').textContent = `⏳ 正在用「${prov}」合成「${speaker === 'narrator' ? '旁白' : speaker}」试听配音…`;
     try {
-      const r = await api('/api/book/video/voice/preview', 'POST', { book: CUR.slug, speaker, refAudio, edgeVoice, emotion, text });
+      const r = await api('/api/book/video/voice/preview', 'POST', {
+        book: CUR.slug, speaker, refAudio, edgeVoice, voiceId, ttsProvider: prov, emotion, text,
+      });
       const aud = $('#vidVoicePreviewAudio');
       if (aud && r.url) {
         aud.src = `${API}${r.url}&t=${Date.now()}`;
         aud.style.display = 'block';
         aud.play().catch(() => {});
       }
-      $('#vidStatus').textContent = `✅ 试听就绪（${r.speaker} · ${r.provider} · ${(r.duration || 0).toFixed(1)}s）`;
+      $('#vidStatus').textContent = `✅ 试听就绪（${r.speaker} · ${r.provider}${r.voice ? ' / ' + r.voice : ''} · ${(r.duration || 0).toFixed(1)}s）`;
     } catch (e) {
       $('#vidErr').textContent = e.message;
       $('#vidStatus').textContent = '';
@@ -3052,6 +3113,8 @@ function renderVideoBible() {
       speaker: 'narrator',
       refAudio: $('#vidNarratorVoice')?.value.trim() || '',
       edgeVoice: $('#vidNarratorEdge')?.value || '',
+      voiceId: $('#vidNarratorCloudCustom')?.value.trim() || $('#vidNarratorCloudSel')?.value || '',
+      ttsProvider: activeProv,
       text: '子夜大雪纷飞，一盏孤灯照亮半条旧巷。',
     });
   });
@@ -3064,6 +3127,8 @@ function renderVideoBible() {
         speaker: name,
         refAudio: row?.querySelector('.vid-cast-voice')?.value.trim() || '',
         edgeVoice: row?.querySelector('.vid-cast-edge')?.value || '',
+        voiceId: row?.querySelector('.vid-cast-cloud-custom')?.value.trim() || row?.querySelector('.vid-cast-cloud-sel')?.value || '',
+        ttsProvider: activeProv,
         text: `我是${name}。今夜风雪太大，有话进屋慢慢说。`,
       });
     });
@@ -3277,7 +3342,8 @@ function renderVideoModal() {
         <div style="display:flex;gap:6px;align-items:center">
           <span style="font-size:11px;opacity:.75;white-space:nowrap">说话人</span>
           <select class="vid-speaker" style="flex:1;font-size:11px">${speakerOpts(s.speaker || 'narrator', s.characters)}</select>
-          <input class="vid-emotion" value="${esc(s.emotion || '')}" placeholder="情绪（冷峻/轻声/怒吼）" style="width:128px;font-size:11px" title="表演情绪（透传给 IndexTTS2 与 H3 对口型）" />
+          <input class="vid-emotion" value="${esc(s.emotion || '')}" placeholder="情绪（冷峻/轻声/怒吼）" style="width:118px;font-size:11px" title="表演情绪（透传给云端 CV 与本机 IndexTTS2）" />
+          <button type="button" class="btn tiny vid-preview-shot-tts" title="试听本镜台词配音">▶</button>
         </div>
         <textarea class="vid-narr" rows="2" placeholder="角色台词（无对白纯画面镜留空，靠环境音推进）" style="width:100%;font-size:12px">${esc(s.narration || '')}</textarea>
         <textarea class="vid-prompt" rows="2" placeholder="English video prompt" style="width:100%;font-size:11px;opacity:.9">${esc(s.prompt || '')}</textarea>
@@ -3341,6 +3407,20 @@ function renderVideoModal() {
     });
     card.querySelector('.vid-save')?.addEventListener('click', async () => {
       try { await saveShot(); toast(`第 ${idx} 镜已保存`); await refreshVideoPlan(); } catch (e) { $('#vidErr').textContent = e.message; }
+    });
+    card.querySelector('.vid-preview-shot-tts')?.addEventListener('click', async () => {
+      const text = card.querySelector('.vid-narr')?.value.trim() || '';
+      if (!text) { toast('本镜没有台词（纯画面镜）'); return; }
+      const speaker = card.querySelector('.vid-speaker')?.value || 'narrator';
+      const emotion = card.querySelector('.vid-emotion')?.value.trim() || '';
+      $('#vidErr').textContent = '';
+      $('#vidStatus').textContent = `⏳ 正在试听第 ${idx} 镜（${speaker === 'narrator' ? '旁白' : speaker}）…`;
+      try {
+        const r = await api('/api/book/video/voice/preview', 'POST', { book: CUR.slug, speaker, emotion, text });
+        const aud = new Audio(`${API}${r.url}&t=${Date.now()}`);
+        aud.play().catch(() => {});
+        $('#vidStatus').textContent = `✅ 第 ${idx} 镜试听（${r.provider}${r.voice ? ' / ' + r.voice : ''} · ${(r.duration || 0).toFixed(1)}s）`;
+      } catch (e) { $('#vidErr').textContent = e.message; $('#vidStatus').textContent = ''; }
     });
     card.querySelector('.vid-del-shot')?.addEventListener('click', async () => {
       try {
@@ -3406,13 +3486,27 @@ function renderVideoModal() {
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:12px">
+        <label class="field" style="margin:0"><span style="font-size:12px">配音引擎选择（云端爆款 CV / 本机免费）</span>
+          <select id="vidComposeTtsProvider">
+            ${(vidTtsProviders.length ? vidTtsProviders : [
+              { id: 'auto', label: '✨ 自动择优（优先已配云端 CV，无 Key 兜底本机）' },
+              { id: 'minimax', label: '🎭 MiniMax 海螺语音（演技最强 · ¥2-3.5/万字）' },
+              { id: 'dashscope', label: '💰 阿里云百炼 Qwen-TTS（最便宜 · ¥0.8/万字）' },
+              { id: 'doubao', label: '🔥 火山豆包语音（抖音网感 · ¥5.0/万字）' },
+              { id: 'local', label: '🖥️ 本机 IndexTTS2（免费离线）' },
+            ]).map((tp) => {
+              const badge = tp.cloud ? (vidTtsStatus[tp.id] ? ' ✅' : ' (未配Key)') : '';
+              return `<option value="${esc(tp.id)}" ${(ep.ttsProvider || vidTtsStatus.preferred || 'auto') === tp.id ? 'selected' : ''}>${esc(tp.label + badge)}</option>`;
+            }).join('')}
+          </select>
+        </label>
         <label class="field" style="margin:0"><span style="font-size:12px">人声合成方案</span>
           <select id="vidComposeVoiceMode">
-            <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 影院级多角色配音（IndexTTS2 真人库+侧链闪避，推荐）</option>
+            <option value="tts" ${(ep.voiceMode || 'tts') === 'tts' ? 'selected' : ''}>🎤 影院级多角色配音（按上方引擎 + 侧链闪避，推荐）</option>
             <option value="native" ${ep.voiceMode === 'native' ? 'selected' : ''}>👄 保留 H3 原生对口型人声（自动响度增强）</option>
           </select>
         </label>
-        <label class="field" style="margin:0"><span style="font-size:12px">网络声音流派预设（语速 / 空间混响 / 三段配乐节奏）</span>
+        <label class="field" style="margin:0"><span style="font-size:12px">网络声音流派预设（语速 / 空间混响 / 节奏）</span>
           <select id="vidAudioStyle">
             ${(vidAudioPresets.length ? vidAudioPresets : [
               { id: 'donghua_noir', label: '🎬 国漫暗黑悬疑电影派（推荐 · B站/精品番剧）' },
@@ -3422,7 +3516,7 @@ function renderVideoModal() {
           </select>
         </label>
         <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="vidAutoScore" checked /> <span>🎵 自动生成三段式情绪配乐 + 惊变/结尾卡点音效</span>
+          <input type="checkbox" id="vidAutoScore" /> <span>🎵 自动生成悬疑氛围垫乐（无真人器乐 BGM 时可选）</span>
         </label>
         <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:0">
           <input type="checkbox" id="vidUpscaleAnime" ${vidAnimeUpscaler ? 'checked' : ''} ${vidAnimeUpscaler ? '' : 'disabled'} /> <span>✨ RealESRGAN 2D 动画 AI 超分至 1080×1920${vidAnimeUpscaler ? '（已就绪）' : '（未装模型）'}</span>
@@ -3470,6 +3564,7 @@ function renderVideoModal() {
     $('#vidComposeBtn')?.addEventListener('click', () => startVidJob('/api/book/video/episode/compose', {
       book: CUR.slug,
       episodeIndex: ep.index,
+      ttsProvider: $('#vidComposeTtsProvider')?.value || '',
       voiceMode: $('#vidComposeVoiceMode')?.value || ep.voiceMode || 'tts',
       audioStyle: $('#vidAudioStyle')?.value || ep.audioStyle || 'donghua_noir',
       autoScore: !!$('#vidAutoScore')?.checked,
@@ -3478,7 +3573,7 @@ function renderVideoModal() {
       burnSubtitles: !!$('#vidBurnSub')?.checked,
       trimToTts: !!$('#vidTrimTts')?.checked,
       bgmPath: $('#vidBgmPath')?.value.trim() || '',
-      bgmVolume: Number($('#vidBgmVol')?.value) || 0.34,
+      bgmVolume: Number($('#vidBgmVol')?.value) || 0.24,
     }));
     $('#vidGenPublishCopyBtn')?.addEventListener('click', () => startVidJob('/api/book/video/episode/publish-copy', {
       book: CUR.slug, episodeIndex: ep.index,
@@ -3536,6 +3631,9 @@ async function refreshVideoPlan() {
   vidVoicePresets = r.voicePresets || [];
   vidStylePresets = r.visualStylePresets || [];
   vidAudioPresets = r.audioStylePresets || [];
+  vidTtsProviders = r.ttsProviders || [];
+  vidProviderVoices = r.providerVoices || {};
+  vidTtsStatus = r.ttsStatus || { preferred: 'auto', active: 'local' };
   vidVoiceSamples = r.voiceSamples || [];
   renderVideoBible();
   renderVideoModal();
@@ -5485,6 +5583,47 @@ async function renderSettings() {
       <div id="setImgOut" class="modal-hint" style="margin:8px 0 0;white-space:pre-wrap"></div>
     </fieldset>
     <fieldset class="field" style="border:1px solid var(--border,#333);border-radius:8px;padding:10px 12px">
+      <legend style="padding:0 6px;font-size:13px;opacity:.8">🎙️ 改编视频配音引擎（三家云端爆款 CV + 本机免费 · 自由切换）</legend>
+      <div class="modal-hint" style="margin:0 0 8px">
+        填哪家 Key 就能用哪家的顶级网感声优；每个角色还可在「① 资产定妆」里单独挑选 CV 音色并现场试听。留空不覆盖已保存的 Key。
+      </div>
+      <label class="field"><span>默认配音引擎</span>
+        <select id="setVidTtsProv">
+          <option value="auto" ${(c.video?.tts?.provider || 'auto') === 'auto' ? 'selected' : ''}>✨ 自动择优（优先已配云端 CV，无 Key 兜底本机 IndexTTS2）</option>
+          <option value="minimax" ${c.video?.tts?.provider === 'minimax' ? 'selected' : ''}>🎭 MiniMax 海螺语音（番剧/短剧演技最强 · ¥2–3.5/万字）</option>
+          <option value="dashscope" ${c.video?.tts?.provider === 'dashscope' ? 'selected' : ''}>💰 阿里云百炼 Qwen-TTS（最便宜 · ¥0.8/万字）</option>
+          <option value="doubao" ${c.video?.tts?.provider === 'doubao' ? 'selected' : ''}>🔥 火山引擎豆包语音（抖音网感同源 · ¥5.0/万字）</option>
+          <option value="local" ${c.video?.tts?.provider === 'local' ? 'selected' : ''}>🖥️ 本机 IndexTTS2（完全免费 · 断网离线）</option>
+        </select>
+      </label>
+      <label class="field"><span>MiniMax 海螺语音 API Key（platform.minimaxi.com）</span>
+        <input id="setTtsMinimaxKey" type="password" autocomplete="off" placeholder="${c.video?.tts?.minimax?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <label class="field"><span>MiniMax 语音模型</span>
+          <select id="setTtsMinimaxModel">
+            <option value="speech-02-hd" ${(c.video?.tts?.minimax?.model || 'speech-02-hd') === 'speech-02-hd' ? 'selected' : ''}>speech-02-hd（高表现力 · ¥3.5/万字）</option>
+            <option value="speech-02-turbo" ${c.video?.tts?.minimax?.model === 'speech-02-turbo' ? 'selected' : ''}>speech-02-turbo（高性价比 · ¥2.0/万字）</option>
+          </select>
+        </label>
+        <label class="field"><span>MiniMax GroupId（新版可留空）</span>
+          <input id="setTtsMinimaxGroup" value="${esc(c.video?.tts?.minimax?.groupId || '')}" placeholder="选填"></label>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <label class="field"><span>阿里云 Qwen-TTS Key（留空自动复用上方通义 DashScope Key）</span>
+          <input id="setTtsDashKey" type="password" autocomplete="off" placeholder="${c.video?.tts?.dashscope?.hasKey ? '***已设置/已复用（留空不改）***' : '未设置'}"></label>
+        <label class="field"><span>阿里云语音模型</span>
+          <input id="setTtsDashModel" value="${esc(c.video?.tts?.dashscope?.model || 'qwen3-tts-flash')}" placeholder="qwen3-tts-flash"></label>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+        <label class="field"><span>火山豆包 AppID</span>
+          <input id="setTtsDoubaoApp" value="${esc(c.video?.tts?.doubao?.appId || '')}" placeholder="控制台 AppID"></label>
+        <label class="field"><span>火山豆包 AccessToken</span>
+          <input id="setTtsDoubaoToken" type="password" autocomplete="off" placeholder="${c.video?.tts?.doubao?.hasKey ? '***已设置（留空不改）***' : '未设置'}"></label>
+        <label class="field"><span>火山豆包 Cluster</span>
+          <input id="setTtsDoubaoCluster" value="${esc(c.video?.tts?.doubao?.cluster || 'volcano_tts')}" placeholder="volcano_tts"></label>
+      </div>
+    </fieldset>
+    <fieldset class="field" style="border:1px solid var(--border,#333);border-radius:8px;padding:10px 12px">
       <legend style="padding:0 6px;font-size:13px;opacity:.8">🎬 改编视频引擎（MiniMax H3 + IndexTTS）</legend>
       <label class="field"><span>ComfyUI 地址（仅本机 loopback）</span>
         <input id="setVidComfyUrl" value="${esc(c.video?.comfyUrl || 'http://127.0.0.1:8188')}"></label>
@@ -5552,11 +5691,29 @@ async function renderSettings() {
         workflowFile: $('#setComfyWf').value.trim(),
       },
     };
+    const vTtsPatch = {
+      provider: $('#setVidTtsProv')?.value || 'auto',
+      minimax: {
+        model: $('#setTtsMinimaxModel')?.value || 'speech-02-hd',
+        groupId: $('#setTtsMinimaxGroup')?.value.trim() || '',
+      },
+      dashscope: {
+        model: $('#setTtsDashModel')?.value.trim() || 'qwen3-tts-flash',
+      },
+      doubao: {
+        appId: $('#setTtsDoubaoApp')?.value.trim() || '',
+        cluster: $('#setTtsDoubaoCluster')?.value.trim() || 'volcano_tts',
+      },
+    };
+    const mmKey = $('#setTtsMinimaxKey')?.value.trim(); if (mmKey) vTtsPatch.minimax.apiKey = mmKey;
+    const dsTtsKey = $('#setTtsDashKey')?.value.trim(); if (dsTtsKey) vTtsPatch.dashscope.apiKey = dsTtsKey;
+    const dbTok = $('#setTtsDoubaoToken')?.value.trim(); if (dbTok) vTtsPatch.doubao.token = dbTok;
     patch.video = {
       comfyUrl: $('#setVidComfyUrl').value.trim() || 'http://127.0.0.1:8188',
       modelRoot: $('#setVidModelRoot').value.trim() || 'D:/AI/models/minimax-h3',
       ttsRoot: $('#setVidTtsRoot').value.trim() || 'D:/AI/codex-tools/index-tts',
       ttsRefAudio: $('#setVidTtsRef').value.trim(),
+      tts: vTtsPatch,
     };
     try { STATE.config = await api('/api/config', 'POST', { patch }); fillModels(); toast('设置已保存'); }
     catch (e) { toast(e.message); }

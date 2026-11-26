@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { explainComfyError } from './imagelocal.mjs';
 import { detectGpu } from './localai.mjs';
 import { snapFrames, videoDir, getAudioStylePreset } from './videoplan.mjs';
+import { resolveActiveTtsProvider, synthesizeCloudTts, normalizeSpokenText } from './videotts.mjs';
 
 const __DIR = path.dirname(fileURLToPath(import.meta.url));
 const VIDEO_TOOLS_DIR = path.resolve(__DIR, '../tools/video');
@@ -652,8 +653,13 @@ export function postProcessVoiceWav(inWav, outWav = inWav, { tempo = 1.0, settin
   }
 }
 
-/** 合成单句旁白/台词：优先 IndexTTS2（--fp16 + 角色真人音色克隆 + 情绪自适应权重 + 广播母带），否则 edge-tts，最后兜底 Windows SAPI。 */
-export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = '', emotionWeight = null, polish = true, tempo = 1.0, settingType = '', spatialReverb = false, shouting = false }) {
+/** 合成单句旁白/台词：支持用户自选云端 CV（MiniMax / 阿里云 Qwen-TTS / 火山豆包）或本机 IndexTTS2（--fp16 + 情绪），自动纠偏生僻字并做母带处理。 */
+export async function synthesizeTts(cfg, {
+  text, outWav, refAudio, voice, voiceId = '', ttsVoices = null, voicePreset = 'young_male',
+  ttsProvider = '', pronunciationMap = null, emotion = '', emotionWeight = null, polish = true,
+  tempo = 1.0, settingType = '', spatialReverb = false, shouting = false, allowLocalFallback = true,
+}) {
+  const spokenText = normalizeSpokenText(text, pronunciationMap);
   const vcfg = cfg.video || {};
   const ttsRoot = vcfg.ttsRoot || 'D:/AI/codex-tools/index-tts';
   const exe = path.join(ttsRoot, '.venv/Scripts/indextts2.exe');
@@ -669,24 +675,47 @@ export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = ''
     }
     return res;
   };
+
+  // 1. 优先走用户选定或自动择优的云端大模型配音（MiniMax / DashScope / Doubao）
+  const activeProvider = resolveActiveTtsProvider(cfg, ttsProvider);
+  if (activeProvider !== 'local') {
+    const pickedVoice = String(voiceId || (ttsVoices && ttsVoices[activeProvider]) || '').trim();
+    try {
+      const cloudRes = await synthesizeCloudTts(cfg, {
+        provider: activeProvider,
+        text: spokenText,
+        outWav,
+        voiceId: pickedVoice,
+        voicePreset,
+        emotion,
+        speed: 1.0,
+        pronunciationMap,
+      });
+      return finish(cloudRes);
+    } catch (cloudErr) {
+      // 用户显式点名某家云端引擎（如试听或强选）时直接抛错提示检查 Key；auto 模式才静默回退本地
+      if (!allowLocalFallback || (ttsProvider && ttsProvider !== 'auto')) throw cloudErr;
+    }
+  }
+
   const tryEdgeOrSapi = () => {
-    try { return finish(synthesizeEdgeTts(text, outWav, edgeVoice)); }
+    try { return finish(synthesizeEdgeTts(spokenText, outWav, edgeVoice)); }
     catch (e) {
-      if (process.platform === 'win32') return finish(synthesizeWindowsSapi(text, outWav));
+      if (process.platform === 'win32') return finish(synthesizeWindowsSapi(spokenText, outWav));
       throw e;
     }
   };
   if (!fs.existsSync(exe) || !ref || !fs.existsSync(ref)) {
-    return Promise.resolve(tryEdgeOrSapi());
+    return tryEdgeOrSapi();
   }
   fs.mkdirSync(path.dirname(outWav), { recursive: true });
   const emo = calibrateEmotionParams(emotion, emotionWeight);
-  const args = ['synth', '--voice', ref, '--output', outWav, '--text', text, '--fp16', '--force'];
+  const args = ['synth', '--voice', ref, '--output', outWav, '--text', spokenText, '--fp16', '--force'];
   if (emo.emotionText) {
     args.push('--emotion-text', emo.emotionText, '--emotion-weight', String(emo.emotionWeight));
   }
   if (fs.existsSync(modelDir)) args.push('--model-dir', modelDir);
-  return new Promise((resolve, reject) => {
+  return await new Promise((resolve, reject) => {
     const p = spawn(exe, args, { windowsHide: true });
     let err = '';
     p.stderr.on('data', (d) => { err += d; });
@@ -705,13 +734,47 @@ export function synthesizeTts(cfg, { text, outWav, refAudio, voice, emotion = ''
 }
 
 /**
- * 批量合成整集配音（indextts2 batch 单次加载模型，比逐镜重载快 5–10 倍）：
- * tasks: Array<{ key, text, outWav, refAudio, voice, emotion, emotionWeight, label }>
- * 返回 Map<key, { file, duration, provider, polished }>。
+ * 批量合成整集配音：
+ * - 云端引擎（MiniMax / 阿里云 Qwen-TTS / 火山豆包）：并发 3 路高速合成 + 广播级母带；
+ * - 本机 IndexTTS2：indextts2 batch 单次加载模型 + FP16，比逐镜重载快 5–10 倍。
  */
-export async function synthesizeTtsBatch(cfg, tasks = [], { polish = true, onLog } = {}) {
+export async function synthesizeTtsBatch(cfg, tasks = [], { polish = true, ttsProvider = '', onLog } = {}) {
   const results = new Map();
   if (!tasks.length) return results;
+
+  const activeProvider = resolveActiveTtsProvider(cfg, ttsProvider);
+  if (activeProvider !== 'local') {
+    onLog?.({ level: 'act', msg: `正在用云端配音引擎「${activeProvider}」批量合成 ${tasks.length} 条角色台词…` });
+    const queue = [...tasks];
+    const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+      while (queue.length) {
+        const t = queue.shift();
+        const r = await synthesizeTts(cfg, {
+          text: t.text,
+          outWav: t.outWav,
+          refAudio: t.refAudio,
+          voice: t.voice,
+          voiceId: t.voiceId || '',
+          ttsVoices: t.ttsVoices || null,
+          voicePreset: t.voicePreset || 'young_male',
+          ttsProvider: activeProvider,
+          pronunciationMap: t.pronunciationMap || null,
+          emotion: t.emotion,
+          emotionWeight: t.emotionWeight,
+          tempo: t.tempo || 1.0,
+          settingType: t.settingType || '',
+          spatialReverb: !!t.spatialReverb,
+          shouting: !!t.shouting,
+          allowLocalFallback: !ttsProvider || ttsProvider === 'auto',
+          polish,
+        });
+        results.set(t.key, r);
+      }
+    });
+    await Promise.all(workers);
+    return results;
+  }
+
   const vcfg = cfg.video || {};
   const ttsRoot = vcfg.ttsRoot || 'D:/AI/codex-tools/index-tts';
   const exe = path.join(ttsRoot, '.venv/Scripts/indextts2.exe');
@@ -735,7 +798,7 @@ export async function synthesizeTtsBatch(cfg, tasks = [], { polish = true, onLog
     const lines = batchTasks.map((t) => {
       fs.mkdirSync(path.dirname(t.outWav), { recursive: true });
       const emo = calibrateEmotionParams(t.emotion, t.emotionWeight);
-      const item = { text: t.text, voice: t.ref, output: t.outWav };
+      const item = { text: normalizeSpokenText(t.text, t.pronunciationMap), voice: t.ref, output: t.outWav };
       if (emo.emotionText) {
         item.emotion_text = emo.emotionText;
         item.emotion_weight = emo.emotionWeight;
@@ -743,7 +806,7 @@ export async function synthesizeTtsBatch(cfg, tasks = [], { polish = true, onLog
       return JSON.stringify(item);
     });
     fs.writeFileSync(batchFile, lines.join('\n') + '\n', 'utf8');
-    onLog?.({ level: 'act', msg: `正在用 IndexTTS2 批量合成 ${batchTasks.length} 条角色配音（单次加载模型 + FP16）…` });
+    onLog?.({ level: 'act', msg: `正在用本机 IndexTTS2 批量合成 ${batchTasks.length} 条角色配音（单次加载模型 + FP16）…` });
 
     const args = ['batch', '--batch-file', batchFile, '--fp16', '--force'];
     if (fs.existsSync(modelDir)) args.push('--model-dir', modelDir);
@@ -784,6 +847,8 @@ export async function synthesizeTtsBatch(cfg, tasks = [], { polish = true, onLog
       outWav: t.outWav,
       refAudio: t.refAudio,
       voice: t.voice,
+      ttsProvider: 'local',
+      pronunciationMap: t.pronunciationMap || null,
       emotion: t.emotion,
       emotionWeight: t.emotionWeight,
       tempo: t.tempo || 1.0,

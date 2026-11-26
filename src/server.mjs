@@ -3119,10 +3119,18 @@ function maskConfig(cfg) {
     const one = api[prov] || {};
     maskApi[prov] = { ...one, apiKey: one.apiKey ? '***已设置***' : '', hasKey: !!one.apiKey };
   }
+  const vtts = cfg.video?.tts || {};
+  const maskVtts = {
+    ...vtts,
+    minimax: { ...(vtts.minimax || {}), apiKey: vtts.minimax?.apiKey ? '***已设置***' : '', hasKey: !!vtts.minimax?.apiKey },
+    dashscope: { ...(vtts.dashscope || {}), apiKey: vtts.dashscope?.apiKey ? '***已设置***' : '', hasKey: !!(vtts.dashscope?.apiKey || api.dashscope?.apiKey) },
+    doubao: { ...(vtts.doubao || {}), token: vtts.doubao?.token ? '***已设置***' : '', hasKey: !!(vtts.doubao?.appId && vtts.doubao?.token) },
+  };
   return {
     ...cfg,
     gemini: { ...cfg.gemini, apiKey: cfg.gemini?.apiKey ? '***已设置***' : '', hasKey: !!cfg.gemini?.apiKey },
     api: { ...api, ...maskApi },
+    video: { ...(cfg.video || {}), tts: maskVtts },
   };
 }
 
@@ -3136,6 +3144,19 @@ function stripMaskedKeys(patch) {
       if (out.api[prov] && typeof out.api[prov] === 'object' && out.api[prov].apiKey === MASK) delete out.api[prov].apiKey;
       // 顺带去掉只读的 hasKey 别写进配置
       if (out.api[prov] && typeof out.api[prov] === 'object') delete out.api[prov].hasKey;
+    }
+  }
+  if (out.video?.tts) {
+    const t = out.video.tts;
+    for (const k of ['minimax', 'dashscope']) {
+      if (t[k] && typeof t[k] === 'object') {
+        if (t[k].apiKey === MASK) delete t[k].apiKey;
+        delete t[k].hasKey;
+      }
+    }
+    if (t.doubao && typeof t.doubao === 'object') {
+      if (t.doubao.token === MASK) delete t.doubao.token;
+      delete t.doubao.hasKey;
     }
   }
   return out;
