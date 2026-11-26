@@ -1,6 +1,6 @@
 {
   "name": "storyalter",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "StoryAlter · AI 故事工作室 — 自动编排 Unterm + Codex/Claude/Gemini CLI 进行多本长篇网文写作，含自动监控应答（autopilot）。",
   "type": "module",
   "bin": {
