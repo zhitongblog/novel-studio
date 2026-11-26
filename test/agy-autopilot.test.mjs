@@ -185,7 +185,22 @@ test('撞额度要把窗口原话带进停止原因——不带的话上层根�
   assert.ok(i > 0);
   const seg = src.slice(i, i + 800);
   assert.match(seg, /窗口原话/, '停止原因里要带上屏幕上那句 reset 提示');
-  assert.match(seg, /LIMIT_RE\.test\(l\)/, '原话要从命中那一行取');
+  assert.match(seg, /filter\(limitHit\)/, '原话要从命中那一行取');
+});
+
+test('记忆插件没额度不是模型没额度——claude-mem 那句开场白不许把写作掐断', () => {
+  // 2026-10-04 修仙：agent 开场转述 claude-mem 的 SessionStart 提示，整行命中额度判据，书一开就停。
+  const src = fs.readFileSync(new URL('../src/autopilot.mjs', import.meta.url), 'utf8');
+  const limitRe = eval(src.match(/const LIMIT_RE = (\/.*\/i);/)[1]);
+  const ignoreRe = eval(src.match(/const LIMIT_IGNORE_RE = (\/.*\/i);/)[1]);
+  const hit = (l) => limitRe.test(l) && !ignoreRe.test(l);
+  assert.ok(!hit('起额度用完）。额度恢复之前，这次会话的内容不会被记住。我不会重启它的 worker。'));
+  assert.ok(!hit('claude-mem: Provider reported the inference allowance exhausted, try again later'));
+  assert.ok(!hit("▎ ※ You've been granted a $250 bonus credit for cloud sessions, on top of your plan limits · /claim-credit"));
+  assert.ok(hit('当前额度已用完，请稍后再试'));
+  assert.ok(hit('Claude usage limit reached · your limit will reset at 10pm'));
+  assert.ok(hit("You've hit your plan limit"));
+  assert.match(src, /tail\.split\('\\n'\)\.some\(limitHit\)/, '判据要逐行过滤后再认');
 });
 
 test('claude 自己在重试时不许插嘴——那是它在干活，不是卡住', () => {

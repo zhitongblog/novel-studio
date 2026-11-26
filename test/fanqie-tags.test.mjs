@@ -122,14 +122,14 @@ console.log('\n全部通过 ✅  签约模式/目标读者/两套标签，建书
 
 test('改番茄书名/简介必须真打字：注入排最后，且要说清它多半白填', () => {
   // 2026-09-20/21 连栽三次：原生 setter 填得进框、框里也显示对了，提交上去番茄存的还是旧值——
-  // React 表单根本没收到这次变更。所以真实输入要有两级（browser_type → human_type），注入只兜底。
+  // React 表单根本没收到这次变更。所以真实输入要有两级（browser_type → focus+clearFocused+typeText），注入只兜底。
   const fs2 = require('node:fs');
   const src = fs2.readFileSync(new URL('../src/fanqie.mjs', import.meta.url), 'utf8');
   const i = src.indexOf('const typeInto');
   assert.ok(i > 0, 'updateFanqieBookInfo 要有 typeInto');
   const seg = src.slice(i, i + 2000);
-  assert.ok(seg.indexOf("'browser_type'") < seg.indexOf("'human_type'"), 'browser_type 先试');
-  assert.ok(seg.indexOf("'human_type'") < seg.indexOf('__sv('), '注入必须排在两种真实输入之后');
+  assert.ok(seg.indexOf("'browser_type'") > 0 && seg.indexOf("'browser_type'") < seg.indexOf('client.typeText('), 'browser_type 先试，失败后退到 focus+typeText');
+  assert.ok(seg.indexOf('client.typeText(') < seg.indexOf('__sv('), '注入必须排在两种真实输入之后');
   assert.match(seg, /填得进框但番茄收不到|多半白填/, '退到注入时要把风险说出来，别让人以为填成功了');
   assert.match(seg, /readBack\(\) === text/, '每一级都要回读校验，不能只看调用没报错');
 });

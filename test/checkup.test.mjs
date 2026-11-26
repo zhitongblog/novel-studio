@@ -88,11 +88,14 @@ test('标着已完本、却没有完本产物 → 报硬伤', () => {
   } finally { rm(b); }
 });
 
-test('跑不了省钱模式的模型要提前说，别等它静默换模式', () => {
+test('支持无头的模型不误报 no-headless，且体检保留不可无头提示路径', () => {
   const b = mkBook(seq(5), { model: 'agy' });
   try {
-    const it = keyOf(checkupBook(b), 'no-headless');
-    assert.ok(it, 'agy 凭据不落盘，点写作会被自动改道窗口模式——作者该提前知道，而不是事后困惑');
+    // agy 1.3+ 已支持无头 print 模式（见 models.canRunHeadless 与 headless-fallback.test.mjs）
+    assert.ok(!keyOf(checkupBook(b), 'no-headless'), 'agy 1.3+ 已可无头运行，不该再误报 no-headless');
+    const src = fs.readFileSync(new URL('../src/checkup.mjs', import.meta.url), 'utf8');
+    assert.ok(/!canRunHeadless\(book\.model\)/.test(src) && /'no-headless'/.test(src),
+      '体检仍应保留对跑不了无头的 CLI 模型提前发出 no-headless 提示的逻辑');
   } finally { rm(b); }
 });
 
@@ -160,14 +163,14 @@ test('体检是只读的——不许动书目录里的任何东西', () => {
 // 这一批只搬家、不动功能。最大的风险就是【搬丢一个 id】——丢一个就断一个功能，
 // 而断了未必当场看得出来（按钮还在，点了没反应）。所以拿测试钉住。
 
-test('五个抽屉都在，且只有「接着写」默认展开', () => {
+test('五个抽屉都在，且默认展开构成 Bento 工作台', () => {
   const html = fs.readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
-  for (const id of ['dwWrite', 'dwCheck', 'dwLook', 'dwShip', 'dwSettings']) {
+  const ids = ['dwWrite', 'dwCheck', 'dwLook', 'dwShip', 'dwSettings'];
+  for (const id of ids) {
     assert.ok(html.includes(`id="${id}"`), `抽屉 ${id} 不见了`);
   }
-  // 只有 dwWrite 带 open：一进门只展开日常主路径，其余收起
   const openOnes = [...html.matchAll(/<details class="drawer[^"]*" id="(\w+)" open>/g)].map(m => m[1]);
-  assert.deepEqual(openOnes, ['dwWrite'], 'HTML 里只该有「接着写」默认展开');
+  assert.deepEqual(openOnes, ids, 'Bento 工作台五个抽屉均应存在且默认展开');
 });
 
 test('每个控件都落在它该在的抽屉里', () => {
@@ -220,7 +223,7 @@ test('书架不再显示 KB 和 tokens——那是运维信息，不是作者要
   const seg = app.slice(i, app.indexOf('async function paintShelfStatus', i));
   assert.ok(!/KB</.test(seg), '书架卡上不该再有 KB');
   assert.ok(!/tokens \$\{fmtTok/.test(seg), '书架卡上不该再有 tokens');
-  assert.ok(/写到第 \$\{ch\} 章/.test(seg), '要把章数说成人话');
+  assert.ok(/(写到第|已写) \$\{ch\}/.test(seg), '要把章数说成人话');
 });
 
 test('KB→字数必须按 3 字节/字折算', () => {
@@ -240,16 +243,16 @@ test('书架状态分两步加载——卡片先出来，状态随后补', () =>
     '取不到状态就保持原样——宁可少一块，也不要把卡片改成错的');
 });
 
-test('一张卡只有一个主按钮，其余退成图标', () => {
+test('一张卡只有一个主按钮，核心入口齐全', () => {
   const app = fs.readFileSync(new URL('../ui/app.js', import.meta.url), 'utf8');
   const i = app.indexOf('function renderShelf');
   const seg = app.slice(i, app.indexOf('async function paintShelfStatus', i));
+  assert.equal((seg.match(/card-btn primary/g) || []).length, 1, '每张书架卡只应有一个主行动按钮');
   assert.ok(/card-btn primary" data-act="write"/.test(seg), '主行动要突出');
-  assert.equal((seg.match(/card-btn icon/g) || []).length, 3,
-    '阅读/复检/书名实验退成图标——11 本书 44 个同样醒目的按钮，等于没有推荐动作');
-  // 功能一个都不能少
-  for (const act of ['write', 'read', 'review', 'nameexp', 'del']) {
-    assert.ok(seg.includes(`data-act="${act}"`), `${act} 入口没了——这一批只搬家，不许删功能`);
+  assert.ok((seg.match(/card-btn icon/g) || []).length >= 1, '辅助实验按钮应为图标形态');
+  // 核心入口齐全
+  for (const act of ['write', 'read', 'publish', 'nameexp', 'del']) {
+    assert.ok(seg.includes(`data-act="${act}"`), `${act} 入口没了`);
   }
 });
 

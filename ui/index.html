@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>StoryAlter · AI 故事工作室</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=2.2.0" />
 </head>
 <body>
   <div id="app">
@@ -31,13 +31,17 @@
         </div>
       </div>
       <nav class="nav">
-        <button class="nav-item active" data-view="shelf"><span>📖</span> 书架</button>
-        <button class="nav-item" data-view="usage"><span>📊</span> Token 用量</button>
-        <button class="nav-item" data-view="settings"><span>⚙️</span> 设置</button>
-        <button class="nav-item" data-view="env"><span>🩺</span> 环境</button>
+        <button class="nav-item active" data-view="shelf"><span>📚</span> 作品书架</button>
+        <button class="nav-item" data-view="corpus"><span>📥</span> 样书语料与分身库</button>
+        <button class="nav-item" data-view="usage"><span>📊</span> 用量统计</button>
+        <button class="nav-item" data-view="settings"><span>⚙️</span> 全局设置</button>
+        <button class="nav-item" data-view="env"><span>🩺</span> 环境诊断</button>
       </nav>
-      <div class="engine-status">
-        <span class="dot" id="engineDot"></span><span id="engineText">连接引擎…</span>
+      <div class="sidebar-foot">
+        <button type="button" class="btn ghost tiny app-theme-btn" id="btnAppTheme" title="切换软件深色/浅色外观">☀️ 切换浅色外观</button>
+        <div class="engine-status">
+          <span class="dot" id="engineDot"></span><span id="engineText">连接引擎…</span>
+        </div>
       </div>
     </aside>
 
@@ -46,13 +50,15 @@
       <!-- 书架 -->
       <section class="view" id="view-shelf">
         <header class="view-head">
-          <h1>书架</h1>
-          <button class="btn primary" id="btnTrafficCenter" title="一键拉取番茄全账号作品的阅读UV、14日在读、加书架、读完率、收益与章节流失毒点分析">📈 流量分析中心</button>
+          <h1>作品书架</h1>
+          <button class="btn" id="btnCorpusCenter" title="通过 Unzoo 下载 TXT 小说作为语料训练样本，由你挑选决定哪些作为文风范本与写作分身">📥 Unzoo 样书采集与分身库</button>
+          <button class="btn" id="btnTrafficCenter" title="一键拉取番茄全账号作品的阅读UV、14日在读、加书架、读完率、收益与章节流失毒点分析">📈 流量分析中心</button>
           <button class="btn" id="btnNameExpCenter" title="扫描番茄全账号作品的多书名实验资格、查看实验状态并一键配置">🧪 多书名实验中心</button>
           <button class="btn" id="btnImport">📂 导入文件夹</button>
           <button class="btn" id="btnImportFanqie">📥 从番茄导入</button>
-          <button class="btn primary" id="btnNewBook">＋ 新建书</button>
+          <button class="btn primary" id="btnNewBook">＋ 新建作品</button>
         </header>
+        <div class="shelf-hero" id="shelfHero"></div>
         <div id="companionBanner" class="hidden" style="margin: 0 0 14px;"></div>
         <div class="shelf" id="shelf"></div>
       </section>
@@ -129,9 +135,9 @@
               </div>
             </details>
 
-            <!-- ② 查一查：出了问题才来，收起 -->
-            <details class="drawer" id="dwCheck">
-              <summary><span class="dw-t">🔍 查一查</span></summary>
+            <!-- ② 查一查：默认展开，构成 Bento 工作台 -->
+            <details class="drawer" id="dwCheck" open>
+              <summary><span class="dw-t">🔍 审校与诊断</span></summary>
               <div class="drawer-body">
                 <div class="btn-row">
                   <button class="btn" id="btnRead" title="阅读全书已写章节：左边选章、右边舒适阅读。共创/写作后可随时在这里读当前创作的章节。">📖 阅读</button>
@@ -147,11 +153,13 @@
               </div>
             </details>
 
-            <!-- ③ 这本书的样子：定调的事，定完就很少再动，收起 -->
-            <details class="drawer" id="dwLook">
-              <summary><span class="dw-t">🎨 这本书的样子</span></summary>
+            <!-- ③ 这本书的样子：默认展开 -->
+            <details class="drawer" id="dwLook" open>
+              <summary><span class="dw-t">🎨 文风与包装</span></summary>
               <div class="drawer-body">
                 <div class="btn-row">
+                  <button class="btn primary" id="btnAlter" title="配置本书的 StoryAlter 三维写作分身（灵魂 Soul / 大脑 Brain / 躯体 Body），或从样书语料库一键学习绑定">🎭 写作分身</button>
+                  <button class="btn" id="btnCorpusFromWrite" title="打开 Unzoo 样书 TXT 采集与训练库，挑选你认可的小说一键设为本书文风范本与写作分身">📥 样书训练库</button>
                   <button class="btn" id="btnVoice" title="本书文风的唯一来源：挂范本、看手法卡">🖋️ 文风范本</button>
                   <button class="btn" id="btnStyle">🎨 文风</button>
                   <button class="btn" id="btnRefStyle" title="对标书风格学习：贴一段对标作品正文，AI 分析出文风指南，保存后写作自动照这个腔写。只学腔、不抄内容。">📚 对标别人的书</button>
@@ -172,9 +180,9 @@
               </div>
             </details>
 
-            <!-- ④ 拿出去：读者会看到 / 会覆盖已写的。这三件事和「阅读」不该长一个样。 -->
-            <details class="drawer danger-zone" id="dwShip">
-              <summary><span class="dw-t">⚠️ 拿出去</span><span class="dw-sub">读者会看到 · 不好撤回</span></summary>
+            <!-- ④ 拿出去：默认展开 -->
+            <details class="drawer danger-zone" id="dwShip" open>
+              <summary><span class="dw-t">🚀 发布与精修</span><span class="dw-sub">读者可见 · 自动存档</span></summary>
               <div class="drawer-body">
                 <div class="dz-note">下面每一件都会留下痕迹：发到番茄读者立刻能看见；重写会覆盖已写的正文；完本会触发签约流程。动手前先想清楚。</div>
                 <div class="btn-row">
@@ -196,9 +204,9 @@
               </div>
             </details>
 
-            <!-- ⑤ 这本书的设定：设置不该和动作并排。定一次，之后很少动。 -->
-            <details class="drawer" id="dwSettings">
-              <summary><span class="dw-t">⚙️ 这本书的设定</span></summary>
+            <!-- ⑤ 这本书的设定：默认展开 -->
+            <details class="drawer" id="dwSettings" open>
+              <summary><span class="dw-t">⚙️ 模型与创作参数</span></summary>
               <div class="drawer-body">
                 <label class="field">
                   <span>用哪个模型写</span>
@@ -270,36 +278,158 @@
         </div>
       </section>
 
-      <!-- 阅读 / 工作台 -->
-      <section class="view hidden" id="view-read">
-        <header class="view-head">
-          <button class="btn ghost" id="rdBack">← 书架</button>
+      <!-- 阅读 / 沉浸式电子书工作台 -->
+      <section class="view hidden" id="view-read" data-theme="sepia">
+        <header class="view-head rd-top-bar">
+          <button class="btn ghost tiny" id="rdBack">← 返回书架</button>
+          <button class="btn ghost tiny" id="rdToWrite" title="去创作工作台">✍️ 创作台</button>
+          <button class="btn ghost tiny" id="rdNavToggle" title="收起/展开左侧目录 (快捷键 B)">📑 目录</button>
           <h1 id="rdTitle">阅读</h1>
-          <button class="btn ghost icon" id="rdToWrite" title="去写作台">✍️</button>
-          <button class="btn ghost" id="rdRenumber" title="把每卷独立编号统一成全书连续编号">🔢 全局重编号</button>
-          <button class="btn ghost" id="rdCleanAiTraces" title="一键清除全书正文的 * 号、Markdown标记、（本章完）尾注与分割线等 AI 痕迹">🧹 一键清除AI痕迹</button>
-          <div class="grow"></div>
           <span class="badge" id="rdProgress"></span>
+          <div class="grow"></div>
+          <div class="rd-prefs" id="rdPrefs">
+            <button type="button" class="rd-theme-pill" data-rd-theme="sepia" title="羊皮纸暖黄护眼"><i class="sw sw-sepia"></i>羊皮纸</button>
+            <button type="button" class="rd-theme-pill" data-rd-theme="green" title="豆沙绿护眼"><i class="sw sw-green"></i>豆沙绿</button>
+            <button type="button" class="rd-theme-pill" data-rd-theme="blue" title="海天蓝护眼"><i class="sw sw-blue"></i>海天蓝</button>
+            <button type="button" class="rd-theme-pill" data-rd-theme="pink" title="胭脂粉"><i class="sw sw-pink"></i>胭脂粉</button>
+            <button type="button" class="rd-theme-pill" data-rd-theme="light" title="宣纸亮白"><i class="sw sw-light"></i>宣纸白</button>
+            <button type="button" class="rd-theme-pill" data-rd-theme="dark" title="暗夜深灰"><i class="sw sw-dark"></i>暗夜灰</button>
+            <button type="button" class="rd-theme-pill" data-rd-theme="oled" title="OLED纯黑"><i class="sw sw-oled"></i>纯黑墨</button>
+            <span class="rd-pref-sep"></span>
+            <button type="button" class="rd-layout-pill" data-rd-width="full" title="横向铺满整个阅读窗口">↔ 全宽铺满</button>
+            <button type="button" class="rd-layout-pill" data-rd-width="columns" title="左右双栏仿真书页">📖 双栏书页</button>
+            <button type="button" class="rd-layout-pill" data-rd-width="center" title="适中宽幅居中">📄 适中宽幅</button>
+            <span class="rd-pref-sep"></span>
+            <button type="button" class="rd-layout-pill" id="rdFontBtn" title="切换雅黑 / 楷书 / 宋刻">字体：雅黑</button>
+            <button type="button" class="rd-layout-pill" id="rdFontDec" title="缩小字号">A-</button>
+            <span class="rd-fsize-lbl" id="rdFontSizeLabel">19px</span>
+            <button type="button" class="rd-layout-pill" id="rdFontInc" title="放大字号">A+</button>
+          </div>
         </header>
         <div class="reader" id="reader">
           <aside class="rd-nav" id="rdNav"></aside>
-          <div class="rd-main">
+          <div class="rd-main" id="rdMain" data-theme="sepia" data-font="sans" data-width="full">
             <div class="rd-toolbar">
-              <button class="btn ghost tiny" id="rdNavToggle" title="收起/展开左侧目录，专心读正文">📑 目录</button>
+              <button class="btn ghost tiny" id="rdPrevChap" title="上一章 (快捷键 ←)" disabled>◀ 上一章</button>
+              <button class="btn ghost tiny" id="rdNextChap" title="下一章 (快捷键 →)" disabled>下一章 ▶</button>
               <span class="rd-fname" id="rdFileName">选择左侧任意文件阅读</span>
               <div class="grow"></div>
-              <button class="btn ghost tiny hidden" id="rdDelete" title="删掉这一章（会 git 存档并备份到 .deleted/）">🗑️ 删除本章</button>
-              <button class="btn ghost tiny hidden" id="rdDelReview" title="删掉这份自检/审稿（会备份到 .deleted/）">🗑️ 删除这份自检</button>
-              <button class="btn ghost tiny hidden" id="rdDelReviewAll" title="清空 reviews/ 下全部自检与审稿">🧹 清空全部自检</button>
+              <button class="btn ghost tiny" id="rdCleanAiTraces" title="一键清除全书正文的 * 号、Markdown标记、（本章完）尾注与分割线等 AI 痕迹">🧹 清除AI痕迹</button>
+              <button class="btn ghost tiny" id="rdRenumber" title="把每卷独立编号统一成全书连续编号">🔢 全局重编号</button>
               <button class="btn ghost tiny hidden" id="rdAdopt" title="这章写得对味 → 设为本书文风范本，后续章节向它看齐">🖋️ 设为范本</button>
               <button class="btn ghost tiny hidden" id="rdRewrite" title="换个模型重写这一章（可改章名、可重新指定情节）">♻️ 重写本章</button>
-              <button class="btn ghost tiny hidden" id="rdEdit">✏️ 编辑</button>
-              <button class="btn primary tiny hidden" id="rdSave">💾 保存</button>
+              <button class="btn ghost tiny hidden" id="rdEdit">✏️ 编辑正文</button>
+              <button class="btn ghost tiny hidden" id="rdDelete" title="删掉这一章（会 git 存档并备份到 .deleted/）">🗑️ 删章</button>
+              <button class="btn ghost tiny hidden" id="rdDelReview" title="删掉这份自检/审稿（会备份到 .deleted/）">🗑️ 删此自检</button>
+              <button class="btn ghost tiny hidden" id="rdDelReviewAll" title="清空 reviews/ 下全部自检与审稿">🧹 清空自检</button>
+              <button class="btn primary tiny hidden" id="rdSave">💾 保存修改</button>
               <button class="btn ghost tiny hidden" id="rdCancel">取消</button>
             </div>
+            <div class="rd-scroll-track"><div class="rd-scroll-fill" id="rdScrollFill"></div></div>
             <div class="rd-content" id="rdContent"><div class="rd-empty">📖 从左侧选 设定圣经 / 大纲 / 章节 / 审稿报告 来读</div></div>
             <textarea class="rd-editor hidden" id="rdEditor" spellcheck="false"></textarea>
           </div>
+        </div>
+      </section>
+
+      <!-- 样书语料与分身库（Unzoo TXT 下载 & 风格训练中心） -->
+      <section class="view hidden" id="view-corpus">
+        <header class="view-head">
+          <h1>📥 Unzoo 样书 TXT 采集与写作分身训练库</h1>
+          <span class="badge" id="cpRootBadge" title="本地 TXT 语料存储目录">D:\PM\storybook\corpus</span>
+          <div class="grow"></div>
+          <button class="btn" id="cpRefreshBtn">🔄 刷新语料库</button>
+        </header>
+
+        <div class="shelf-hero" style="margin-bottom:16px">
+          <!-- 面板 0：全自动全本 TXT 寻书下载后台服务（一键按题材自动去全本 TXT 站下载整本小说，不用自己找网站） -->
+          <div style="padding:14px;border:1px solid var(--accent);border-radius:10px;background:var(--bg-elev);margin-bottom:14px">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+              <div style="font-weight:700;font-size:15px">🤖 全自动【全本完结 TXT】样书采集服务（点题材即自动检索全本 TXT 下载站拉取整本书，无需自己找网站）</div>
+              <span class="badge" id="cpSvcBadge">服务空闲</span>
+            </div>
+            <p class="modal-hint" style="margin:0 0 10px">点击下方任一题材频道（或输入任意几个书名），后台采集服务会自动驱动 Unzoo 打开独立标签页前往<b>全本 TXT 电子书下载站矩阵（奇书网 9qishu / 80电子书 txt808 / 百度全本源）</b>，自动穿透详情页 → 下载页 → 提取整本完结直链 <code>.txt</code>（数百万字全书、自动识别 GB18030/UTF-8 转码）存入语料库，<b>全程不打断你正在工作的其它页面</b>。</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" id="cpGenrePackBtns">
+              <button class="btn primary" data-cp-pack="ALL">🚀 一键全题材各下1本全本代表作（6本全集TXT）</button>
+              <button class="btn" data-cp-pack="历史权谋">📜 自动下【历史权谋】全本TXT（3本）</button>
+              <button class="btn" data-cp-pack="仙侠修真">⚔️ 自动下【仙侠修真】全本TXT（3本）</button>
+              <button class="btn" data-cp-pack="都市爽文">🏙️ 自动下【都市爽文】全本TXT（3本）</button>
+              <button class="btn" data-cp-pack="悬疑民俗">🕯️ 自动下【悬疑民俗】全本TXT（3本）</button>
+              <button class="btn" data-cp-pack="玄幻高武">🔥 自动下【玄幻高武】全本TXT（3本）</button>
+              <button class="btn" data-cp-pack="科幻末世">🛸 自动下【科幻末世】全本TXT（3本）</button>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input id="cpSvcKeywords" placeholder="也可输入你想让服务自动去下载全本 TXT 的几本书名（用逗号分隔，如：凡人修仙传, 仙逆, 盘龙, 圣墟, 庆余年）" style="flex:1;min-width:260px" />
+              <span class="badge" style="background:rgba(31,209,178,.15);color:#1fd1b2">📦 整本完结 TXT 直链拉取</span>
+              <button class="btn primary" id="cpBtnStartSvc">▶ 启动全本 TXT 自动下载服务</button>
+              <button class="btn danger hidden" id="cpBtnStopSvc">⏹ 停止服务</button>
+            </div>
+            <div id="cpSvcProgressWrap" class="hidden" style="margin-top:10px;padding:10px;border-radius:8px;background:rgba(0,0,0,.2);border:1px solid var(--line)">
+              <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+                <b id="cpSvcTaskText">正在采集全本 TXT…</b>
+                <span id="cpSvcCountText">0/0</span>
+              </div>
+              <div style="height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-bottom:6px">
+                <div id="cpSvcBarFill" style="height:100%;width:0%;background:var(--accent);transition:width .3s"></div>
+              </div>
+              <pre id="cpSvcLogBox" style="margin:0;max-height:110px;overflow:auto;font-size:11px;line-height:1.45;color:var(--muted);white-space:pre-wrap"></pre>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px">
+            <!-- 面板 A：通过 Unzoo 下载全本 TXT 样书 -->
+            <div style="padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--bg-elev)">
+              <div style="font-weight:700;font-size:14px;margin-bottom:8px">🌐 方式一：通过 Unzoo 浏览器单本检索/直链下载全本 TXT</div>
+              <p class="modal-hint" style="margin:0 0 10px">支持三种全本采集方式：① 输入<b>小说书名</b>自动在奇书网/80电子书/百度检索并下载全本 <code>.txt</code>；② 粘贴小说下载站详情页或 <code>.txt</code> 直链 URL 下载全本；③ 直接抓取 Unzoo 当前打开的 TXT 下载页。</p>
+              <div class="field" style="margin-bottom:8px">
+                <span>全本小说书名 或 下载页/直链 URL</span>
+                <input id="cpUrlOrKw" placeholder="输入书名（如：凡人修仙传 / 诡秘之主）或粘贴 https:// 小说下载页/.txt直链" />
+              </div>
+              <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+                <label class="field" style="width:155px;margin:0"><span>指定保存书名(可选)</span><input id="cpCustomTitle" placeholder="自动识别" /></label>
+                <button class="btn primary" id="cpBtnSearch" title="用 Unzoo 在全本 TXT 下载站搜索书名并下载整本完结 TXT">🔍 搜索并下全本 TXT</button>
+                <button class="btn" id="cpBtnGrabUrl" title="按上方详情页或 .txt 直链下载整本 TXT">📥 按链接下全本 TXT</button>
+                <button class="btn" id="cpBtnGrabTabs" title="无需填链接，直接从 Unzoo 当前打开的下载页提取全本 TXT">📑 抓已开下载页</button>
+              </div>
+              <div id="cpGrabStatus" class="modal-hint" style="margin-top:8px;color:var(--accent)"></div>
+            </div>
+
+            <!-- 面板 B：导入本地 TXT 小说或粘贴样章 -->
+            <div style="padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--bg-elev)">
+              <div style="font-weight:700;font-size:14px;margin-bottom:8px">📂 方式二：导入本地 `.txt` 小说文件入库</div>
+              <p class="modal-hint" style="margin:0 0 10px">把你电脑上已有的名家 `.txt` 小说选进来（可多选），系统自动清洗广告、测算均句长/段长/对话率，由你决定哪几本作为学习对象。</p>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                <input type="file" id="cpLocalFile" accept=".txt,.md" multiple style="flex:1" />
+                <input id="cpLocalGenre" placeholder="题材标签（如：仙侠/都市）" style="width:150px" />
+                <button class="btn primary" id="cpBtnImportLocal">📥 导入到训练库</button>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--line)">
+                <span style="font-size:12px;color:var(--muted)">🎯 目标学习作品（将选定语料的文风与分身应用到哪本书）：</span>
+                <select id="cpTargetBook" style="flex:1;min-width:180px"></select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 语料筛选与列表 -->
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+          <div class="seg" id="cpFilterSeg">
+            <button type="button" class="seg-btn on" data-cp-filter="all">全部下载语料</button>
+            <button type="button" class="seg-btn" data-cp-filter="approved">⭐ 我已选定为学习对象</button>
+            <button type="button" class="seg-btn" data-cp-filter="pending">⏳ 待我审阅筛选</button>
+          </div>
+          <span class="dim-note" id="cpCountInfo"></span>
+        </div>
+
+        <div id="cpList" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:14px"></div>
+
+        <!-- 全局写作分身库展示 -->
+        <div style="margin-top:24px;padding-top:18px;border-top:1px solid var(--line)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <h2 style="margin:0;font-size:17px">🎭 全局写作分身库（StoryAlter · Soul 灵魂 / Brain 大脑 / Body 躯体）</h2>
+            <span class="dim-note">从上方选定的 TXT 样书点「一键学习并提炼分身」，即可自动沉淀到这里供所有作品复用</span>
+          </div>
+          <div id="cpGlobalAlters" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px"></div>
         </div>
       </section>
 
@@ -1203,7 +1333,102 @@
     </div>
   </div>
 
+  <!-- 写作分身（StoryAlter）与样书 TXT 预览弹窗 -->
+  <div class="modal hidden" id="alterModal">
+    <div class="modal-card" style="width: 860px; max-width: 95vw;">
+      <button class="modal-close" id="alClose" title="关闭 (Esc)">✕</button>
+      <h2>🎭 专属写作分身（StoryAlter） · <span id="alBookTitle"></span></h2>
+      <p class="modal-hint">不同于只看表层字句的文风描述，<b>写作分身（Alter Ego）</b>从<b>【灵魂 Soul · 价值与情绪基调】、【大脑 Brain · 冲突推进与爽点节拍】、【躯体 Body · 句式与对白习惯】</b>三个维度全面接管 AI 的叙事人格，并在每次续写、共创与 AGENTS.md 规范中全程生效。</p>
+
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin-bottom:12px;background:var(--bg-elev)">
+        <label class="field" style="flex:1;min-width:220px;margin:0">
+          <span>① 从分身库快速载入（含 4 大内置流派 + 你从 TXT 样书提炼的分身）</span>
+          <select id="alPresetSelect"></select>
+        </label>
+        <button class="btn" id="alBtnLoadPreset">载入到下方表单</button>
+        <button class="btn" id="alBtnGoCorpus" title="去 Unzoo 样书语料库挑选 TXT 小说一键提炼分身">📥 去样书库挑选学习</button>
+        <button class="btn ghost danger" id="alBtnClear" title="解绑本书的写作分身">解绑分身</button>
+      </div>
+
+      <details class="field" style="border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:12px">
+        <summary style="cursor:pointer;font-size:13px;font-weight:600">✨ 从任意小说 TXT 片段一键 AI 提炼写作分身</summary>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <input id="alExtractTitle" placeholder="样书名称（如：赤心巡天 / 诡秘之主）" style="flex:1;min-width:180px" />
+          <input type="file" id="alExtractFile" accept=".txt,.md" style="flex:1" />
+          <button class="btn primary" id="alBtnExtract">🧠 AI 提炼并填入</button>
+        </div>
+        <textarea id="alExtractSample" rows="4" placeholder="或直接把你喜欢的小说正文贴一段进来（500~3000字），点右上方「AI 提炼并填入」…" style="margin-top:6px;width:100%"></textarea>
+        <div id="alExtractStatus" class="modal-hint"></div>
+      </details>
+
+      <div class="grid2" style="gap:10px">
+        <label class="field"><span>分身名称 *</span><input id="alName" placeholder="如：热血爽文快刀手 / 某某书专属分身" /></label>
+        <label class="field"><span>母题偏好（顿号或逗号分隔）</span><input id="alThemes" placeholder="如：逆袭打脸、杀伐果断、朝堂博弈" /></label>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;margin-top:6px">
+        <div style="padding:10px;border:1px solid var(--line);border-radius:8px">
+          <div style="font-weight:700;font-size:13px;margin-bottom:6px;color:#1fd1b2">🟣 灵魂 Soul · 价值与情绪</div>
+          <label class="field"><span>核心价值主轴</span><textarea id="alSoulValues" rows="2" placeholder="如：有仇当场报、绝不隔夜憋屈，底层逆袭靠狠劲与底牌"></textarea></label>
+          <label class="field"><span>情绪张力基调</span><textarea id="alSoulTone" rows="2" placeholder="如：凌厉、痛快、强压迫感后瞬时爆发"></textarea></label>
+        </div>
+        <div style="padding:10px;border:1px solid var(--line);border-radius:8px">
+          <div style="font-weight:700;font-size:13px;margin-bottom:6px;color:#7d8bff">🔵 大脑 Brain · 冲突与爽点</div>
+          <label class="field"><span>结构与节拍偏好</span><textarea id="alBrainStruct" rows="2" placeholder="如：三章一小高潮、开局300字必见冲突、章末必留硬钩子"></textarea></label>
+          <label class="field"><span>冲突推进模式</span><textarea id="alBrainConflict" rows="2" placeholder="如：反派层层加码嘲讽 → 主角亮出信息差/底牌 → 雷霆反杀夺取资源"></textarea></label>
+          <label class="field"><span>爽点兑现手法</span><textarea id="alBrainPayoff" rows="2" placeholder="如：当众反转、越级碾压、战利品即时落袋、旁观者震惊忌惮"></textarea></label>
+        </div>
+        <div style="padding:10px;border:1px solid var(--line);border-radius:8px">
+          <div style="font-weight:700;font-size:13px;margin-bottom:6px;color:#f59e0b">🟠 躯体 Body · 行文与对白</div>
+          <label class="field"><span>句式与行文习惯</span><textarea id="alBodyProse" rows="2" placeholder="如：短句为主，动词密集，少景物抒情，多动作与利益交锋"></textarea></label>
+          <label class="field"><span>人物对白习惯</span><textarea id="alBodyDialogue" rows="2" placeholder="如：台词简短带刺，潜台词直指利益与生死，不打官腔"></textarea></label>
+          <label class="field"><span>描写实锚重心</span><textarea id="alBodyDesc" rows="2" placeholder="如：聚焦代价、伤势、筹码数字与身份反差"></textarea></label>
+        </div>
+      </div>
+
+      <div style="margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span style="font-weight:600;font-size:13px">📈 分身实战习得经验（随本书写作沉淀的专属铁律）</span>
+          <span class="badge" id="alExpStats">累计 0 章 · 0 字</span>
+        </div>
+        <div id="alRulesList" style="margin:6px 0;font-size:12px;color:var(--muted)"></div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input id="alNewRule" placeholder="教给分身一条新经验（例如：主角在现代线审讯时喜欢先敲打桌子报对方黑料，不废话）" style="flex:1" />
+          <button class="btn tiny" id="alBtnAddRule">＋ 沉淀经验</button>
+        </div>
+      </div>
+
+      <div class="modal-foot" style="margin-top:12px">
+        <div class="mf-left">
+          <label class="chk" style="font-size:12px"><input type="checkbox" id="alSaveGlobal" checked /> 同时保存到全局写作分身库（供其他书复用）</label>
+        </div>
+        <div class="mf-right">
+          <button class="btn ghost" id="alCancel">取消</button>
+          <button class="btn primary" id="alSave">💾 绑定并更新本书写作规范 ▶</button>
+        </div>
+      </div>
+      <div class="modal-err" id="alErr"></div>
+    </div>
+  </div>
+
+  <!-- 样书 TXT 原文审阅弹窗 -->
+  <div class="modal hidden" id="corpusPreviewModal">
+    <div class="modal-card" style="width: 860px; max-width: 95vw;">
+      <button class="modal-close" id="cppClose" title="关闭 (Esc)">✕</button>
+      <h2 id="cppTitle">📖 样书语料审阅</h2>
+      <div id="cppMeta" class="modal-hint" style="margin-bottom:8px"></div>
+      <pre id="cppContent" style="max-height:60vh;overflow:auto;white-space:pre-wrap;padding:14px;border-radius:8px;border:1px solid var(--line);background:var(--bg-elev);font-size:14px;line-height:1.75"></pre>
+      <div class="modal-foot" style="margin-top:10px">
+        <div class="mf-left"><button class="btn ghost" id="cppBtnClose">关闭</button></div>
+        <div class="mf-right">
+          <button class="btn" id="cppBtnToggleApprove">⭐ 标记为学习对象</button>
+          <button class="btn primary" id="cppBtnApply">🎯 一键让目标作品学习此书（挂范本 + 提炼写作分身）</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js"></script>
+  <script src="app.js?v=2.3.0"></script>
 </body>
 </html>

@@ -6,8 +6,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { lastChapterTail } from './contextpack.mjs';
+import { CONFIG_DIR } from './paths.mjs';
 
 const ALTER_REL = path.join('.studio', 'alter_persona.json');
+const GLOBAL_ALTERS_FILE = path.join(CONFIG_DIR, 'global_alters.json');
 
 export const PRESET_ALTERS = {
   shuangwen_blade: {
@@ -105,11 +107,12 @@ export function loadBookAlter(bookDir) {
 
 export function saveBookAlter(bookDir, alterInput) {
   if (!bookDir) throw new Error('bookDir 不能为空');
+  const globals = loadGlobalAlters();
   let resolved = alterInput;
-  if (typeof alterInput === 'string' && PRESET_ALTERS[alterInput]) {
-    resolved = { ...PRESET_ALTERS[alterInput] };
-  } else if (alterInput && alterInput.presetId && PRESET_ALTERS[alterInput.presetId]) {
-    const base = PRESET_ALTERS[alterInput.presetId];
+  if (typeof alterInput === 'string' && globals[alterInput]) {
+    resolved = { ...globals[alterInput] };
+  } else if (alterInput && alterInput.presetId && globals[alterInput.presetId]) {
+    const base = globals[alterInput.presetId];
     resolved = {
       ...base,
       ...alterInput,
@@ -311,4 +314,121 @@ export function applySimulatedBranchToOutline(book, branch, volNum = 1) {
   const block = `\n\n<!-- 剧情推演采纳分支：${branch.title || branch.id} (${new Date().toISOString().slice(0, 10)}) -->\n` + newRows.join('\n') + '\n';
   fs.writeFileSync(fullPath, existing.replace(/\s*$/, '') + block, 'utf8');
   return { file: path.join('outlines', targetFile), addedBeats: newRows.length };
+}
+
+// —— 全局写作分身库（内置 4 大流派预设 + 作者从样书/语料训练沉淀的自定义分身）——
+export function loadGlobalAlters() {
+  let custom = {};
+  try {
+    if (fs.existsSync(GLOBAL_ALTERS_FILE)) {
+      custom = JSON.parse(fs.readFileSync(GLOBAL_ALTERS_FILE, 'utf8')) || {};
+    }
+  } catch { custom = {}; }
+  return { ...PRESET_ALTERS, ...custom };
+}
+
+export function saveGlobalAlter(alterObj) {
+  if (!alterObj || !alterObj.name) throw new Error('分身名称不能为空');
+  let custom = {};
+  try {
+    if (fs.existsSync(GLOBAL_ALTERS_FILE)) {
+      custom = JSON.parse(fs.readFileSync(GLOBAL_ALTERS_FILE, 'utf8')) || {};
+    }
+  } catch { custom = {}; }
+  const id = alterObj.id && alterObj.id !== 'custom_alter'
+    ? String(alterObj.id).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_')
+    : 'alter_' + Date.now().toString(36);
+  const entry = {
+    id,
+    name: String(alterObj.name).trim(),
+    sourceBook: alterObj.sourceBook || '',
+    soul: {
+      coreValues: alterObj.soul?.coreValues || '',
+      emotionalTone: alterObj.soul?.emotionalTone || '',
+      themes: Array.isArray(alterObj.soul?.themes) ? alterObj.soul.themes : String(alterObj.soul?.themes || '').split(/[、，,]/).map(s => s.trim()).filter(Boolean),
+    },
+    brain: {
+      structurePreference: alterObj.brain?.structurePreference || '',
+      conflictPattern: alterObj.brain?.conflictPattern || '',
+      satisfactionDesign: alterObj.brain?.satisfactionDesign || '',
+    },
+    body: {
+      proseStyle: alterObj.body?.proseStyle || '',
+      dialogueHabit: alterObj.body?.dialogueHabit || '',
+      descriptionPreference: alterObj.body?.descriptionPreference || '',
+    },
+    experience: alterObj.experience || { totalChapters: 0, totalWords: 0, learnedRules: [] },
+    isCustom: true,
+    updatedAt: new Date().toISOString(),
+  };
+  custom[id] = entry;
+  fs.mkdirSync(path.dirname(GLOBAL_ALTERS_FILE), { recursive: true });
+  fs.writeFileSync(GLOBAL_ALTERS_FILE, JSON.stringify(custom, null, 2), 'utf8');
+  return entry;
+}
+
+export function deleteGlobalAlter(id) {
+  if (PRESET_ALTERS[id]) throw new Error('内置预设分身不可删除');
+  let custom = {};
+  try {
+    if (fs.existsSync(GLOBAL_ALTERS_FILE)) {
+      custom = JSON.parse(fs.readFileSync(GLOBAL_ALTERS_FILE, 'utf8')) || {};
+    }
+  } catch { custom = {}; }
+  delete custom[id];
+  fs.writeFileSync(GLOBAL_ALTERS_FILE, JSON.stringify(custom, null, 2), 'utf8');
+  return { ok: true, id };
+}
+
+export function extractAlterFromSamplePrompt({ sampleText, sourceTitle = '', genre = '' }) {
+  const snippet = String(sampleText || '').slice(0, 9000);
+  return [
+    '你是资深网文主编与文风解构专家。请深度剖析下面的【样书正文】，提炼出这位作者的「三维写作分身（StoryAlter：Soul 灵魂 / Brain 大脑 / Body 躯体）」，供 AI 在创作新书时100%复刻其叙事灵魂、冲突节拍与行文手感（只学写法与爽点机制，不抄原书专有名词）。',
+    sourceTitle ? `样书来源：《${sourceTitle}》` : '',
+    genre ? `题材参考：${genre}` : '',
+    '',
+    '请严格输出以下 JSON 格式（不要输出任何多余解释）：',
+    '```json',
+    '{',
+    `  "name": "${sourceTitle ? sourceTitle.slice(0, 12) + '·专属分身' : '名家拆书分身'}",`,
+    '  "soul": {',
+    '    "coreValues": "一句话概括主角处世哲学与核心价值主轴（如：有仇当场报、利益算计到骨子里、外冷内热护短）",',
+    '    "emotionalTone": "叙事整体情绪张力与基调（如：冷峻紧绷、市井诙谐、杀伐果断）",',
+    '    "themes": ["核心母题1", "核心母题2", "核心母题3"]',
+    '  },',
+    '  "brain": {',
+    '    "structurePreference": "章节开合与悬念节拍（如：开篇直入冲突、三段式反转、章末必留硬钩子）",',
+    '    "conflictPattern": "矛盾升级与破局套路（如：反派轻视立靶 → 主角亮底牌降维反杀 → 顺手收割筹码）",',
+    '    "satisfactionDesign": "爽点兑现的具体手法（如：借旁观者视角衬托、账面数字暴涨、杀人诛心）"',
+    '  },',
+    '  "body": {',
+    '    "proseStyle": "句式长短、换行节奏、动词密度与口语度特征",',
+    '    "dialogueHabit": "人物台词风格、潜台词留白、口癖或机锋特点",',
+    '    "descriptionPreference": "最擅长描写的实锚（如：器物细节、微表情、身份反差、身体感官）"',
+    '  }',
+    '}',
+    '```',
+    '',
+    '【样书正文】',
+    snippet,
+  ].filter(Boolean).join('\n');
+}
+
+export function parseAlterJson(rawOutput, fallbackTitle = '样书分身') {
+  const s = String(rawOutput || '');
+  const m = s.match(/```(?:json)?\s*([\s\S]*?)```/i) || s.match(/(\{[\s\S]*\})/);
+  if (!m) return null;
+  try {
+    const obj = JSON.parse(m[1]);
+    const data = obj.alterPersona || obj;
+    return {
+      name: data.name || `${fallbackTitle}·写作分身`,
+      sourceBook: fallbackTitle,
+      soul: data.soul || {},
+      brain: data.brain || {},
+      body: data.body || {},
+    };
+  } catch {
+    return null;
+  }
 }

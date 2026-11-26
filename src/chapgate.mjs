@@ -39,6 +39,10 @@ const SLOP_RULES = [
   ['解释腔', /某种程度上|不得不说[，,。！]|值得一提的是|显而易见|总而言之|换句话说|不知为何|莫名地|一丝不易察觉|有那么一瞬间/g],
   ['万能比喻', /(仿佛|宛若|宛如|犹如)[^。！？]{0,20}(深潭|寒冰|利刃|刀子|野兽|狼|虎|鹰|雕塑|凝固|静止|安静)/g],
   ['脸谱化', /面色(阴狠|狰狞|铁青)如?[狼虎鬼]?|阴狠如狼|狞笑一声|嘿嘿一笑/g],
+  // 2026-11-25 融合 lieflat-less-ai-tone 270对同题实测结论：
+  // 抓真正高区分度的欧化翻译腔（当…时，）、段首论文连接词（然而，/与此同时，/因此，/此外，）、前置话题壳（对于…来说）。
+  // 注意：遵循「卡密度不卡单次」，单章 ≥2 处才判 severity='bad'，单处只作 note，绝不逼出反向机械感。
+  ['欧化与连接词', /(?:^|\n)\s{0,3}(?:然而|与此同时|总而言之|换言之)[，,]|当[^，。！？\n]{2,18}(?<!的时候|年|夜|日|天|初|时|场|堂|街|面)时，|对于[^，。！？\n]{2,12}来说[，,]/g],
 ];
 
 // opts.ignoreKinds：按类关（历史书通常要关「转场套话」里的文言词）
@@ -201,7 +205,7 @@ const cvOf = (arr) => {
 //   **给下限，它就冲天花板。** 所以 minLongSent 必须配一个 maxVeryLong。
 //   基线：001–007 里 >80 字的句子共 0–1 个／章，>120 字的【一个都没有】；
 //   008 一章就有 8 个 >80、5 个 >120（最长 136 字）——手机上读一句 130 字是窒息的。
-export function scanRhythm(text, { minParaCV = 0.5, minSentCV = 0.55, minLongSent = 0.2, dialogueHeavy = 0.4, sentCVRelaxed = 0.5, maxVeryLong = 2, veryLongAt = 80, maxStaccato = 4, maxConsecStaccato = 1 } = {}) {
+export function scanRhythm(text, { minParaCV = 0.45, minSentCV = 0.46, minLongSent = 0.18, dialogueHeavy = 0.4, sentCVRelaxed = 0.42, maxVeryLong = 2, veryLongAt = 80, maxStaccato = 4, maxConsecStaccato = 1 } = {}) {
   const t = String(text || '');
   const paras = t.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   if (paras.length < 10) return { problems: [], ok: true, paraCV: 0, sentCV: 0, longSentRatio: 0, dlgRatio: 0, staccatoCount: 0, consecStaccato: 0 };

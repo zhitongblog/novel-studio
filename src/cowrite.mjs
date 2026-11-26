@@ -31,6 +31,7 @@ import { paragraphHealth, reflowInstruction } from './craft.mjs';
 // 停用的 craftSpec + STYLE_GUARD + openingSection 夹带的是纯文学审美，对网文条条减分，
 // 保留在 craft.mjs 里备查但不再注入。
 import { voicePrint } from './voiceprint.mjs';
+import { buildAlterPromptSection } from './alter.mjs';
 // 机制层：连续性铁律 + 节奏 + 输出规则 + 动笔前的私有约束卡。
 // 判据是"换本书还成不成立"——成立才写死在代码里；审美一律交给范本。
 import { mechanics, auditPrompt, fixPrompt } from './continuity.mjs';   // 单章级感情线尺度（可临时覆盖全书档位）
@@ -287,6 +288,7 @@ export async function writeChapterFromIntent({ book, model, intent, useLastEndin
     useLastEnding && last.tail ? `【上一章结尾（衔接用，保持文笔与语气连续）】：\n${last.tail}\n` : '',
     names.length ? `【近期已用章名（新章名别与这些重复）】：${names.slice(-30).join('、')}\n` : '',
     voicePrint(book),            // 文风全部来自范本+手法卡，代码不夹带审美
+    book?.dir ? buildAlterPromptSection(book.dir) : '', // 专属写作分身（Soul/Brain/Body）
     styleSlantSection(slant),    // 侧重是作者本章主动选的，属于"作者的意图"，不是"我的审美"
     chapterRomanceSection(book.romance, romance),
     mechanics({ card: true }),
