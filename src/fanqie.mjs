@@ -4773,14 +4773,17 @@ export async function updateFanqieBookInfo({ bookId, profilePath, title = '', in
           log(`${what} ${tool} 失败（${String(e.message || e).replace(/\s+/g, ' ').slice(0, 80)}），换 focus+typeText`, 'warn');
         }
       }
-      // ② 聚焦到真实可见元素 → clearFocused → typeText（真实键盘事件，能进 React 表单状态）
+      // ② 聚焦到真实可见元素 → execCommand 清空（后台窗口也有效）+ clearFocused → typeText（真实键盘事件，能进 React 表单状态）
       try {
-        await client.evaluate(`(function(){var e=${el};if(e){e.scrollIntoView({block:'center'});e.focus();e.click();}})()`);
-        await client.sleep(200);
-        await client.clearFocused();
-        await client.sleep(200);
+        await client.evaluate(`(function(){var e=${el};if(e){e.scrollIntoView({block:'center'});e.focus();e.click();if(e.select)e.select();try{document.execCommand('selectAll',false);document.execCommand('delete',false);}catch(err){}}})()`);
+        await client.sleep(250);
+        const rem = await readBack();
+        if (rem.length > 0) {
+          await client.clearFocused();
+          await client.sleep(200);
+        }
         await client.typeText(text);
-        await client.sleep(600);
+        await client.sleep(700);
         if (await readBack() === text) return true;
       } catch {}
       // ③ 最后兜底 setter 注入
