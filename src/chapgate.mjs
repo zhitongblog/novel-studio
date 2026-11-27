@@ -539,7 +539,123 @@ export function scanAiFormatTraces(text) {
   return { stars, endTags, mdHeadings, problems, ok: problems.length === 0 };
 }
 
-export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false, oralSet, oralMarkers, minPerK, hardFloor, maxShare, minChars = 0, forbidFinale = false } = {}) {
+// ── 七、番茄官方防低质红线闸（对齐 2026 年 10–11 月低质治理公告与官方课堂） ─────────
+// 规则来源：src/fanqie_rules.mjs 定期同步的番茄《低质治理公告》与《投稿前必查/必看》系列。
+// 遵循「卡密度、防误伤」原则：只在命中明确机械/AI 阈值时判 bad，轻微倾向放 notes。
+export function scanFanqieRedlines(text, {
+  maxNotBut = 3,
+  maxEmDash = 5,
+  maxBareDialogueRun = 5,
+  maxParamListRun = 4,
+  maxAnaphoraRun = 3,
+} = {}) {
+  const t = String(text || '').replace(/\r\n/g, '\n');
+  const lines = t.split('\n').map(s => s.trim()).filter(Boolean);
+  const problems = [];
+  const notes = [];
+
+  // 1) 「不是……而是…… / 不是……是……」固定关联词高频复读
+  const notButHits = t.match(/不是[^，。！？\n]{1,18}[，,]?\s*(?:而是|是)[^，。！？\n]{1,22}/g) || [];
+  if (notButHits.length > maxNotBut) {
+    problems.push(`固定关联词「不是…而是/是…」单章出现 ${notButHits.length} 处（上限 ${maxNotBut}，番茄 10 月治理重点打击的句式呆板指纹）`);
+  } else if (notButHits.length === maxNotBut) {
+    notes.push(`「不是…而是/是…」已达 ${notButHits.length} 处，注意控制密度`);
+  }
+
+  // 2) 破折号「——」滥用
+  const emDashCount = (t.match(/——/g) || []).length;
+  if (emDashCount > maxEmDash) {
+    problems.push(`破折号「——」滥用 ${emDashCount} 处（上限 ${maxEmDash}，普通停顿请换回逗号或句号）`);
+  }
+
+  // 3) 非法装饰符号（△★♥♛√ 等）
+  const decorHits = t.match(/[△★♥♛√◆●▲■☆♡♦♣♠✦✧]/g) || [];
+  if (decorHits.length > 0) {
+    problems.push(`正文含非常规装饰符号 ${decorHits.length} 处（${[...new Set(decorHits)].slice(0, 5).join(' ')}，番茄排版规范禁用）`);
+  }
+
+  // 4) 光秃秃短对话乒乓堆砌（连续 N 段纯台词无任何动作/神态/场景穿插）
+  let maxDlgRun = 0, curDlgRun = 0;
+  for (const l of lines) {
+    const isBareShortDlg = /^[“「『"][^”」』"]{1,26}[”」』"]$/.test(l);
+    if (isBareShortDlg) {
+      curDlgRun++;
+      if (curDlgRun > maxDlgRun) maxDlgRun = curDlgRun;
+    } else {
+      curDlgRun = 0;
+    }
+  }
+  if (maxDlgRun >= maxBareDialogueRun) {
+    problems.push(`纯台词短对话连续堆砌 ${maxDlgRun} 段（上限 ${maxBareDialogueRun - 1}，缺少动作、神态与场景穿插）`);
+  }
+
+  // 5) 参数清单式工整罗列（连续 N 行「项名：数值」，排除系统面板【】）
+  let maxParamRun = 0, curParamRun = 0;
+  for (const l of lines) {
+    const isParamLine = /^[\u4e00-\u9fff]{2,6}[：:][^\n]{1,36}$/.test(l) && !/[“”「」『』【】]/.test(l);
+    if (isParamLine) {
+      curParamRun++;
+      if (curParamRun > maxParamRun) maxParamRun = curParamRun;
+    } else {
+      curParamRun = 0;
+    }
+  }
+  if (maxParamRun >= maxParamListRun) {
+    problems.push(`参数清单式工整罗列连续 ${maxParamRun} 行（请将设定拆进人物动作与对话，避免说明书体）`);
+  }
+
+  // 6) 连续三段及以上同句首排比（如「一方身穿……」「有创造……」连排）
+  let maxStemRun = 1, curStemRun = 1, prevStem = '', badStem = '';
+  for (const l of lines) {
+    if (/^[“「『"【]/.test(l)) { curStemRun = 1; prevStem = ''; continue; }
+    const stem = (l.match(/^[\u4e00-\u9fff]{3}/) || [''])[0];
+    if (stem && stem === prevStem) {
+      curStemRun++;
+      if (curStemRun > maxStemRun) { maxStemRun = curStemRun; badStem = stem; }
+    } else {
+      curStemRun = 1;
+      prevStem = stem;
+    }
+  }
+  if (maxStemRun >= maxAnaphoraRun) {
+    problems.push(`连续 ${maxStemRun} 段同句首排比（「${badStem}…」，番茄官方要求连续三段及以上排比直接删改）`);
+  }
+
+  // 7) 乱分章：章节末尾在逗号/分号/冒号/破折号处半句截断
+  const lastLine = lines[lines.length - 1] || '';
+  const brokenEnding = /[，、；：—]$/.test(lastLine);
+  if (brokenEnding) {
+    problems.push(`章末疑似半句截断（结尾字符为「${lastLine.slice(-2)}」，番茄排版规范禁止强行乱分章）`);
+  }
+
+  // 8) 章尾无意义上帝视角哲理升华（典型 AI 假大空收尾）
+  const tail = t.slice(-260);
+  const moralHit = tail.match(/强者之路注定|或许这就是命运的磨砺|在这个弱肉强食的世界[，,]力量才是唯一的真理|成长[则就]意味着必须舍弃|命运的齿轮[悄然开始]*转动/);
+  if (moralHit) {
+    problems.push(`章尾出现无意义哲理升华（「${moralHit[0]}」，请改用具体动作或悬念钩子收束）`);
+  }
+
+  // 9) 假精确比喻（如「弧度为2mm的微笑」等典型 AI 怪异精确度）
+  const fakePrecision = t.match(/弧度[为有约]?\d+(?:\.\d+)?\s*(?:mm|毫米|度)的(?:微)?笑/);
+  if (fakePrecision) {
+    problems.push(`描写用力过猛/假精确比喻（「${fakePrecision[0]}」，请换用自然具体神态）`);
+  }
+
+  return {
+    notButCount: notButHits.length,
+    emDashCount,
+    decorCount: decorHits.length,
+    maxDlgRun,
+    maxParamRun,
+    maxStemRun,
+    brokenEnding,
+    problems,
+    notes,
+    ok: problems.length === 0,
+  };
+}
+
+export function gateChapter({ text, prevText = '', history = '', names = [], banned = [], slopOff = {}, expoOff = false, hookOff = false, stereoOff = false, rhythmOff = false, registerOff = false, fanqieOff = false, oralSet, oralMarkers, minPerK, hardFloor, maxShare, minChars = 0, forbidFinale = false } = {}) {
   const slop = scanSlop(text, slopOff);
   const stereo = stereoOff ? { problems: [], ok: true, said: 0, mood: 0, dialogues: 0, ratio: 0 } : scanStereotype(text);
   const rhythm = rhythmOff ? { problems: [], ok: true, paraCV: 0, longSentRatio: 0, oneSentRatio: 0 } : scanRhythm(text);
@@ -550,6 +666,7 @@ export function gateChapter({ text, prevText = '', history = '', names = [], ban
   const expo = expoOff ? { hits: [], count: 0 } : scanExposition(text);
   const hook = (prevText && !hookOff) ? checkHookContinuity(prevText, text, names, { history }) : { raised: [], dropped: [], late: [], ok: true };
   const aiFormat = scanAiFormatTraces(text);
+  const fanqie = fanqieOff ? { problems: [], notes: [], ok: true } : scanFanqieRedlines(text);
   // problems = 必须改的；notes = 看一眼就行的（单处套话属于此类，见 scanSlop 顶部判据一）
   const problems = [], notes = [];
   if (minChars > 0) {
@@ -573,7 +690,9 @@ export function gateChapter({ text, prevText = '', history = '', names = [], ban
   for (const p of stereo.problems) problems.push(p);
   for (const p of rhythm.problems) problems.push(p);
   for (const p of register.problems) problems.push(p);
-  return { slop, banned: ban, exposition: expo, hook, stereo, rhythm, register, aiFormat, ok: problems.length === 0, problems, notes };
+  for (const p of fanqie.problems) problems.push(p);
+  for (const n of (fanqie.notes || [])) notes.push(n);
+  return { slop, banned: ban, exposition: expo, hook, stereo, rhythm, register, aiFormat, fanqie, ok: problems.length === 0, problems, notes };
 }
 
 // ── 跨章专名一致性：同一个角色有没有被写成两个名字 ──────────────────────
@@ -679,6 +798,7 @@ export function chapGateBatch(bookDir, from = 1, to = 0, onLog = () => {}, { for
       stereoOff: Boolean(conf.stereoOff),
       rhythmOff: Boolean(conf.rhythmOff),
       registerOff: Boolean(conf.registerOff),
+      fanqieOff: Boolean(conf.fanqieOff),
       oralSet: conf.oralSet,
       oralMarkers: conf.oralMarkers,
       minPerK: th.minPerK ?? conf.minPerK,

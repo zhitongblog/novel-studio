@@ -61,10 +61,12 @@ export function cleanAiTraces(raw) {
   s = s.replace(/^\s*[（(【［\-—]*\s*(本章完|全章完|本集完|未完待续)\s*[）)】］\-—。！!]*\s*$/gm, '');
   s = s.replace(/[（(【［]\s*(本章完|全章完|本集完|未完待续)\s*[）)】］]\s*$/g, '');
 
-  // 6. 清除全部 * 号 / ＊ 号（含 **加粗**、*斜体* 及散落星号）与行内 Markdown 符号（`、~~、__）
+  // 6. 清除全部 * 号 / ＊ 号（含 **加粗**、*斜体* 及散落星号）、行内 Markdown 符号（`、~~、__）与番茄禁用的非常规装饰符
   const stars = (s.match(/[*＊]+/g) || []).length;
   const inlineMd = (s.match(/`|~~|__/g) || []).length;
+  const decorSyms = (s.match(/[△★♥♛√◆●▲■☆♡♦♣♠✦✧]+/g) || []).length;
   s = s.replace(/[*＊]+/g, '');
+  s = s.replace(/[△★♥♛√◆●▲■☆♡♦♣♠✦✧]+/g, '');
   s = s.replace(/`([^`\n]+)`/g, '$1').replace(/`/g, '');
   s = s.replace(/~~([^~\n]+)~~/g, '$1').replace(/__([^_\n]+)__/g, '$1');
 
@@ -87,7 +89,7 @@ export function cleanAiTraces(raw) {
     .replace(/\n{3,}/g, '\n\n')
     .trim() + '\n';
 
-  const total = stars + codeFences + headings + dividers + endTags + inlineMd + slopPhrases + stackedPunct;
+  const total = stars + codeFences + headings + dividers + endTags + inlineMd + decorSyms + slopPhrases + stackedPunct;
   const changed = s.trim() !== orig.trim();
   return {
     text: s,

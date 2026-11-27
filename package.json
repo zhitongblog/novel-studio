@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node bin/novel.mjs",
     "doctor": "node bin/novel.mjs doctor",
+    "learn-fanqie": "node bin/novel.mjs learn-fanqie",
     "mcp": "node bin/novel.mjs mcp",
     "bump": "node bin/bump.mjs",
     "test": "node --test \"test/*.test.mjs\""

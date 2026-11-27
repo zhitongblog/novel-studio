@@ -58,10 +58,11 @@ export async function runCli(argv) {
     case 'health': return healthCmd(f, cfg);
     case 'simulate': return simulateCmd(f, cfg);
     case 'clone': return cloneCmd(f, cfg);
+    case 'learn-fanqie': return learnFanqieCmd(f, cfg);
     case 'reference': return reference();
     default:
       console.log('未知命令：' + cmd);
-      console.log('可用：doctor | models | local [import] | book new|list | write | stateless | ledger | alter | state | payoffs | patch | health | simulate | clone | sessions | send | watch | stop | config | traffic | reference | mcp | tui');
+      console.log('可用：doctor | models | local [import] | book new|list | write | stateless | ledger | alter | state | payoffs | patch | health | simulate | clone | learn-fanqie | sessions | send | watch | stop | config | traffic | reference | mcp | tui');
       process.exitCode = 1;
   }
 }
@@ -1005,4 +1006,24 @@ async function cloneCmd(f) {
     targetTitle: f.title ? String(f.title) : '',
     targetGenre: f.genre ? String(f.genre) : '',
   }));
+}
+
+async function learnFanqieCmd(f) {
+  const { syncFanqieRules, loadFanqieRulesStatus } = await import('./fanqie_rules.mjs');
+  if (f.status) {
+    const st = loadFanqieRulesStatus();
+    console.log(c.bold('\n📚 番茄官方规则知识库状态\n') + hr());
+    console.log(`  最近同步：${st.updatedAt || '尚未同步'}${st.staleDays != null ? `（距今 ${st.staleDays} 天）` : ''}`);
+    console.log(`  累计学习：${st.totalArticles} 篇（规范 ${st.counts.compliance}｜治理处罚 ${st.counts.governance}｜签约节奏 ${st.counts.policy}｜官方课堂 ${st.counts.craft}）`);
+    console.log(`  摘要文件：${st.digestPath}\n`);
+    return;
+  }
+  const r = await syncFanqieRules({
+    profilePath: f.profile ? String(f.profile) : '',
+    maxPages: f.pages ? Number(f.pages) : 2,
+    force: Boolean(f.force),
+    onLog: (e) => logLine(e.level || 'info', e.msg),
+  });
+  console.log(c.bold(`\n✅ 番茄规则同步完成：共 ${r.total} 篇（新增 ${r.newCount} 篇 / 刷新 ${r.fetched} 篇）`));
+  console.log(c.gray(`   知识库摘要：${r.digestPath}\n`));
 }

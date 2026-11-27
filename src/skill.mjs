@@ -9,6 +9,7 @@ import { romanceVoice, ROMANCE_REDLINE } from './romance.mjs';
 import { ORAL_MARKER_SETS } from './chapgate.mjs';
 import { oralPromptSection } from './oralgate.mjs';
 import { buildAlterPromptSection } from './alter.mjs';
+import { fanqieRulesPromptSection } from './fanqie_rules.mjs';
 
 export const SKILL_NAME = 'longform-webnovel-writer';
 
@@ -470,6 +471,8 @@ ${bannedSection}## 反 AI 味 / 拟人化标准（最高优先级，逐章自检
 - 绝大多数句子要**连成正常段落**（一段 2–5 句、有起承）。短句成段/单句成段只在真正要"顿一下"的关键处**偶尔**用，不是默认排版。
 - **单章正文 3000–3600 字**。若一章超过 6000 字、或行数远多于句数，就是把内容碎成了流水账排版，必须压回正常段落。
 - **反"自我模仿漂移"（关键）**：参考"最近几章"时【只学语气基线】，**绝不复制或放大前文的排版怪癖**（过多「……」、逐句换行）。排版密度以【本书最初几章】为准，**不向最近几章的怪癖看齐**——否则会一批比一批夸张，滚成雪球。
+
+${fanqieRulesPromptSection()}
 
 **逐章自检（写完每章扫一遍）**：①句长是否过于均匀→打散；①b **短句(≤10字)是不是超过四成、整章有没有二十五字以上的长句**→有就补长句、并句；①c **数一数本章出现多少个数目，平均不足两百字一个就删到只剩关键的那几个**；①d **「把…往…一X」这类句式超过三次→换写法**；②有没有解释性套话/AI 套话→删；③有没有翻译腔现代词→换成合时代口语；④实锚密度够不够；⑤段尾是不是总在点题；⑥重复词/重复句式；⑦**扫一遍套句黑名单**，命中就换成具体动作/物件/后果；${bannedCheck}⑧**数本章「……」次数(>8 即判排版事故)、看行数是否远多于句数**——命中就把碎句合并回正常段落、删掉多余「……」再定稿。
 `}
