@@ -2039,11 +2039,16 @@ class FanqiePublisher {
       if (numMatch) chapterNumber = numMatch[1] || numMatch[2] || '';
     }
 
-    let pureTitle = chapter.title;
-    pureTitle = pureTitle.replace(/^第\d+章[\s\.\-\_:：]*/, '');
-    pureTitle = pureTitle.replace(/^\d+[\.\-\_\s:：]+/, '');
-    pureTitle = pureTitle.replace(/^\d+(?=[第一二三四五六七八九十一-龥])/, '');
-    pureTitle = pureTitle.replace(/^Chapter\s*\d+[\s\.\-\_:：]*/i, '');
+    let pureTitle = String(chapter.title || '').trim();
+    if (/^第\d+章/.test(pureTitle)) {
+      pureTitle = pureTitle.replace(/^第\d+章[\s\.\-\_:：]*/, '');
+    } else if (/^Chapter\s*\d+/i.test(pureTitle)) {
+      pureTitle = pureTitle.replace(/^Chapter\s*\d+[\s\.\-\_:：]*/i, '');
+    } else if (/^\d+[\.\-\_\s:：]+/.test(pureTitle)) {
+      pureTitle = pureTitle.replace(/^\d+[\.\-\_\s:：]+/, '');
+    } else if (/^\d+(?=[一-龥])/.test(pureTitle) && !/^\d+(?:岁|年|月|日|天|时|分|秒|万|亿|千|百|块|元|角|毛|斤|两|克|米|里|寸|尺|步|层|楼|号|度|倍|人|个|次|成|折|平|㎡)/.test(pureTitle)) {
+      pureTitle = pureTitle.replace(/^\d+(?=[一-龥])/, '');
+    }
     pureTitle = pureTitle.trim();
     // 番茄限制「第 + 章号 + 纯标题」总计不超过 30 字（3位数章号时纯标题最多 26 字）
     const maxPureLen = Math.max(15, 29 - String(chapterNumber || '999').length);
